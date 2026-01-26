@@ -1,0 +1,10 @@
+/* Light theme CSS variables (reserved for future fine-grained theming) */
+:root[data-theme='light'] {
+  --df-surface: #f9fafb;
+  --df-surface-elevated: #ffffff;
+  --df-border: #e5e7eb;
+  --df-text-primary: #020617;
+  --df-text-secondary: #4b5563;
+}
+
+

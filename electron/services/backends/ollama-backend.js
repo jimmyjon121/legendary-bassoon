@@ -1,0 +1,334 @@
+/**
+ * Ollama Backend
+ * Wrapper for Ollama API (supports CUDA and CPU)
+ */
+
+const BaseBackend = require('./base-backend');
+const http = require('http');
+const https = require('https');
+
+class OllamaBackend extends BaseBackend {
+  constructor(config = {}) {
+    super({
+      id: config.useCuda ? 'ollama-cuda' : 'ollama-cpu',
+      name: config.useCuda ? 'Ollama (CUDA)' : 'Ollama (CPU)',
+      type: 'ollama',
+      endpoint: config.endpoint || 'http://localhost:11434',
+      device: config.device || (config.useCuda ? 'NVIDIA GPU' : 'CPU'),
+      priority: config.useCuda ? 1 : 99,
+      capabilities: {
+        streaming: true,
+        vision: true,
+        embeddings: true,
+        function_calling: false
+      },
+      ...config
+    });
+
+    this.useCuda = config.useCuda || false;
+    this.activeRequests = new Map();
+  }
+
+  /**
+   * Make HTTP request to Ollama
+   */
+  _makeRequest(path, options = {}) {
+    return new Promise((resolve, reject) => {
+      const url = new URL(this.endpoint);
+      const protocol = url.protocol === 'https:' ? https : http;
+
+      const reqOptions = {
+        hostname: url.hostname,
+        port: url.port || (url.protocol === 'https:' ? 443 : 80),
+        path: path,
+        method: options.method || 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          ...options.headers
+        },
+        timeout: options.timeout || 30000
+      };
+
+      const req = protocol.request(reqOptions, (res) => {
+        let data = '';
+        res.on('data', chunk => data += chunk);
+        res.on('end', () => {
+          try {
+            resolve({ status: res.statusCode, data: JSON.parse(data) });
+          } catch {
+            resolve({ status: res.statusCode, data });
+          }
+        });
+      });
+
+      req.on('error', reject);
+      req.on('timeout', () => {
+        req.destroy();
+        reject(new Error('Request timeout'));
+      });
+
+      if (options.body) {
+        req.write(JSON.stringify(options.body));
+      }
+
+      req.end();
+    });
+  }
+
+  /**
+   * Stream request to Ollama
+   */
+  _streamRequest(path, body, onChunk, requestId) {
+    return new Promise((resolve, reject) => {
+      const url = new URL(this.endpoint);
+      const protocol = url.protocol === 'https:' ? https : http;
+
+      const reqOptions = {
+        hostname: url.hostname,
+        port: url.port || (url.protocol === 'https:' ? 443 : 80),
+        path: path,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        }
+      };
+
+      const req = protocol.request(reqOptions, (res) => {
+        res.on('data', (chunk) => {
+          const lines = chunk.toString().split('\n').filter(line => line.trim());
+          for (const line of lines) {
+            try {
+              const parsed = JSON.parse(line);
+              onChunk(parsed);
+            } catch {
+              // Ignore parse errors for partial chunks
+            }
+          }
+        });
+
+        res.on('end', () => {
+          this.activeRequests.delete(requestId);
+          resolve();
+        });
+      });
+
+      req.on('error', (error) => {
+        this.activeRequests.delete(requestId);
+        reject(error);
+      });
+
+      // Store request for cancellation
+      if (requestId) {
+        this.activeRequests.set(requestId, req);
+      }
+
+      req.write(JSON.stringify(body));
+      req.end();
+    });
+  }
+
+  /**
+   * Check if Ollama is available
+   */
+  async checkHealth() {
+    try {
+      const response = await this._makeRequest('/api/tags', { timeout: 5000 });
+      
+      if (response.status === 200) {
+        this.setStatus('available');
+        return {
+          available: true,
+          status: 'online',
+          models: response.data?.models?.length || 0,
+          version: response.data?.version
+        };
+      } else {
+        this.setStatus('error');
+        return {
+          available: false,
+          status: 'error',
+          error: `HTTP ${response.status}`
+        };
+      }
+    } catch (error) {
+      this.setStatus('unavailable');
+      return {
+        available: false,
+        status: 'offline',
+        error: error.message
+      };
+    }
+  }
+
+  /**
+   * Generate a complete response
+   */
+  async generate(payload) {
+    try {
+      // Ensure GPU acceleration is requested
+      const options = {
+        num_gpu: this.useCuda ? -1 : 0, // -1 = all layers on GPU
+        ...payload.options
+      };
+      
+      const response = await this._makeRequest('/api/generate', {
+        method: 'POST',
+        body: {
+          model: payload.model,
+          prompt: payload.prompt,
+          system: payload.system,
+          stream: false,
+          options
+        },
+        timeout: 300000 // 5 minutes for generation
+      });
+
+      return response.data;
+    } catch (error) {
+      throw new Error(`Ollama generation failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Stream a response
+   */
+  async stream(payload, onChunk) {
+    const requestId = `ollama-${Date.now()}`;
+    
+    // Ensure GPU acceleration is requested
+    const options = {
+      num_gpu: this.useCuda ? -1 : 0, // -1 = all layers on GPU
+      ...payload.options
+    };
+    
+    try {
+      await this._streamRequest(
+        '/api/generate',
+        {
+          model: payload.model,
+          prompt: payload.prompt,
+          system: payload.system,
+          stream: true,
+          options
+        },
+        onChunk,
+        requestId
+      );
+      
+      return { requestId };
+    } catch (error) {
+      throw new Error(`Ollama streaming failed: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get available models
+   */
+  async getModels() {
+    try {
+      const response = await this._makeRequest('/api/tags');
+      return response.data?.models || [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Pull/load a model
+   */
+  async loadModel(modelName) {
+    try {
+      const response = await this._makeRequest('/api/pull', {
+        method: 'POST',
+        body: { name: modelName },
+        timeout: 600000 // 10 minutes for download
+      });
+      return response.data;
+    } catch (error) {
+      throw new Error(`Failed to pull model: ${error.message}`);
+    }
+  }
+
+  /**
+   * Warmup/preload a model into GPU memory
+   * This sends a minimal request to force Ollama to load the model
+   */
+  async warmupModel(modelName) {
+    console.log(`[OllamaBackend] Warming up model: ${modelName}`);
+    try {
+      // Send a minimal generation request to force model loading
+      const response = await this._makeRequest('/api/generate', {
+        method: 'POST',
+        body: {
+          model: modelName,
+          prompt: 'Hi',
+          stream: false,
+          options: {
+            num_gpu: this.useCuda ? -1 : 0, // Full GPU offload
+            num_predict: 1, // Only generate 1 token
+            num_ctx: 512, // Minimal context
+          }
+        },
+        timeout: 120000 // 2 minutes for initial load
+      });
+      
+      console.log(`[OllamaBackend] Model ${modelName} warmed up successfully`);
+      return { success: true, model: modelName };
+    } catch (error) {
+      console.error(`[OllamaBackend] Warmup failed:`, error.message);
+      return { success: false, error: error.message };
+    }
+  }
+
+  /**
+   * Get GPU memory info from Ollama
+   */
+  async getGpuInfo() {
+    try {
+      // Ollama doesn't have a direct GPU info endpoint, but we can check
+      // running models which shows GPU layer info
+      const response = await this._makeRequest('/api/ps', { timeout: 5000 });
+      return response.data;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Cancel an ongoing request
+   */
+  async cancel(requestId) {
+    const req = this.activeRequests.get(requestId);
+    if (req) {
+      req.destroy();
+      this.activeRequests.delete(requestId);
+      return { success: true };
+    }
+    return { success: false, error: 'Request not found' };
+  }
+
+  /**
+   * Estimate performance based on GPU/CPU
+   */
+  estimatePerformance(parameterCount) {
+    if (this.useCuda) {
+      // CUDA estimates (rough)
+      return {
+        tokensPerSecond: parameterCount < 7 ? 50 : parameterCount < 13 ? 30 : 15,
+        memoryRequired: parameterCount * 1.2, // GGUF is compressed
+        suitable: parameterCount < 30 // Most consumer GPUs can handle up to 30B
+      };
+    } else {
+      // CPU estimates
+      return {
+        tokensPerSecond: parameterCount < 7 ? 10 : parameterCount < 13 ? 5 : 2,
+        memoryRequired: parameterCount * 1.2,
+        suitable: true // CPU can always run, just slower
+      };
+    }
+  }
+}
+
+module.exports = OllamaBackend;
+
+

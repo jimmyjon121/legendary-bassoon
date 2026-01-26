@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="DevForge - AI-Powered Local Development Environment" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self' 'unsafe-inline' 'unsafe-eval' data: blob: ws: wss: http: https:; img-src 'self' data: blob: http: https:; script-src 'self' 'unsafe-inline' 'unsafe-eval' blob:; style-src 'self' 'unsafe-inline' https:; font-src 'self' data: https:; connect-src 'self' ws: wss: http: https: blob:;" />
+    <title>DevForge</title>
+    <!-- Critical: black background BEFORE any JS loads to prevent white flash -->
+    <style>
+      html, body, #root {
+        margin: 0;
+        padding: 0;
+        background: #000000 !important;
+        min-height: 100vh;
+        color: #f8f8fc;
+      }
+      /* Spinner animation for loading fallback */
+      @keyframes spin {
+        to { transform: rotate(360deg); }
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/main.jsx"></script>
+  </body>
+</html>
+
+
+
+
+
+
+
+
+
+
+

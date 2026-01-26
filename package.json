@@ -1,0 +1,125 @@
+{
+  "name": "devforge",
+  "version": "0.1.0",
+  "description": "Sovereign AI Development Environment - Local, Private, Unrestricted",
+  "main": "electron/main.js",
+  "author": "Christopher",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "npm run dev",
+    "predev": "node scripts/ensure-deps.js",
+    "dev": "concurrently \"npm run dev:vite\" \"npm run dev:electron\"",
+    "dev:vite": "vite",
+    "dev:electron": "wait-on http://localhost:5173 && electron .",
+    "prebuild": "node scripts/ensure-deps.js",
+    "build": "vite build && electron-builder",
+    "build:win": "vite build && electron-builder --win",
+    "build:mac": "vite build && electron-builder --mac",
+    "build:linux": "vite build && electron-builder --linux",
+    "preview": "vite preview",
+    "lint": "eslint src --ext .js,.jsx",
+    "ensure-deps": "node scripts/ensure-deps.js"
+  },
+  "dependencies": {
+    "@monaco-editor/react": "^4.7.0",
+    "@pnpm/npm-resolver": "^20.0.0",
+    "@react-three/drei": "^9.122.0",
+    "@react-three/fiber": "^8.18.0",
+    "@react-three/postprocessing": "^3.0.4",
+    "@tanstack/react-query": "^5.17.0",
+    "@tanstack/react-virtual": "^3.13.13",
+    "crypto-js": "^4.2.0",
+    "date-fns": "^3.3.1",
+    "dompurify": "^3.3.1",
+    "electron-store": "^8.1.0",
+    "electron-updater": "^6.1.0",
+    "framer-motion": "^12.23.25",
+    "gsap": "^3.14.2",
+    "highlight.js": "^11.9.0",
+    "lucide-react": "^0.323.0",
+    "mammoth": "^1.6.0",
+    "marked": "^12.0.0",
+    "monaco-editor": "^0.52.0",
+    "node-powershell": "^4.0.0",
+    "pdf-parse": "^1.1.1",
+    "puppeteer-core": "^24.32.0",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-resizable-panels": "^3.0.6",
+    "react-router-dom": "^6.22.0",
+    "reactflow": "^11.11.4",
+    "simple-git": "^3.30.0",
+    "sql.js": "^1.13.0",
+    "sudo-prompt": "^9.2.1",
+    "systeminformation": "^5.21.0",
+    "three": "^0.182.0",
+    "uuid": "^9.0.1",
+    "zustand": "^4.5.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.2.1",
+    "autoprefixer": "^10.4.17",
+    "concurrently": "^8.2.2",
+    "electron": "^28.2.0",
+    "electron-builder": "^24.9.1",
+    "eslint": "^8.56.0",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "postcss": "^8.4.35",
+    "tailwindcss": "^3.4.1",
+    "vite": "^5.1.0",
+    "wait-on": "^7.2.0"
+  },
+  "build": {
+    "appId": "com.devforge.app",
+    "productName": "DevForge",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "scripts/**/*",
+      "node_modules/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "publisherName": "DevForge",
+      "verifyUpdateCodeSignature": false,
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "DevForge",
+      "deleteAppDataOnUninstall": false
+    },
+    "mac": {
+      "target": "dmg",
+      "icon": "assets/icon.icns",
+      "category": "public.app-category.developer-tools"
+    },
+    "linux": {
+      "target": "AppImage",
+      "icon": "assets/icon.png",
+      "category": "Development"
+    }
+  }
+}

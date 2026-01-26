@@ -1,0 +1,10 @@
+/* Dark theme CSS variables (reserved for future fine-grained theming) */
+:root[data-theme='dark'] {
+  --df-surface: #050814;
+  --df-surface-elevated: #0b1020;
+  --df-border: #1f2933;
+  --df-text-primary: #e5e7eb;
+  --df-text-secondary: #9ca3af;
+}
+
+

@@ -1,0 +1,323 @@
+.startup {
+  position: fixed;
+  inset: 0;
+  /* Pure black luxury base */
+  background: #000000;
+  color: #9ca3af;
+  font-family: 'Inter', 'SF Pro Display', -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  overflow: hidden;
+  z-index: 9999;
+  -webkit-font-smoothing: antialiased;
+  /* Smooth fade-in to prevent any flash */
+  animation: startup-fadein 400ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes startup-fadein {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* Animated background layers */
+.startup::before,
+.startup::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.startup::before {
+  background: 
+    radial-gradient(ellipse 80% 50% at 20% 30%, rgba(99, 102, 241, 0.15) 0%, transparent 50%),
+    radial-gradient(ellipse 60% 40% at 70% 60%, rgba(139, 92, 246, 0.12) 0%, transparent 50%),
+    radial-gradient(ellipse 50% 30% at 50% 80%, rgba(79, 70, 229, 0.1) 0%, transparent 50%);
+  animation: startup-pulse 8s ease-in-out infinite;
+}
+
+.startup::after {
+  background: 
+    radial-gradient(ellipse 40% 30% at 80% 20%, rgba(167, 139, 250, 0.08) 0%, transparent 50%),
+    radial-gradient(ellipse 30% 20% at 10% 70%, rgba(129, 140, 248, 0.06) 0%, transparent 50%);
+  animation: startup-pulse 12s ease-in-out infinite reverse;
+}
+
+/* When the ULTRA visual is active, turn off the legacy pulse layers completely */
+.startup--ultra::before,
+.startup--ultra::after {
+  display: none;
+}
+
+@keyframes startup-pulse {
+  0%, 100% {
+    opacity: 0.6;
+    transform: scale(1) translate(0, 0);
+  }
+  33% {
+    opacity: 1;
+    transform: scale(1.05) translate(1%, -1%);
+  }
+  66% {
+    opacity: 0.8;
+    transform: scale(0.98) translate(-1%, 1%);
+  }
+}
+
+.startup--exiting {
+  pointer-events: none;
+  animation: startup-fadeout 350ms cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+@keyframes startup-fadeout {
+  from { opacity: 1; }
+  to { opacity: 0; }
+}
+
+.startup-titlebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 42px;
+  -webkit-app-region: drag;
+  z-index: 10;
+}
+
+.startup-window-controls {
+  position: fixed;
+  top: 10px;
+  right: 12px;
+  display: flex;
+  gap: 8px;
+  z-index: 20;
+  -webkit-app-region: no-drag;
+}
+
+.startup-window-btn {
+  width: 38px;
+  height: 30px;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(255, 255, 255, 0.7);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  transition: all 0.18s ease;
+}
+
+.startup-window-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.startup-window-btn.close:hover {
+  background: rgba(239, 68, 68, 0.9);
+  border-color: rgba(239, 68, 68, 0.9);
+  color: #fff;
+}
+
+/* Visual canvas layer */
+.startup-visual {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  z-index: 1;
+  pointer-events: none;
+}
+
+.startup-visual-canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+
+.startup-overlay {
+  position: relative;
+  z-index: 15;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 1.8rem;
+  pointer-events: none;
+  height: 100vh;
+  text-align: center;
+  transition: opacity 0.35s ease;
+}
+
+.startup--ultra .startup-overlay {
+  /* Slightly more "cinematic" spacing on the premium visual */
+  gap: 2.1rem;
+}
+
+.startup-ui--fade {
+  opacity: 0;
+}
+
+.startup-logo {
+  font-size: 1.3rem;
+  letter-spacing: 0.4em;
+  text-transform: uppercase;
+  color: rgba(156, 163, 175, 0.7);
+  font-weight: 300;
+  text-shadow: none;
+  pointer-events: none;
+}
+
+.startup-status {
+  width: min(480px, 80vw);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  pointer-events: none;
+}
+
+.startup--ultra .startup-status {
+  padding: 16px 18px 14px;
+  border-radius: 12px;
+  /* Ultra dark glass */
+  background: rgba(0, 0, 0, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  box-shadow:
+    0 20px 80px rgba(0, 0, 0, 0.8),
+    inset 0 1px 0 rgba(255, 255, 255, 0.02);
+  backdrop-filter: blur(20px) saturate(0.8);
+}
+
+.startup-status-text {
+  font-size: 0.85rem;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: rgba(232, 236, 255, 0.65);
+  min-height: 1.2em;
+}
+
+.startup--ultra .startup-status-text {
+  color: rgba(156, 163, 175, 0.6);
+  text-shadow: none;
+  font-size: 0.75rem;
+}
+
+.startup-progress {
+  width: 100%;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 999px;
+  overflow: hidden;
+}
+
+.startup-progress-bar {
+  height: 100%;
+  background: linear-gradient(90deg, rgba(114, 142, 255, 0.9), rgba(191, 131, 255, 0.9));
+  box-shadow: 0 0 16px rgba(133, 164, 255, 0.45);
+  border-radius: 999px;
+  /* Buttery smooth progress bar with cubic-bezier easing */
+  transition: width 0.6s cubic-bezier(0.25, 0.1, 0.25, 1), opacity 0.4s ease;
+}
+
+.startup--ultra .startup-progress {
+  height: 4px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.startup--ultra .startup-progress-bar {
+  background: linear-gradient(
+    90deg,
+    rgba(55, 65, 81, 0.8),
+    rgba(75, 85, 99, 0.8)
+  );
+  box-shadow: none;
+  /* Extra smooth for ULTRA tier */
+  transition: width 0.7s cubic-bezier(0.22, 0.61, 0.36, 1), opacity 0.4s ease;
+}
+
+.startup--ultra .startup-progress-pct {
+  color: rgba(235, 240, 255, 0.62);
+}
+
+.startup-progress-pct {
+  font-size: 0.75rem;
+  letter-spacing: 0.1em;
+  color: rgba(232, 236, 255, 0.5);
+  font-variant-numeric: tabular-nums;
+  margin-top: 0.25rem;
+}
+
+.startup-quality-tier {
+  position: fixed;
+  bottom: 32px;
+  right: 130px;
+  font-size: 0.65rem;
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+  color: rgba(232, 236, 255, 0.25);
+  font-weight: 500;
+  pointer-events: none;
+}
+
+.startup-specs {
+  position: fixed;
+  bottom: 32px;
+  left: 32px;
+  display: grid;
+  gap: 0.25rem;
+  align-items: flex-start;
+  pointer-events: none;
+  text-align: left;
+  color: rgba(232, 236, 255, 0.64);
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.startup-spec-line {
+  opacity: 0.92;
+}
+
+.startup-skip {
+  position: fixed;
+  bottom: 30px;
+  right: 32px;
+  pointer-events: auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: rgba(232, 236, 255, 0.9);
+  border-radius: 999px;
+  padding: 10px 18px;
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+
+.startup-skip:hover {
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.14);
+  color: #fff;
+}
+
+@media (max-width: 720px) {
+  .startup-logo {
+    font-size: 1.3rem;
+    letter-spacing: 0.24em;
+  }
+
+  .startup-specs {
+    left: 20px;
+    right: 20px;
+    bottom: 24px;
+  }
+
+  .startup-window-controls {
+    right: 10px;
+  }
+}

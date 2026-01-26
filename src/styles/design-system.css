@@ -1,0 +1,128 @@
+/**
+ * DevForge Design System - OPTIMIZED
+ * Fast • Smooth • Premium
+ */
+
+:root {
+  /* === SURFACES === */
+  --surface-base: #050507;
+  --surface-0: #08080b;
+  --surface-1: #0c0c10;
+  --surface-2: #111116;
+  --surface-3: #16161c;
+  --surface-4: #1c1c24;
+  --surface-5: #22222c;
+
+  /* === BORDERS === */
+  --border-subtle: rgba(255, 255, 255, 0.04);
+  --border-muted: rgba(255, 255, 255, 0.06);
+  --border-default: rgba(255, 255, 255, 0.08);
+  --border-emphasis: rgba(255, 255, 255, 0.12);
+
+  /* === TEXT === */
+  --text-primary: #f8f8fc;
+  --text-secondary: #a0a0b8;
+  --text-muted: #606078;
+
+  /* === ACCENTS === */
+  --accent-primary: #8b5cf6;
+  --accent-success: #10b981;
+  --accent-warning: #f59e0b;
+  --accent-error: #f43f5e;
+
+  /* === WORKSPACES === */
+  --ws-casual: #818cf8;
+  --ws-work: #10b981;
+  --ws-code: #f59e0b;
+  --ws-private: #f472b6;
+
+  /* === TYPOGRAPHY === */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+
+  /* === SPACING === */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 20px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* === RADIUS === */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-xl: 12px;
+  --radius-2xl: 16px;
+
+  /* === TRANSITIONS === */
+  --duration-fast: 100ms;
+  --duration-normal: 150ms;
+  --duration-slow: 200ms;
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+}
+
+/* === BASE RESET === */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+/* === MODAL OVERLAY === */
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  z-index: 40;
+}
+
+.modal-content {
+  background: var(--surface-1);
+  border: 1px solid var(--border-muted);
+  border-radius: var(--radius-2xl);
+  box-shadow: 0 25px 50px rgba(0, 0, 0, 0.5);
+}
+
+/* === SCROLLBAR === */
+.scrollbar-premium {
+  scrollbar-width: thin;
+  scrollbar-color: var(--surface-4) transparent;
+}
+
+.scrollbar-hidden {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+.scrollbar-hidden::-webkit-scrollbar {
+  display: none;
+}
+
+/* === TRANSITIONS - Use sparingly === */
+.transition-colors {
+  transition: color var(--duration-fast) var(--ease-out),
+              background-color var(--duration-fast) var(--ease-out),
+              border-color var(--duration-fast) var(--ease-out);
+}
+
+.transition-opacity {
+  transition: opacity var(--duration-fast) var(--ease-out);
+}
+
+.transition-transform {
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+/* === FOCUS RING === */
+.focus-ring:focus-visible {
+  outline: 2px solid var(--accent-primary);
+  outline-offset: 2px;
+}
+
+/* === UTILITY === */
+.truncate {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

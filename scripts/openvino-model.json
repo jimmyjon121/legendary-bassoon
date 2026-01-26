@@ -1,0 +1,8 @@
+{
+  "model_path": "Qwen/Qwen2-0.5B-Instruct",
+  "tokenizer": "Qwen/Qwen2-0.5B-Instruct",
+  "device": "AUTO",
+  "precision": "fp16",
+  "auto_start": true,
+  "notes": "AUTO will use Intel Arc GPU or NPU automatically based on compatibility"
+}
