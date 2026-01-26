@@ -2,79 +2,76 @@
 
 <div align="center">
 
-![DevForge](https://img.shields.io/badge/DevForge-AI%20Workstation-8b5cf6?style=for-the-badge&logo=electron&logoColor=white)
+![DevForge](https://img.shields.io/badge/DevForge-Local%20AI%20Workstation-8b5cf6?style=for-the-badge&logo=electron&logoColor=white)
 ![Electron](https://img.shields.io/badge/Electron-31.x-47848F?style=flat-square&logo=electron&logoColor=white)
 ![React](https://img.shields.io/badge/React-18.x-61DAFB?style=flat-square&logo=react&logoColor=black)
-![License](https://img.shields.io/badge/License-UNLICENSED-red?style=flat-square)
+![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
 
-**Sovereign AI Development Environment**
+### Own Your AI. Control Your Costs. Keep Your Data.
 
-A local-first, private, unrestricted AI workstation built for developers who demand complete control.  
-No cloud dependencies. No restrictions. Your hardware, your rules.
+The cloud AI providers keep raising prices. APIs get deprecated. Terms change overnight.  
+**DevForge is your insurance policy** — a fully local AI workstation that runs on your hardware.
 
-[Features](#features) • [Quick Start](#quick-start) • [Documentation](#documentation) • [Roadmap](#roadmap)
+[Why Local?](#why-local-ai) • [Features](#features) • [Quick Start](#quick-start) • [Documentation](#documentation)
 
 </div>
 
 ---
 
-## Features
+## Why Local AI?
 
-### 🏠 Four Workspaces
-| Workspace | Purpose |
-|-----------|---------|
-| **Casual** | General chat, exploration, brainstorming |
-| **Work** | Professional tasks, documentation, reports |
-| **Code** | Development assistance with full IDE integration |
-| **Private** | Encrypted, unrestricted workspace (NSFW-capable) |
+| Cloud AI Problems | DevForge Solution |
+|-------------------|-------------------|
+| 💸 **Rising costs** — API prices increase unpredictably | Run models locally for **$0/month** after hardware |
+| 🔒 **Data privacy** — Your prompts train their models | **100% local** — nothing leaves your machine |
+| ⚡ **Rate limits** — Throttled during peak usage | **Unlimited** — your hardware, your limits |
+| 📉 **Downtime** — Service outages halt your work | **Always available** — works offline |
+| 📜 **Terms changes** — Features removed without notice | **You control everything** — no surprises |
+| 🔌 **Vendor lock-in** — Stuck in one ecosystem | **Model agnostic** — swap models freely |
 
-### 🎯 Five View Modes
-Switch between different ways to interact with your AI:
-- **Stream** - Traditional chat flow with smart auto-scroll
-- **Canvas** - Visual mind mapping for complex ideas
-- **Document** - Build knowledge docs collaboratively
-- **Timeline** - Chronological conversation view
-- **Focus** - Distraction-free minimal interface
-
-### 🤖 Local LLM Support
-- **Ollama integration** out of the box
-- **Intelligent Model Auto-Optimization** - Automatically detects model family, size, and quantization to apply optimal settings
-- Hot-swap between models instantly
-- Support for any GGUF model
-- Full control over generation parameters
-
-### 🎨 Image Generation
-- ComfyUI / Stable Diffusion WebUI integration
-- SDXL, FLUX, and custom model support
-- Automatic backend detection and setup
-- Batch generation with progress tracking
-
-### 🔒 Privacy First
-- **100% offline capable** - No internet required
-- **SQLite database** - All data stored locally
-- **AES-256 encryption** for private workspace
-- **Boss key** (`Ctrl+Shift+H`) - Instantly hide window
-- **Panic mode** (`Ctrl+Shift+P`) - Clear memory and hide
-
-### ⚡ Performance Optimized
-- Virtualized message lists for long conversations
-- Lazy-loaded components for fast startup
-- Selective Zustand subscriptions for minimal re-renders
-- Smart context management
+**DevForge ensures you're never held hostage by a cloud provider's pricing or policy changes.**
 
 ---
 
-## Tech Stack
+## Features
 
-| Layer | Technology |
-|-------|------------|
-| Desktop | Electron 31 |
-| Frontend | React 18 + Vite |
-| Styling | Tailwind CSS |
-| State | Zustand (slices pattern) |
-| Database | SQLite (better-sqlite3) |
-| LLM Backend | Ollama |
-| Image Gen | ComfyUI |
+### 🏠 Purpose-Built Workspaces
+| Workspace | Optimized For |
+|-----------|---------------|
+| **Casual** | General chat, brainstorming, exploration |
+| **Work** | Professional tasks, documentation, emails |
+| **Code** | Development assistance, debugging, code review |
+| **Private** | Encrypted workspace for sensitive data (journals, notes, personal projects) |
+
+### 🎯 Five View Modes
+Interact with AI the way that works best for you:
+- **Stream** — Traditional chat flow
+- **Canvas** — Visual mind mapping
+- **Document** — Collaborative doc building
+- **Timeline** — Chronological view
+- **Focus** — Distraction-free mode
+
+### 🤖 Intelligent Model Management
+- **Auto-optimization** — Detects model type and applies optimal settings automatically
+- **Hot-swap models** — Switch between models instantly
+- **Any GGUF model** — Use models from Hugging Face, Ollama, or anywhere
+- **Full parameter control** — Temperature, context length, and more
+
+### 🎨 Local Image Generation
+- **ComfyUI integration** — Professional image generation workflow
+- **SDXL & FLUX support** — Latest models, running locally
+- **Automatic setup** — DevForge can install and configure ComfyUI for you
+
+### 🔐 Privacy & Security
+- **AES-256 encryption** for sensitive workspaces
+- **Zero telemetry** — No data collection whatsoever
+- **Offline capable** — Full functionality without internet
+- **Quick-hide** (`Ctrl+Shift+H`) — Instant privacy when needed
+
+### ⚡ Performance
+- **Virtualized lists** — Handles thousands of messages smoothly
+- **Lazy loading** — Fast startup, load features on demand
+- **Optimized state** — Minimal re-renders for smooth UI
 
 ---
 
@@ -82,8 +79,8 @@ Switch between different ways to interact with your AI:
 
 ### Prerequisites
 
-1. **Node.js 18+** - [Download](https://nodejs.org/)
-2. **Ollama** - [Download](https://ollama.ai/)
+1. **Node.js 18+** — [Download](https://nodejs.org/)
+2. **Ollama** — [Download](https://ollama.ai/) (free, open source)
 
 ### Installation
 
@@ -95,17 +92,43 @@ cd legendary-bassoon
 # Install dependencies
 npm install
 
-# Start Ollama (in a separate terminal)
+# Start Ollama (separate terminal)
 ollama serve
 
-# Pull a model
-ollama pull llama3.2
+# Pull a model (choose based on your hardware)
+ollama pull llama3.2        # 3GB - Good for most machines
+ollama pull deepseek-coder  # 7GB - Great for coding
+ollama pull mixtral         # 26GB - Powerful, needs good GPU
 
 # Run DevForge
 npm run dev
 ```
 
-The app will launch automatically.
+---
+
+## Hardware Recommendations
+
+| RAM | VRAM | Recommended Models |
+|-----|------|-------------------|
+| 8GB | 4GB | llama3.2, phi3, gemma2:2b |
+| 16GB | 8GB | mistral, codellama, llama3.1:8b |
+| 32GB | 12GB+ | mixtral, deepseek-coder:33b, llama3.1:70b (quantized) |
+
+DevForge's **auto-optimization** detects your model and adjusts settings for best performance.
+
+---
+
+## Tech Stack
+
+| Layer | Technology |
+|-------|------------|
+| Desktop | Electron 31 |
+| Frontend | React 18 + Vite |
+| Styling | Tailwind CSS |
+| State | Zustand |
+| Database | SQLite |
+| LLM | Ollama |
+| Images | ComfyUI |
 
 ---
 
@@ -113,30 +136,16 @@ The app will launch automatically.
 
 ```
 devforge/
-├── electron/                 # Electron main process
-│   ├── main.js              # Main entry point with Menu API
+├── electron/                 # Desktop app backend
+│   ├── main.js              # Electron main process
 │   ├── preload.js           # Secure IPC bridge
-│   ├── ipc-handlers.js      # IPC request handlers
-│   ├── ipc/                  # Modular IPC handlers
-│   └── services/             # Backend services
-│       ├── ollama-helper.js      # Ollama integration
-│       ├── comfyui-manager.js    # ComfyUI process management
-│       ├── image-backend-auto.js # Auto image backend detection
-│       └── ...
-├── src/                      # React frontend
+│   └── services/            # Backend services
+├── src/                     # React frontend
 │   ├── components/          # UI components
-│   │   ├── Chat/           # Chat views and input
-│   │   ├── Sidebar/        # Navigation and folders
-│   │   ├── ImageGen/       # Image generation modal
-│   │   └── ...
-│   ├── stores/              # Zustand state management
-│   │   ├── appStore.js     # Main app state
-│   │   └── slices/         # State slices
+│   ├── stores/              # State management
 │   ├── services/            # Frontend services
-│   │   └── modelOptimizer.js # Intelligent model settings
-│   ├── hooks/               # Custom React hooks
-│   └── styles/              # CSS/Tailwind
-└── package.json
+│   └── hooks/               # Custom hooks
+└── docs/                    # Documentation
 ```
 
 ---
@@ -145,119 +154,65 @@ devforge/
 
 | Shortcut | Action |
 |----------|--------|
-| `Ctrl+Shift+H` | Boss Key - Hide/Show window |
-| `Ctrl+Shift+P` | Panic Mode - Clear & hide |
-| `Ctrl+R` | Reload app |
-| `Ctrl+Shift+R` | Force reload (clear cache) |
+| `Ctrl+Shift+H` | Quick hide window |
+| `Ctrl+R` | Reload |
+| `Ctrl+Shift+R` | Force reload |
 | `Ctrl+N` | New conversation |
-| `Ctrl+K` | Open model selector |
-| `Ctrl+,` | Open settings |
-| `Alt+1-5` | Switch view modes |
-| `F12` | Toggle DevTools (dev mode) |
-
----
-
-## Configuration
-
-### LLM Backend (Ollama)
-
-Default endpoint: `http://localhost:11434`
-
-#### Recommended Models
-```bash
-ollama pull llama3.2          # Fast, general purpose
-ollama pull deepseek-coder    # Code specialist
-ollama pull dolphin-mixtral   # Uncensored, creative
-ollama pull codellama         # Code generation
-```
-
-### Image Generation (ComfyUI)
-
-Default endpoint: `http://localhost:8188`
-
-DevForge can auto-detect and manage ComfyUI installation. Configure in **Settings > Image Generation**.
+| `Ctrl+K` | Model selector |
+| `Ctrl+,` | Settings |
+| `Alt+1-5` | Switch views |
 
 ---
 
 ## Development
 
 ```bash
-# Development with hot reload
-npm run dev
-
-# Build for production
-npm run build
-
-# Platform-specific builds
-npm run build:win
-npm run build:mac
-npm run build:linux
+npm run dev          # Development mode
+npm run build        # Production build
+npm run build:win    # Windows installer
+npm run build:mac    # macOS installer
+npm run build:linux  # Linux AppImage
 ```
 
 ---
 
-## Security
+## The Cost Comparison
 
-### What DevForge Does
-- ✅ Stores all data locally in SQLite
-- ✅ Encrypts Private workspace with AES-256-GCM
-- ✅ Uses password-derived encryption keys
-- ✅ Communicates only with localhost services
-- ✅ Zero telemetry, zero external connections
+| Usage | Cloud AI (GPT-4) | DevForge |
+|-------|------------------|----------|
+| 1M tokens/month | ~$30-60 | $0 |
+| 10M tokens/month | ~$300-600 | $0 |
+| Heavy daily use | $100+/month | $0 |
+| **One year** | **$1,200+** | **$0** |
 
-### What DevForge Doesn't Do
-- ❌ Send data to external servers
-- ❌ Log or track conversations
-- ❌ Impose content restrictions
-- ❌ Phone home or auto-update
+*After initial hardware investment, your ongoing cost is just electricity.*
 
 ---
 
 ## Documentation
 
-- [Architecture Guide](docs/architecture.md) - Technical architecture overview
-- [IPC API Reference](docs/ipc-api.md) - Complete IPC channel documentation
-- [QA Checklist](docs/qa-checklist.md) - Testing checklist for releases
-- [User Guide](docs/user-guide.md) - End-user documentation
+- [Architecture Guide](docs/architecture.md)
+- [IPC API Reference](docs/ipc-api.md)
+- [User Guide](docs/user-guide.md)
 
 ---
 
-## Roadmap
+## Contributing
 
-- [x] Ollama integration
-- [x] Multiple workspaces
-- [x] ComfyUI image generation
-- [x] Intelligent model auto-optimization
-- [x] Multiple view modes
-- [x] Conversation folders and filters
-- [ ] llama.cpp direct support
-- [ ] Voice input/output (Whisper)
-- [ ] RAG / document ingestion
-- [ ] Plugin system
-- [ ] Mobile companion app
+Contributions welcome! Please read the contributing guidelines before submitting PRs.
 
 ---
 
-## Version
+## License
 
-**v0.9.1** - Enhanced with intelligent model optimization
-
----
-
-## Credits
-
-Built with:
-- [Electron](https://www.electronjs.org/)
-- [React](https://react.dev/)
-- [Tailwind CSS](https://tailwindcss.com/)
-- [Zustand](https://github.com/pmndrs/zustand)
-- [Ollama](https://ollama.ai/)
-- [ComfyUI](https://github.com/comfyanonymous/ComfyUI)
+MIT License — Use it, modify it, make it yours.
 
 ---
 
 <div align="center">
 
-**Your machine, your rules. No restrictions. No compromises.**
+### Stop renting AI. Start owning it.
+
+**DevForge** — Local AI that works for you, not the other way around.
 
 </div>
