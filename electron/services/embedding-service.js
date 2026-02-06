@@ -49,9 +49,20 @@ async function embedTextsWithOllama(endpoint, texts, modelName = 'nomic-embed-te
   const vectors = [];
 
   for (const text of texts) {
-    const res = await makeRequest(url, { model: modelName, prompt: text });
+    let res;
+    try {
+      res = await makeRequest(url, { model: modelName, prompt: text });
+    } catch (err) {
+      // Network error or Ollama not running - return empty to degrade gracefully
+      console.warn(`[Embedding] Request failed (model=${modelName}): ${err.message}`);
+      return [];
+    }
+
     if (!res?.embedding) {
-      throw new Error('Invalid embeddings response from Ollama');
+      // Model might not be pulled or returned unexpected format
+      const hint = res?.error || 'no embedding field in response';
+      console.warn(`[Embedding] Invalid response from Ollama (model=${modelName}): ${hint}`);
+      return [];
     }
     vectors.push(res.embedding);
   }

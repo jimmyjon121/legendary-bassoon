@@ -13,7 +13,13 @@ const http = require('http');
 const { promisify } = require('util');
 const { pipeline } = require('stream');
 const { createWriteStream, createReadStream } = require('fs');
-const { Extract } = require('unzipper');
+// unzipper is optional - if not installed, zip extraction falls back to 7z/tar commands
+let Extract = null;
+try {
+  Extract = require('unzipper').Extract;
+} catch (_) {
+  // unzipper not installed - will use command-line extraction instead
+}
 
 const streamPipeline = promisify(pipeline);
 const execAsync = promisify(exec);
@@ -22,78 +28,67 @@ const execAsync = promisify(exec);
 const COMFYUI_RELEASE_URL = 'https://github.com/comfyanonymous/ComfyUI/releases/download/latest/ComfyUI_windows_portable_nvidia.7z';
 const COMFYUI_RELEASE_CPU = 'https://github.com/comfyanonymous/ComfyUI/releases/download/latest/ComfyUI_windows_portable.7z';
 
-// NSFW-friendly models - NO safety filters
+// Open-source models - ALL hosted on HuggingFace (free, no login, no API keys)
 const UNRESTRICTED_MODELS = {
   sd15: [
     {
-      id: 'realisticVisionV60',
-      name: 'Realistic Vision V6.0',
-      description: 'Photorealistic model with no content restrictions',
-      downloadUrl: 'https://civitai.com/api/download/models/501240',
-      filename: 'realisticVisionV60B1_v60B1VAE.safetensors',
+      id: 'dreamshaper_8',
+      name: 'DreamShaper 8',
+      description: 'Dreamy artistic style, versatile, great for most prompts',
+      downloadUrl: 'https://huggingface.co/jzli/DreamShaper-8/resolve/main/dreamshaper_8.safetensors',
+      filename: 'dreamshaper_8.safetensors',
       size: '2.1 GB',
       nsfw: true,
       type: 'checkpoint'
     },
     {
-      id: 'deliberate_v6',
-      name: 'Deliberate V6',
-      description: 'Versatile artistic model, unrestricted',
-      downloadUrl: 'https://civitai.com/api/download/models/391999',
-      filename: 'deliberate_v6.safetensors',
-      size: '2.0 GB',
+      id: 'realisticVisionV60',
+      name: 'Realistic Vision 6.0',
+      description: 'Photorealistic images, people, landscapes',
+      downloadUrl: 'https://huggingface.co/Cristiants/comfyui/resolve/main/checkpoints/realistic-vision-v60-b1.safetensors',
+      filename: 'realistic_vision_v60.safetensors',
+      size: '2.1 GB',
+      nsfw: true,
+      type: 'checkpoint'
+    },
+    {
+      id: 'sd_v15',
+      name: 'Stable Diffusion 1.5',
+      description: 'The original classic - huge community, works with all LoRAs',
+      downloadUrl: 'https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors',
+      filename: 'sd_v1-5-pruned-emaonly.safetensors',
+      size: '4.27 GB',
       nsfw: true,
       type: 'checkpoint'
     }
   ],
   sdxl: [
     {
-      id: 'ponyDiffusionV6',
-      name: 'Pony Diffusion V6 XL',
-      description: 'SDXL model optimized for artistic content, fully unrestricted',
-      downloadUrl: 'https://civitai.com/api/download/models/290640',
-      filename: 'ponyDiffusionV6XL_v6StartWithThisOne.safetensors',
-      size: '6.5 GB',
+      id: 'sdxl_base',
+      name: 'SDXL 1.0 Base',
+      description: 'Official SDXL base model - highest quality, needs 8GB+ VRAM',
+      downloadUrl: 'https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors',
+      filename: 'sd_xl_base_1.0.safetensors',
+      size: '6.94 GB',
       nsfw: true,
-      type: 'checkpoint'
-    },
-    {
-      id: 'realvisxl_v5',
-      name: 'RealVisXL V5.0',
-      description: 'Photorealistic SDXL model - no restrictions',
-      downloadUrl: 'https://civitai.com/api/download/models/789646',
-      filename: 'realvisxlV50_v50Bakedvae.safetensors',
-      size: '6.5 GB',
-      nsfw: true,
-      type: 'checkpoint'
+      type: 'checkpoint',
+      requirements: { vram: 8192 }
     }
   ],
   flux: [
     {
       id: 'flux1_dev',
       name: 'Flux.1 Dev',
-      description: 'Latest Flux model - unrestricted',
+      description: 'Cutting-edge image quality - needs 16GB+ VRAM',
       downloadUrl: 'https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors',
       filename: 'flux1-dev.safetensors',
       size: '24 GB',
       nsfw: true,
       type: 'unet',
       requirements: {
-        vram: 16384, // 16GB VRAM minimum
+        vram: 16384,
         extraFiles: ['ae.safetensors', 't5xxl_fp16.safetensors', 'clip_l.safetensors']
       }
-    }
-  ],
-  lora: [
-    {
-      id: 'add_detail',
-      name: 'Add Detail LoRA',
-      description: 'Adds fine details to generations',
-      downloadUrl: 'https://civitai.com/api/download/models/87153',
-      filename: 'add_detail.safetensors',
-      size: '144 MB',
-      nsfw: false,
-      type: 'lora'
     }
   ],
   vae: [
@@ -349,28 +344,48 @@ class ComfyUIManager {
   /**
    * Download file with progress tracking
    */
-  async downloadFile(url, targetPath, progressCallback) {
+  async downloadFile(url, targetPath, progressCallback, _redirectCount = 0) {
+    const MAX_REDIRECTS = 10;
+    
     return new Promise((resolve, reject) => {
+      if (_redirectCount > MAX_REDIRECTS) {
+        reject(new Error('Too many redirects - download URL may be invalid'));
+        return;
+      }
+
       const file = createWriteStream(targetPath);
       const protocol = url.startsWith('https') ? https : http;
 
       const request = protocol.get(url, {
-        headers: {
-          'User-Agent': 'DevForge/1.0'
-        }
+        headers: { 'User-Agent': 'DevForge/1.0' },
+        timeout: 30000,
       }, (response) => {
-        // Handle redirects
-        if (response.statusCode === 301 || response.statusCode === 302) {
+        // Handle redirects (HuggingFace uses 301/302/307/308)
+        if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
           file.close();
-          fs.unlinkSync(targetPath);
-          return this.downloadFile(response.headers.location, targetPath, progressCallback)
+          try { fs.unlinkSync(targetPath); } catch {}
+          const redirectUrl = response.headers.location;
+          if (!redirectUrl) {
+            reject(new Error('Redirect with no location header'));
+            return;
+          }
+          const absoluteUrl = redirectUrl.startsWith('http') ? redirectUrl : new URL(redirectUrl, url).href;
+          return this.downloadFile(absoluteUrl, targetPath, progressCallback, _redirectCount + 1)
             .then(resolve)
             .catch(reject);
         }
 
+        // Auth errors
+        if (response.statusCode === 401 || response.statusCode === 403) {
+          file.close();
+          try { fs.unlinkSync(targetPath); } catch {}
+          reject(new Error(`Download blocked (HTTP ${response.statusCode}). This model may require authentication.`));
+          return;
+        }
+
         if (response.statusCode !== 200) {
           file.close();
-          fs.unlinkSync(targetPath);
+          try { fs.unlinkSync(targetPath); } catch {}
           reject(new Error(`Download failed: HTTP ${response.statusCode}`));
           return;
         }
@@ -383,14 +398,15 @@ class ComfyUIManager {
           downloadedSize += chunk.length;
           const percent = totalSize ? Math.round((downloadedSize / totalSize) * 100) : 0;
           
-          // Only emit every 1% to reduce overhead
           if (percent > lastProgress) {
             lastProgress = percent;
+            const downloadedMB = (downloadedSize / 1024 / 1024).toFixed(1);
+            const totalMB = totalSize ? (totalSize / 1024 / 1024).toFixed(0) : '?';
             progressCallback({
               percent,
               downloaded: downloadedSize,
               total: totalSize,
-              speed: 0 // Could calculate actual speed
+              message: `${downloadedMB} MB / ${totalMB} MB`,
             });
           }
         });
@@ -404,20 +420,22 @@ class ComfyUIManager {
 
         file.on('error', (err) => {
           file.close();
-          fs.unlinkSync(targetPath);
+          try { fs.unlinkSync(targetPath); } catch {}
           reject(err);
         });
       });
 
       request.on('error', (err) => {
         file.close();
-        if (fs.existsSync(targetPath)) {
-          fs.unlinkSync(targetPath);
+        try { fs.unlinkSync(targetPath); } catch {}
+        if (err.code === 'ENOTFOUND' || err.code === 'EAI_AGAIN') {
+          reject(new Error('No internet connection. Connect to the internet to download models.'));
+        } else {
+          reject(new Error(`Download error: ${err.message}`));
         }
-        reject(err);
       });
 
-      request.setTimeout(30000, () => {
+      request.on('timeout', () => {
         request.destroy();
         reject(new Error('Download timeout'));
       });

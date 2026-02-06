@@ -1,10 +1,13 @@
 /**
  * OpenVINO Backend
  * Wrapper for OpenVINO inference (NPU and Intel GPU support)
- * 
- * This is a stub implementation that will connect to an OpenVINO
- * inference server when available. The actual inference is done
- * by a Python server using the OpenVINO runtime.
+ *
+ * Connects to an OpenVINO inference server (Python/FastAPI) that runs
+ * on localhost:8081 by default.
+ *
+ * PERFORMANCE: checkHealth() caches its result for 15 seconds so that
+ * repeated calls from the orchestrator / generate / stream don't
+ * repeatedly spawn Python or hammer the HTTP endpoint.
  */
 
 const BaseBackend = require('./base-backend');
@@ -24,7 +27,7 @@ class OpenVinoBackend extends BaseBackend {
       priority: config.device === 'NPU' ? 3 : 4,
       capabilities: {
         streaming: true,
-        vision: false, // Depends on model
+        vision: false,
         embeddings: true,
         function_calling: false,
         onnx: true,
@@ -36,12 +39,18 @@ class OpenVinoBackend extends BaseBackend {
     this.npuBridge = getNpuBridge();
     this.configured = false;
     this.activeRequests = new Map();
+
+    // === Health check cache ===
+    this._healthCache = { at: 0, value: null };
+    this._healthCacheTTL = 15000; // 15 seconds
+    this._autoStartAttempted = false;
   }
 
-  /**
-   * Make HTTP request to OpenVINO server
-   */
-  _makeRequest(path, options = {}) {
+  // ------------------------------------------------------------------
+  // HTTP helper
+  // ------------------------------------------------------------------
+
+  _makeRequest(urlPath, options = {}) {
     return new Promise((resolve, reject) => {
       const url = new URL(this.endpoint);
       const protocol = url.protocol === 'https:' ? https : http;
@@ -49,7 +58,7 @@ class OpenVinoBackend extends BaseBackend {
       const reqOptions = {
         hostname: url.hostname,
         port: url.port || (url.protocol === 'https:' ? 443 : 8081),
-        path,
+        path: urlPath,
         method: options.method || 'GET',
         headers: {
           'Content-Type': 'application/json',
@@ -79,16 +88,41 @@ class OpenVinoBackend extends BaseBackend {
       if (options.body) {
         req.write(JSON.stringify(options.body));
       }
-
       req.end();
     });
   }
 
+  // ------------------------------------------------------------------
+  // Health check (cached)
+  // ------------------------------------------------------------------
+
   /**
-   * Check if OpenVINO backend is available
+   * Check if OpenVINO backend is available.
+   *
+   * Results are cached for 15 seconds. To force a fresh check, call
+   * invalidateHealthCache() first.
    */
   async checkHealth() {
-    // First check if OpenVINO is installed
+    const now = Date.now();
+    if (this._healthCache.value && (now - this._healthCache.at) < this._healthCacheTTL) {
+      return this._healthCache.value;
+    }
+
+    const result = await this._doCheckHealth();
+    this._healthCache = { at: Date.now(), value: result };
+    return result;
+  }
+
+  /**
+   * Force a fresh health check on next call
+   */
+  invalidateHealthCache() {
+    this._healthCache = { at: 0, value: null };
+  }
+
+  /** @private */
+  async _doCheckHealth() {
+    // Step 1: Check if OpenVINO is installed & NPU is available
     const npuStatus = await this.npuBridge.getStatus();
 
     if (!npuStatus.openvinoInstalled) {
@@ -102,7 +136,6 @@ class OpenVinoBackend extends BaseBackend {
       };
     }
 
-    // Check if NPU is available for NPU backend
     if (this.device === 'NPU' && !npuStatus.npuAvailable) {
       this.setStatus('unavailable');
       return {
@@ -113,42 +146,96 @@ class OpenVinoBackend extends BaseBackend {
       };
     }
 
-    // Check if server is running
+    // Step 2: Check if server is running via lightweight /status endpoint
     try {
-      const response = await this._makeRequest('/health', { timeout: 5000 });
-      
-      if (response.status === 200) {
-        this.setStatus('available');
-        this.configured = true;
-        return {
-          available: true,
-          status: 'online',
-          device: this.device,
-          model: response.data?.model
-        };
-      } else {
-        this.setStatus('error');
-        return {
-          available: false,
-          status: 'error',
-          error: `HTTP ${response.status}`
-        };
+      const statusResponse = await this._makeRequest('/status', { timeout: 2000 });
+
+      if (statusResponse.status === 200 && statusResponse.data && typeof statusResponse.data === 'object') {
+        const serverRunning = statusResponse.data.server === 'running' || statusResponse.data.status === 'running';
+        const modelLoaded = statusResponse.data.model_loaded === true || statusResponse.data.modelLoaded === true;
+
+        if (serverRunning) {
+          this.setStatus('available');
+          this.configured = true;
+          return {
+            available: true,
+            status: modelLoaded ? 'online' : 'online-idle',
+            device: this.device,
+            model: statusResponse.data?.model || null,
+            modelLoaded,
+          };
+        }
       }
-    } catch (error) {
-      this.setStatus('unavailable');
-      return {
-        available: false,
-        status: 'server-offline',
-        error: 'OpenVINO server not running',
-        serverRequired: true
-      };
+
+      // Server returned something but isn't "running" — fall through
+      throw new Error('OpenVINO server not in running state');
+    } catch {
+      // Server unreachable or not running — try auto-start if we haven't recently
+      return await this._handleServerOffline();
     }
   }
 
-  /**
-   * Generate a complete response
-   * Uses OpenAI-compatible API format
-   */
+  /** @private Handle server-offline scenario with auto-start logic */
+  async _handleServerOffline() {
+    if (!this._autoStartAttempted) {
+      this._autoStartAttempted = true;
+
+      console.log('[OpenVINO Backend] Server offline, attempting auto-start...');
+      try {
+        const startResult = await this.npuBridge.startServer({ device: this.device });
+
+        if (startResult.success) {
+          console.log('[OpenVINO Backend] Server auto-started successfully');
+
+          // Retry loop with backoff — server can take time to initialize
+          const startAt = Date.now();
+          let delay = 500;
+          while (Date.now() - startAt < 30000) {
+            try {
+              const retryStatus = await this._makeRequest('/status', { timeout: 2000 });
+              if (retryStatus.status === 200 && retryStatus.data && typeof retryStatus.data === 'object') {
+                const serverRunning = retryStatus.data.server === 'running' || retryStatus.data.status === 'running';
+                if (serverRunning) {
+                  this.setStatus('available');
+                  this.configured = true;
+                  return {
+                    available: true,
+                    status: retryStatus.data.model_loaded === true ? 'online' : 'online-idle',
+                    device: this.device,
+                    model: retryStatus.data?.model || null,
+                    autoStarted: true,
+                    modelLoaded: retryStatus.data.model_loaded === true,
+                  };
+                }
+              }
+            } catch {
+              // Not ready yet, continue retrying
+            }
+            await new Promise(r => setTimeout(r, delay));
+            delay = Math.min(4000, Math.round(delay * 1.5));
+          }
+        }
+      } catch (startError) {
+        console.warn('[OpenVINO Backend] Auto-start failed:', startError.message);
+      }
+
+      // Allow another auto-start attempt after 2 minutes
+      setTimeout(() => { this._autoStartAttempted = false; }, 120000);
+    }
+
+    this.setStatus('unavailable');
+    return {
+      available: false,
+      status: 'server-offline',
+      error: 'OpenVINO server not running',
+      serverRequired: true
+    };
+  }
+
+  // ------------------------------------------------------------------
+  // Generation
+  // ------------------------------------------------------------------
+
   async generate(payload) {
     const health = await this.checkHealth();
     if (!health.available) {
@@ -178,9 +265,10 @@ class OpenVinoBackend extends BaseBackend {
     };
   }
 
-  /**
-   * Stream a response
-   */
+  // ------------------------------------------------------------------
+  // Streaming
+  // ------------------------------------------------------------------
+
   async stream(payload, onChunk) {
     const health = await this.checkHealth();
     if (!health.available) {
@@ -190,16 +278,12 @@ class OpenVinoBackend extends BaseBackend {
     const requestId = `openvino-${Date.now()}`;
 
     const fallback = async () => {
-      try {
-        const result = await this.generate(payload);
-        if (result.response) {
-          onChunk({ response: result.response, done: false });
-        }
-        onChunk({ done: true });
-        return { requestId };
-      } catch (error) {
-        throw error;
+      const result = await this.generate(payload);
+      if (result.response) {
+        onChunk({ response: result.response, done: false });
       }
+      onChunk({ done: true });
+      return { requestId };
     };
 
     return new Promise((resolve, reject) => {
@@ -237,7 +321,7 @@ class OpenVinoBackend extends BaseBackend {
                   done: false,
                 });
               } catch {
-                // ignore malformed chunk
+                // Ignore malformed SSE chunk
               }
             }
           }
@@ -250,7 +334,7 @@ class OpenVinoBackend extends BaseBackend {
         });
       });
 
-      req.on('error', async (error) => {
+      req.on('error', async () => {
         this.activeRequests.delete(requestId);
         try {
           const result = await fallback();
@@ -262,23 +346,22 @@ class OpenVinoBackend extends BaseBackend {
 
       this.activeRequests.set(requestId, req);
 
-        req.write(
-          JSON.stringify({
-            model: payload.model,
-            prompt: payload.prompt,
-            system: payload.system,
-            max_tokens: payload.options?.num_predict || 512,
-            temperature: payload.options?.temperature ?? 0.7,
-          }),
-        );
+      req.write(JSON.stringify({
+        model: payload.model,
+        prompt: payload.prompt,
+        system: payload.system,
+        max_tokens: payload.options?.num_predict || 512,
+        temperature: payload.options?.temperature ?? 0.7,
+      }));
 
       req.end();
     });
   }
 
-  /**
-   * Get available models
-   */
+  // ------------------------------------------------------------------
+  // Model management
+  // ------------------------------------------------------------------
+
   async getModels() {
     try {
       const response = await this._makeRequest('/models');
@@ -288,25 +371,24 @@ class OpenVinoBackend extends BaseBackend {
     }
   }
 
-  /**
-   * Load a model
-   * OpenVINO models need to be in ONNX or OpenVINO IR format
-   */
   async loadModel(modelPath) {
     try {
       const response = await this._makeRequest('/models/load', {
         method: 'POST',
         body: { model_path: modelPath, device: this.device }
       });
+      // After loading a model, the health status changes
+      this.invalidateHealthCache();
       return response.data;
     } catch (error) {
       throw new Error(`Failed to load model: ${error.message}`);
     }
   }
 
-  /**
-   * Cancel an ongoing request
-   */
+  // ------------------------------------------------------------------
+  // Request cancellation
+  // ------------------------------------------------------------------
+
   async cancel(requestId) {
     const req = this.activeRequests.get(requestId);
     if (req) {
@@ -317,20 +399,19 @@ class OpenVinoBackend extends BaseBackend {
     return { success: false, error: 'Request not found' };
   }
 
-  /**
-   * Estimate performance for NPU/Intel GPU
-   */
+  // ------------------------------------------------------------------
+  // Performance estimation
+  // ------------------------------------------------------------------
+
   estimatePerformance(parameterCount) {
     if (this.device === 'NPU') {
-      // NPU is efficient but has limited memory
       return {
         tokensPerSecond: parameterCount < 3 ? 40 : parameterCount < 7 ? 20 : 5,
         memoryRequired: parameterCount * 1.5,
-        suitable: parameterCount < 7, // NPU best for small models
+        suitable: parameterCount < 7,
         powerEfficient: true
       };
     } else {
-      // Intel Arc GPU
       return {
         tokensPerSecond: parameterCount < 7 ? 30 : parameterCount < 13 ? 15 : 8,
         memoryRequired: parameterCount * 1.5,
@@ -339,14 +420,9 @@ class OpenVinoBackend extends BaseBackend {
     }
   }
 
-  /**
-   * Get setup instructions for OpenVINO
-   */
   getSetupInstructions() {
     return this.npuBridge.getSetupInstructions();
   }
 }
 
 module.exports = OpenVinoBackend;
-
-

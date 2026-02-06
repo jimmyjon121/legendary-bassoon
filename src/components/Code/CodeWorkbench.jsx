@@ -7,20 +7,32 @@ import { useEditorStore } from '../../stores/editorStore';
 import { AgentPanel } from './AgentPanel';
 import { PlanBuilder } from './PlanBuilder';
 import { LivePreview } from './LivePreview';
-import { Layers, Eye, EyeOff } from 'lucide-react';
+import { TeammateToolbar } from './TeammateFeatures';
+import { Layers, Eye, EyeOff, Sparkles } from 'lucide-react';
 
 export function CodeWorkbench() {
   const activeFilePath = useEditorStore((state) => state.activeFilePath);
   const openFiles = useEditorStore((state) => state.openFiles);
-  const [panelMode, setPanelMode] = useState('chat'); // 'agent' | 'chat' | 'plan' - default to chat
+  const rootPath = useEditorStore((state) => state.rootPath);
+  const files = useEditorStore((state) => state.files);
+
+  const [panelMode, setPanelMode] = useState('chat');
   const [pendingPlan, setPendingPlan] = useState(null);
-  const [extractedPlan, setExtractedPlan] = useState(null); // Plan extracted from chat
-  const [showPreview, setShowPreview] = useState(false); // Toggle live preview
-  
+  const [extractedPlan, setExtractedPlan] = useState(null);
+  const [showPreview, setShowPreview] = useState(false);
+  const [selectedCode, setSelectedCode] = useState(null);
+  const [selectionStartLine, setSelectionStartLine] = useState(null);
+
   // Get current file content for the chat panel
   const currentFileContent = activeFilePath && openFiles[activeFilePath] 
     ? openFiles[activeFilePath].content 
     : null;
+
+  // Handle text selection from editor
+  const handleSelectionChange = useCallback((code, startLine) => {
+    setSelectedCode(code);
+    setSelectionStartLine(startLine);
+  }, []);
 
   // Handle plan execution - switch to agent and pass plan
   const handleExecutePlan = useCallback((plan) => {
@@ -32,6 +44,11 @@ export function CodeWorkbench() {
   const handleExtractPlan = useCallback((plan) => {
     setExtractedPlan(plan);
     setPanelMode('plan');
+  }, []);
+
+  // Handle investigate - triggers AI to search and summarize
+  const handleInvestigate = useCallback(async (query) => {
+    setPanelMode('chat');
   }, []);
 
   return (
@@ -48,7 +65,7 @@ export function CodeWorkbench() {
       {/* Center: Editor + Terminal */}
       <div className="flex flex-col gap-3 h-full overflow-hidden">
         <div className="flex-1 min-h-0 relative">
-          <CodeEditor />
+          <CodeEditor onSelectionChange={handleSelectionChange} />
           {/* Preview Toggle Button */}
           <button
             type="button"
@@ -76,9 +93,19 @@ export function CodeWorkbench() {
         </div>
       )}
       
-      {/* Right: AI Panel - with mode toggle */}
+      {/* Right: AI Panel - with mode toggle and teammate features */}
       <div className="h-full flex flex-col overflow-hidden">
-        <div className="flex-shrink-0 flex items-center gap-1 px-2 pb-2">
+        {/* Teammate Toolbar */}
+        <div className="flex-shrink-0 px-2 pb-2">
+          <TeammateToolbar onInvestigate={handleInvestigate} />
+        </div>
+        
+        {/* Mode Toggle */}
+        <div className="flex-shrink-0 flex items-center gap-1 px-2 pb-2 border-b border-forge-border/30">
+          <div className="flex items-center gap-1 mr-2">
+            <Sparkles size={12} className="text-workspace-code" />
+            <span className="text-[10px] text-text-muted">Mode:</span>
+          </div>
           <button
             type="button"
             onClick={() => setPanelMode('plan')}
@@ -129,8 +156,13 @@ export function CodeWorkbench() {
             />
           ) : (
             <CodeChatPanel 
-              currentFile={activeFilePath} 
+              currentFile={activeFilePath}
               currentFileContent={currentFileContent}
+              selectedCode={selectedCode}
+              selectionStartLine={selectionStartLine}
+              rootPath={rootPath}
+              projectFiles={files}
+              openFilesList={Object.keys(openFiles)}
               onExtractPlan={handleExtractPlan}
             />
           )}

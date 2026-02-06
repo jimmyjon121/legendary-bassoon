@@ -42,8 +42,9 @@ export function useVoiceInput({ onResult } = {}) {
             return;
           }
           setIsTranscribing(true);
+          // Use Uint8Array instead of Node.js Buffer (not available in renderer)
           const res = await window.electronAPI.transcribeAudio(
-            Buffer.from(arrayBuffer),
+            new Uint8Array(arrayBuffer),
           );
           if (res?.success && res.text && onResult) {
             onResult(res.text);

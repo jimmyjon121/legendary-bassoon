@@ -21,6 +21,16 @@ let cachedHardware = null;
 let lastStatsUpdate = 0;
 let cachedStats = null;
 
+// NPU server status cache with adaptive backoff.
+// When the server is reachable we poll every 10s.
+// When it's unreachable we back off to 60s to avoid ECONNREFUSED spam.
+let cachedNpuServerStatus = null;
+let lastNpuServerStatusAt = 0;
+let npuServerPollInterval = 10000;       // current poll interval (ms)
+const NPU_POLL_ONLINE  = 10000;          // 10s when server is online
+const NPU_POLL_OFFLINE = 60000;          // 60s when server is offline
+const NPU_POLL_FIRST   = 0;             // immediately on first call
+
 /**
  * Detect all available hardware for AI acceleration
  */
@@ -507,28 +517,68 @@ async function getHardwareStats() {
         tops: cachedHardware.npu.tops || 45
       };
       
-      // Check if OpenVINO server is running
+      // Check if OpenVINO server is running (with adaptive backoff)
       try {
-        const http = require('http');
-        await new Promise((resolve) => {
-          const req = http.get('http://localhost:8081/status', { timeout: 500 }, (res) => {
-            let data = '';
-            res.on('data', chunk => data += chunk);
-            res.on('end', () => {
-              try {
-                const status = JSON.parse(data);
-                npuStatus.serverRunning = status.server === 'running';
-                npuStatus.modelLoaded = status.model_loaded === true;
-                npuStatus.device = status.device || 'NPU'; // GPU, NPU, or AUTO
-                npuStatus.active = npuStatus.modelLoaded; // Active if model is loaded and ready
-              } catch {}
-              resolve();
-            });
+        const sinceLastPoll = now - lastNpuServerStatusAt;
+        if (cachedNpuServerStatus && sinceLastPoll < npuServerPollInterval) {
+          // Use cached value
+          Object.assign(npuStatus, cachedNpuServerStatus);
+        } else {
+          // Time to poll
+          const http = require('http');
+          const pollResult = await new Promise((resolve) => {
+            try {
+              const req = http.get('http://localhost:8081/status', { timeout: 1500 }, (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                  try {
+                    const status = JSON.parse(data);
+                    resolve({
+                      reachable: true,
+                      serverRunning: status.server === 'running' || status.status === 'running',
+                      modelLoaded: status.model_loaded === true || status.modelLoaded === true,
+                      device: status.device || 'NPU',
+                    });
+                  } catch {
+                    resolve({ reachable: false });
+                  }
+                });
+              });
+              req.on('error', () => resolve({ reachable: false }));
+              req.on('timeout', () => { req.destroy(); resolve({ reachable: false }); });
+            } catch {
+              resolve({ reachable: false });
+            }
           });
-          req.on('error', () => resolve());
-          req.on('timeout', () => { req.destroy(); resolve(); });
-        });
-      } catch {}
+
+          if (pollResult.reachable) {
+            // Server is up — poll more frequently
+            npuServerPollInterval = NPU_POLL_ONLINE;
+            const next = {
+              serverRunning: pollResult.serverRunning,
+              modelLoaded: pollResult.modelLoaded,
+              device: pollResult.device,
+              active: pollResult.modelLoaded,
+            };
+            Object.assign(npuStatus, next);
+            cachedNpuServerStatus = next;
+          } else {
+            // Server is down — back off to avoid spamming ECONNREFUSED
+            npuServerPollInterval = NPU_POLL_OFFLINE;
+            cachedNpuServerStatus = {
+              serverRunning: false,
+              modelLoaded: false,
+              device: 'NPU',
+              active: false,
+            };
+            Object.assign(npuStatus, cachedNpuServerStatus);
+          }
+          lastNpuServerStatusAt = now;
+        }
+      } catch {
+        // Total failure — just leave defaults
+      }
     }
 
     // Get Ollama GPU stats (models loaded in GPU memory)
@@ -684,6 +734,20 @@ function clearCache() {
   cachedHardware = null;
   cachedStats = null;
   lastStatsUpdate = 0;
+  // Also reset NPU tracking caches
+  cachedNpuServerStatus = null;
+  lastNpuServerStatusAt = 0;
+  npuServerPollInterval = NPU_POLL_FIRST;
+  // If the NpuBridge singleton exists, clear its caches too
+  try {
+    const { getNpuBridge } = require('./npu-bridge');
+    const bridge = getNpuBridge();
+    if (bridge && typeof bridge.clearAllCaches === 'function') {
+      bridge.clearAllCaches();
+    }
+  } catch {
+    // Non-critical
+  }
 }
 
 /**

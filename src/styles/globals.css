@@ -209,9 +209,9 @@
     animation: spin 1s linear infinite;
   }
   
-  /* Message appear animation - optimized for chat */
+  /* Message appear animation - optimized for chat (fallback for non-framer elements) */
   .message-appear {
-    animation: messageAppear 0.2s ease-out forwards;
+    animation: messageAppear 0.25s cubic-bezier(0.22, 1, 0.36, 1) forwards;
     will-change: transform, opacity;
   }
   
@@ -233,11 +233,11 @@
   @keyframes messageAppear {
     from { 
       opacity: 0; 
-      transform: translateY(8px); 
+      transform: translateY(10px) scale(0.98); 
     }
     to { 
       opacity: 1; 
-      transform: translateY(0); 
+      transform: translateY(0) scale(1); 
     }
   }
   
@@ -408,70 +408,83 @@ select {
   padding-right: 36px;
 }
 
-/* === PROSE (Markdown) === */
+/* === PROSE (Markdown) - Premium Typography === */
 .prose {
-  color: rgba(248, 248, 252, 0.9);
-  line-height: 1.65;
+  color: rgba(248, 248, 252, 0.88);
+  line-height: 1.7;
+  font-size: 0.9375rem;
+  letter-spacing: 0.005em;
 }
 
-.prose p { margin-bottom: 0.75em; }
+.prose p { margin-bottom: 0.85em; }
 .prose p:last-child { margin-bottom: 0; }
 
 .prose h1, .prose h2, .prose h3 {
   color: #f8f8fc;
-  font-weight: 600;
-  margin-top: 1.25em;
-  margin-bottom: 0.5em;
+  font-weight: 650;
+  margin-top: 1.35em;
+  margin-bottom: 0.55em;
+  letter-spacing: -0.01em;
 }
 
-.prose h1 { font-size: 1.375rem; }
-.prose h2 { font-size: 1.125rem; }
+.prose h1 { font-size: 1.4rem; }
+.prose h2 { font-size: 1.15rem; }
 .prose h3 { font-size: 1rem; }
 
 .prose strong { color: #f8f8fc; font-weight: 600; }
+.prose em { color: rgba(248, 248, 252, 0.75); }
 
 .prose a {
-  color: #8b5cf6;
+  color: #a78bfa;
   text-decoration: underline;
-  text-underline-offset: 2px;
+  text-underline-offset: 3px;
+  text-decoration-color: rgba(167, 139, 250, 0.3);
+  transition: text-decoration-color 0.15s;
+}
+.prose a:hover {
+  text-decoration-color: rgba(167, 139, 250, 0.7);
 }
 
 .prose ul, .prose ol {
-  margin: 0.5em 0;
-  padding-left: 1.25em;
+  margin: 0.6em 0;
+  padding-left: 1.35em;
 }
 
-.prose li { margin: 0.2em 0; }
+.prose li { margin: 0.25em 0; }
+.prose li::marker { color: rgba(139, 92, 246, 0.5); }
 .prose ul { list-style-type: disc; }
 .prose ol { list-style-type: decimal; }
 
 .prose blockquote {
-  border-left: 3px solid rgba(139, 92, 246, 0.4);
-  padding-left: 0.75em;
-  margin: 0.75em 0;
-  color: rgba(248, 248, 252, 0.7);
+  border-left: 3px solid rgba(139, 92, 246, 0.35);
+  padding: 0.5em 0 0.5em 1em;
+  margin: 0.85em 0;
+  color: rgba(248, 248, 252, 0.65);
   font-style: italic;
+  background: rgba(139, 92, 246, 0.03);
+  border-radius: 0 0.5rem 0.5rem 0;
 }
 
 .prose pre {
-  background: rgba(0, 0, 0, 0.4);
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  border-radius: 0.5rem;
-  padding: 0.75rem;
+  background: rgba(0, 0, 0, 0.35);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 0.75rem;
+  padding: 0.85rem;
   overflow-x: auto;
-  margin: 0.75em 0;
+  margin: 0.85em 0;
 }
 
 .prose code {
   font-family: var(--font-mono);
-  font-size: 0.85em;
+  font-size: 0.84em;
 }
 
 .prose :not(pre) > code {
-  background: rgba(139, 92, 246, 0.12);
-  padding: 0.1em 0.35em;
-  border-radius: 4px;
+  background: rgba(139, 92, 246, 0.1);
+  padding: 0.15em 0.4em;
+  border-radius: 5px;
   color: #c4b5fd;
+  font-weight: 500;
 }
 
 .prose pre code {
@@ -483,31 +496,61 @@ select {
 .prose table {
   width: 100%;
   border-collapse: collapse;
-  margin: 0.75em 0;
+  margin: 0.85em 0;
+  border-radius: 0.5rem;
+  overflow: hidden;
 }
 
 .prose th, .prose td {
-  border: 1px solid rgba(255, 255, 255, 0.06);
-  padding: 0.4rem 0.6rem;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 0.5rem 0.7rem;
   text-align: left;
 }
 
 .prose th {
-  background: rgba(139, 92, 246, 0.08);
+  background: rgba(139, 92, 246, 0.06);
   font-weight: 600;
+  font-size: 0.85em;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  color: rgba(248, 248, 252, 0.7);
+}
+
+.prose tr:nth-child(even) td {
+  background: rgba(255, 255, 255, 0.01);
 }
 
 .prose hr {
   border: none;
-  border-top: 1px solid rgba(255, 255, 255, 0.06);
-  margin: 1em 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  margin: 1.2em 0;
+}
+
+.prose img {
+  border-radius: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+/* Code block wrapper - modern design */
+.code-block-wrapper {
+  border-radius: 0.75rem;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.code-block-wrapper pre {
+  margin: 0 !important;
+  border: none !important;
+  border-radius: 0 !important;
 }
 
 .inline-code {
-  background: rgba(139, 92, 246, 0.12);
-  padding: 0.1em 0.3em;
-  border-radius: 4px;
+  background: rgba(139, 92, 246, 0.1);
+  padding: 0.15em 0.4em;
+  border-radius: 5px;
   color: #c4b5fd;
   font-family: var(--font-mono);
-  font-size: 0.85em;
+  font-size: 0.84em;
+  font-weight: 500;
 }

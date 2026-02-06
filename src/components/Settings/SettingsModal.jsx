@@ -2327,11 +2327,12 @@ function HardwareSettings() {
 
 /**
  * Image Generation Backend Control Component
- * Similar pattern to NPU control - one-click start/stop
+ * One-click setup with live progress feedback.
  */
 function ImageBackendControl({ imageStatus, setImageStatus }) {
   const [busy, setBusy] = React.useState(false);
   const [error, setError] = React.useState(null);
+  const [progress, setProgress] = React.useState(null); // { step, message, percent }
 
   const refreshStatus = async () => {
     try {
@@ -2344,26 +2345,57 @@ function ImageBackendControl({ imageStatus, setImageStatus }) {
     }
   };
 
+  // Listen for progress events from the backend during setup/download
   React.useEffect(() => {
     refreshStatus();
+
+    const unsub = window.electronAPI?.onImageAutoEvent?.((data) => {
+      if (!data) return;
+      const { event, message, percent, error: eventError } = data;
+      console.log('[ImageBackend] Event:', event, message || '', percent != null ? `${percent}%` : '');
+
+      if (event === 'setup:complete' || event === 'backend:ready' || event === 'install:complete' || event === 'model:complete') {
+        setProgress({ step: 'done', message: message || 'Ready!', percent: 100 });
+        refreshStatus();
+        setTimeout(() => setProgress(null), 4000);
+      } else if (event === 'setup:error' || event === 'backend:error') {
+        setError(eventError || message || 'Setup failed');
+        setProgress(null);
+        setBusy(false);
+      } else if (event === 'install:download' || event === 'model:download') {
+        // File download — show fine-grained progress
+        const label = event === 'install:download' ? 'Downloading ComfyUI' : 'Downloading model';
+        setProgress({ step: event, message: message || `${label}...`, percent: percent || 0 });
+      } else if (event === 'install:extract') {
+        setProgress({ step: event, message: message || 'Extracting files...', percent: percent || 0 });
+      } else if (event === 'backend:starting') {
+        setProgress({ step: event, message: message || 'Starting server...', percent: data.progress || 0 });
+      } else if (message) {
+        setProgress(prev => ({ step: event, message, percent: percent ?? prev?.percent ?? 0 }));
+      }
+    });
+
+    return () => { if (typeof unsub === 'function') unsub(); };
   }, []);
 
   const handleStart = async () => {
     setBusy(true);
     setError(null);
+    setProgress({ step: 'start', message: 'Starting ComfyUI server...', percent: 0 });
     try {
-      console.log('[ImageBackend] Starting backend...');
       const result = await window.electronAPI?.imageAutoStart?.();
-      
       if (result?.success) {
-        // Give it a moment then refresh status
-        await new Promise(r => setTimeout(r, 2000));
+        setProgress({ step: 'done', message: 'Server running!', percent: 100 });
+        await new Promise(r => setTimeout(r, 1500));
         await refreshStatus();
+        setProgress(null);
       } else {
         setError(result?.error || 'Failed to start backend');
+        setProgress(null);
       }
     } catch (e) {
       setError(e.message);
+      setProgress(null);
     }
     setBusy(false);
   };
@@ -2371,6 +2403,7 @@ function ImageBackendControl({ imageStatus, setImageStatus }) {
   const handleStop = async () => {
     setBusy(true);
     setError(null);
+    setProgress(null);
     try {
       await window.electronAPI?.imageAutoStop?.();
       await refreshStatus();
@@ -2383,23 +2416,29 @@ function ImageBackendControl({ imageStatus, setImageStatus }) {
   const handleSetup = async () => {
     setBusy(true);
     setError(null);
+    setProgress({ step: 'init', message: 'Starting setup...', percent: 0 });
     try {
-      console.log('[ImageBackend] Running auto-setup...');
       const result = await window.electronAPI?.imageAutoSetup?.({});
-      
       if (result?.success) {
+        setProgress({ step: 'done', message: 'Image generation ready!', percent: 100 });
         await refreshStatus();
+        setTimeout(() => setProgress(null), 3000);
       } else {
         setError(result?.error || 'Setup failed');
+        setProgress(null);
       }
     } catch (e) {
       setError(e.message);
+      setProgress(null);
     }
     setBusy(false);
   };
 
+  const showSetupButton = !imageStatus?.installed && !imageStatus?.needsModel;
+  const showModelNeeded = imageStatus?.installed && (imageStatus?.models?.length === 0 || imageStatus?.needsModel);
+
   return (
-    <div className="p-4 bg-forge-bg border border-forge-border rounded-lg">
+    <div className="p-4 bg-forge-bg border border-forge-border rounded-lg space-y-3">
       <div className="flex items-center justify-between gap-3">
         <div className="flex-1">
           <h3 className="text-sm font-medium text-text-primary">Image Generation (ComfyUI)</h3>
@@ -2410,49 +2449,50 @@ function ImageBackendControl({ imageStatus, setImageStatus }) {
           {imageStatus && (
             <div className="mt-2 space-y-1">
               <div className="flex items-center gap-2 text-[11px]">
-                <span className={`w-2 h-2 rounded-full ${imageStatus.installed ? 'bg-status-success' : 'bg-status-error'}`} />
+                <span className={`w-2 h-2 rounded-full ${imageStatus.installed ? 'bg-emerald-400' : 'bg-red-400'}`} />
                 <span className="text-text-muted">
                   ComfyUI: {imageStatus.installed ? 'Installed' : 'Not installed'}
                 </span>
               </div>
               <div className="flex items-center gap-2 text-[11px]">
-                <span className={`w-2 h-2 rounded-full ${imageStatus.running ? 'bg-status-success' : 'bg-status-error'}`} />
+                <span className={`w-2 h-2 rounded-full ${imageStatus.running ? 'bg-emerald-400' : 'bg-red-400'}`} />
                 <span className="text-text-muted">
                   Server: {imageStatus.running ? `Running on port ${imageStatus.port || 8188}` : 'Not running'}
                 </span>
               </div>
               <div className="flex items-center gap-2 text-[11px]">
-                <span className={`w-2 h-2 rounded-full ${imageStatus.models?.length > 0 ? 'bg-status-success' : 'bg-status-warning'}`} />
+                <span className={`w-2 h-2 rounded-full ${imageStatus.models?.length > 0 ? 'bg-emerald-400' : 'bg-amber-400'}`} />
                 <span className="text-text-muted">
                   Models: {imageStatus.models?.length || 0} installed
+                  {showModelNeeded && !busy && ' — download a starter model below'}
                 </span>
               </div>
-              {imageStatus.baseDir && (
-                <div className="text-[10px] text-neutral-500 mt-1 font-mono truncate" title={imageStatus.baseDir}>
-                  {imageStatus.baseDir}
+              {imageStatus.comfyDir && (
+                <div className="text-[10px] text-neutral-500 mt-1 font-mono truncate" title={imageStatus.comfyDir}>
+                  {imageStatus.comfyDir}
                 </div>
               )}
-            </div>
-          )}
-          
-          {error && (
-            <div className="text-[11px] text-status-error mt-2">
-              Error: {error}
             </div>
           )}
         </div>
         
         <div className="flex flex-col gap-2">
-          {!imageStatus?.installed ? (
+          {(!imageStatus?.installed || showModelNeeded) && (
             <button
               type="button"
               onClick={handleSetup}
               disabled={busy}
               className="btn btn-primary whitespace-nowrap text-xs"
             >
-              {busy ? 'Setting up...' : 'One-Click Setup'}
+              {busy ? (
+                <span className="flex items-center gap-1.5">
+                  <Loader size={12} className="animate-spin" />
+                  Working...
+                </span>
+              ) : showModelNeeded ? 'Download Model' : 'One-Click Setup'}
             </button>
-          ) : (
+          )}
+          {imageStatus?.installed && !showModelNeeded && (
             <>
               <button
                 type="button"
@@ -2460,7 +2500,12 @@ function ImageBackendControl({ imageStatus, setImageStatus }) {
                 disabled={busy}
                 className={`btn whitespace-nowrap text-xs ${imageStatus?.running ? 'btn-secondary' : 'btn-primary'}`}
               >
-                {busy ? 'Please wait...' : imageStatus?.running ? 'Stop Server' : 'Start Server'}
+                {busy ? (
+                  <span className="flex items-center gap-1.5">
+                    <Loader size={12} className="animate-spin" />
+                    Please wait...
+                  </span>
+                ) : imageStatus?.running ? 'Stop Server' : 'Start Server'}
               </button>
               {!imageStatus?.running && (
                 <button
@@ -2476,6 +2521,51 @@ function ImageBackendControl({ imageStatus, setImageStatus }) {
           )}
         </div>
       </div>
+
+      {/* Live progress indicator */}
+      {progress && (
+        <div className="p-3 rounded-lg bg-indigo-500/10 border border-indigo-500/20 space-y-2">
+          <div className="flex items-center justify-between">
+            <span className="text-xs text-indigo-300 font-medium">{progress.message}</span>
+            {progress.percent > 0 && progress.percent < 100 && (
+              <span className="text-[10px] text-indigo-400 font-mono tabular-nums">{progress.percent}%</span>
+            )}
+          </div>
+          {progress.percent > 0 && (
+            <div className="h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
+              <div
+                className="h-full rounded-full transition-all duration-500 ease-out"
+                style={{
+                  width: `${Math.min(progress.percent, 100)}%`,
+                  background: progress.step === 'done'
+                    ? 'linear-gradient(90deg, #10b981, #34d399)'
+                    : 'linear-gradient(90deg, #6366f1, #818cf8)',
+                }}
+              />
+            </div>
+          )}
+          {progress.step !== 'done' && progress.percent === 0 && (
+            <div className="h-1.5 rounded-full bg-white/[0.06] overflow-hidden">
+              <div className="h-full w-1/3 rounded-full bg-indigo-500/50 animate-pulse" />
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Error display */}
+      {error && (
+        <div className="p-3 rounded-lg bg-red-500/10 border border-red-500/20">
+          <p className="text-xs text-red-400 font-medium">Setup Error</p>
+          <p className="text-[11px] text-red-300/80 mt-1 whitespace-pre-wrap">{error}</p>
+          <button
+            type="button"
+            onClick={() => { setError(null); refreshStatus(); }}
+            className="text-[10px] text-red-400 underline mt-2 hover:text-red-300"
+          >
+            Dismiss &amp; refresh status
+          </button>
+        </div>
+      )}
     </div>
   );
 }

@@ -4,8 +4,12 @@ import { analyzeProjectStructure } from '../services/projectAnalyzer';
 import { buildCodeIndex, getCodeIndexSummary } from '../services/codeIndexer';
 
 const MAX_HISTORY = 50;
+const MAX_CHECKPOINTS = 20;
 
 export const useEditorStore = create((set, get) => ({
+  // ============================================
+  // Basic Editor State
+  // ============================================
   rootPath: '',
   files: [], // project tree
   activeFilePath: '',
@@ -18,6 +22,270 @@ export const useEditorStore = create((set, get) => ({
   isScanning: false,
   isAnalyzingProject: false,
   error: null,
+
+  // ============================================
+  // AI Session State
+  // ============================================
+  aiSession: {
+    sessionId: null,
+    startedAt: null,
+    filesRead: [],           // Provenance: files AI has seen
+    toolCalls: [],           // History of tool calls  
+    proposedPatches: [],     // Pending changes from AI
+    appliedPatches: [],      // Applied changes
+    rejectedPatches: [],     // Rejected changes
+    checkpoints: [],         // Rewindable states
+    contextBundle: {         // What AI currently sees
+      currentFile: null,
+      relatedFiles: [],
+      searchResults: [],
+      recentDiffs: [],
+      projectBrain: null
+    },
+    isProcessing: false,
+    currentToolCall: null
+  },
+
+  // ============================================
+  // AI Session Actions
+  // ============================================
+  
+  startAISession() {
+    const sessionId = `session_${Date.now()}`;
+    set({
+      aiSession: {
+        sessionId,
+        startedAt: Date.now(),
+        filesRead: [],
+        toolCalls: [],
+        proposedPatches: [],
+        appliedPatches: [],
+        rejectedPatches: [],
+        checkpoints: [],
+        contextBundle: {
+          currentFile: get().activeFilePath,
+          relatedFiles: [],
+          searchResults: [],
+          recentDiffs: [],
+          projectBrain: null
+        },
+        isProcessing: false,
+        currentToolCall: null
+      }
+    });
+    return sessionId;
+  },
+
+  recordToolCall(toolCall) {
+    set((state) => ({
+      aiSession: {
+        ...state.aiSession,
+        toolCalls: [...state.aiSession.toolCalls, {
+          ...toolCall,
+          timestamp: Date.now()
+        }],
+        currentToolCall: toolCall
+      }
+    }));
+  },
+
+  completeToolCall(toolCallId, result) {
+    set((state) => ({
+      aiSession: {
+        ...state.aiSession,
+        toolCalls: state.aiSession.toolCalls.map(tc =>
+          tc.id === toolCallId ? { ...tc, result, completedAt: Date.now() } : tc
+        ),
+        currentToolCall: null
+      }
+    }));
+  },
+
+  recordFileRead(path, content) {
+    set((state) => {
+      // Avoid duplicates
+      const existing = state.aiSession.filesRead.find(f => f.path === path);
+      if (existing) {
+        return {
+          aiSession: {
+            ...state.aiSession,
+            filesRead: state.aiSession.filesRead.map(f =>
+              f.path === path ? { ...f, readAt: Date.now(), size: content?.length || 0 } : f
+            )
+          }
+        };
+      }
+      return {
+        aiSession: {
+          ...state.aiSession,
+          filesRead: [...state.aiSession.filesRead, {
+            path,
+            readAt: Date.now(),
+            size: content?.length || 0
+          }]
+        }
+      };
+    });
+  },
+
+  addProposedPatch(patch) {
+    set((state) => ({
+      aiSession: {
+        ...state.aiSession,
+        proposedPatches: [...state.aiSession.proposedPatches, {
+          ...patch,
+          id: patch.id || `patch_${Date.now()}`,
+          proposedAt: Date.now(),
+          status: 'pending'
+        }]
+      }
+    }));
+  },
+
+  approvePatch(patchId) {
+    set((state) => {
+      const patch = state.aiSession.proposedPatches.find(p => p.id === patchId);
+      if (!patch) return state;
+      
+      return {
+        aiSession: {
+          ...state.aiSession,
+          proposedPatches: state.aiSession.proposedPatches.filter(p => p.id !== patchId),
+          appliedPatches: [...state.aiSession.appliedPatches, {
+            ...patch,
+            status: 'applied',
+            appliedAt: Date.now()
+          }]
+        }
+      };
+    });
+  },
+
+  rejectPatch(patchId, reason = '') {
+    set((state) => {
+      const patch = state.aiSession.proposedPatches.find(p => p.id === patchId);
+      if (!patch) return state;
+      
+      return {
+        aiSession: {
+          ...state.aiSession,
+          proposedPatches: state.aiSession.proposedPatches.filter(p => p.id !== patchId),
+          rejectedPatches: [...state.aiSession.rejectedPatches, {
+            ...patch,
+            status: 'rejected',
+            rejectedAt: Date.now(),
+            rejectionReason: reason
+          }]
+        }
+      };
+    });
+  },
+
+  createCheckpoint(label = '') {
+    const state = get();
+    const checkpoint = {
+      id: `checkpoint_${Date.now()}`,
+      label: label || `Checkpoint ${state.aiSession.checkpoints.length + 1}`,
+      createdAt: Date.now(),
+      sessionId: state.aiSession.sessionId,
+      filesRead: state.aiSession.filesRead.length,
+      toolCalls: state.aiSession.toolCalls.length,
+      appliedPatches: state.aiSession.appliedPatches.map(p => p.id),
+      openFiles: Object.keys(state.openFiles),
+      activeFile: state.activeFilePath,
+      // Snapshot of file contents for potential rewind
+      fileSnapshots: Object.fromEntries(
+        Object.entries(state.openFiles).map(([path, file]) => [path, file.content])
+      )
+    };
+    
+    set((s) => ({
+      aiSession: {
+        ...s.aiSession,
+        checkpoints: [...s.aiSession.checkpoints, checkpoint].slice(-MAX_CHECKPOINTS)
+      }
+    }));
+    
+    return checkpoint;
+  },
+
+  rewindToCheckpoint(checkpointId) {
+    const { aiSession } = get();
+    const checkpoint = aiSession.checkpoints.find(c => c.id === checkpointId);
+    if (!checkpoint) return false;
+    
+    // Restore file contents from checkpoint
+    set((state) => ({
+      openFiles: Object.fromEntries(
+        Object.entries(checkpoint.fileSnapshots).map(([path, content]) => [
+          path,
+          { content, dirty: true }
+        ])
+      ),
+      activeFilePath: checkpoint.activeFile
+    }));
+    
+    return true;
+  },
+
+  updateContextBundle(updates) {
+    set((state) => ({
+      aiSession: {
+        ...state.aiSession,
+        contextBundle: {
+          ...state.aiSession.contextBundle,
+          ...updates
+        }
+      }
+    }));
+  },
+
+  setAIProcessing(isProcessing) {
+    set((state) => ({
+      aiSession: {
+        ...state.aiSession,
+        isProcessing
+      }
+    }));
+  },
+
+  clearAISession() {
+    set({
+      aiSession: {
+        sessionId: null,
+        startedAt: null,
+        filesRead: [],
+        toolCalls: [],
+        proposedPatches: [],
+        appliedPatches: [],
+        rejectedPatches: [],
+        checkpoints: [],
+        contextBundle: {
+          currentFile: null,
+          relatedFiles: [],
+          searchResults: [],
+          recentDiffs: [],
+          projectBrain: null
+        },
+        isProcessing: false,
+        currentToolCall: null
+      }
+    });
+  },
+
+  getAISessionStats() {
+    const { aiSession } = get();
+    return {
+      sessionId: aiSession.sessionId,
+      duration: aiSession.startedAt ? Date.now() - aiSession.startedAt : 0,
+      filesRead: aiSession.filesRead.length,
+      toolCalls: aiSession.toolCalls.length,
+      pendingPatches: aiSession.proposedPatches.length,
+      appliedPatches: aiSession.appliedPatches.length,
+      rejectedPatches: aiSession.rejectedPatches.length,
+      checkpoints: aiSession.checkpoints.length
+    };
+  },
 
   async chooseProjectRoot() {
     try {
@@ -40,7 +308,7 @@ export const useEditorStore = create((set, get) => ({
         isScanning: false,
       });
     } catch (error) {
-      console.error('Failed to scan project:', error);
+      console.error('[EditorStore] Failed to scan project:', error);
       // Even if scan fails, still set the rootPath so user can create files
       set({
         rootPath: rootPath,
@@ -103,7 +371,7 @@ export const useEditorStore = create((set, get) => ({
         },
       }));
     } catch (error) {
-      console.error('Failed to open file:', error);
+      console.error('[EditorStore] Failed to open file:', error);
       set({ error: error?.message || 'Failed to open file' });
     }
   },

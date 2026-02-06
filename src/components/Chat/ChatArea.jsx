@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, memo, useCallback, useMemo, lazy, Suspense } from 'react';
-import { Send, Square, Paperclip, Image, Sparkles, Users, Shield, Camera, Bot, User, Brain } from 'lucide-react';
+import { Send, Square, Paperclip, Image, Sparkles, Users, Shield, Camera, Bot, User, Brain, ChevronDown, Globe } from 'lucide-react';
 import { useAppStore, WORKSPACES } from '../../stores/appStore';
 import { EnhancedMessageBubble, TypingBubble, WelcomeMessage } from './EnhancedMessageBubble';
 import { VirtualizedMessageList } from './VirtualizedMessageList';
@@ -17,6 +17,11 @@ import { ModelCapabilityWarning } from './ModelCapabilityWarning';
 import { useModelAwareness } from '../../services/modelExperience';
 import { useTypingAnalyzer } from '../../hooks/useTypingAnalyzer';
 import { useSoulStore } from '../../stores/soulStore';
+import { ContextUtilizationIndicator } from './ContextUtilizationIndicator';
+import { ArtifactPanel } from './ArtifactPanel';
+import { ChatErrorBanner, ConnectionStatusDot } from './ChatErrorBoundary';
+import { MessageSkeleton } from './MessageSkeleton';
+import { useChatKeyboard } from '../../hooks/useChatKeyboard';
 
 // Lazy load heavy components
 const CompareMode = lazy(() => import('./CompareMode').then(m => ({ default: m.CompareMode })));
@@ -42,6 +47,9 @@ export function ChatArea() {
   const stopGeneration = useAppStore(s => s.stopGeneration);
   const toggleModelSelector = useAppStore(s => s.toggleModelSelector);
   const openExportModal = useAppStore(s => s.openExportModal);
+  const regenerateLastResponse = useAppStore(s => s.regenerateLastResponse);
+  const editMessageAndRegenerate = useAppStore(s => s.editMessageAndRegenerate);
+  const deleteMessage = useAppStore(s => s.deleteMessage);
 
   const [input, setInput] = useState('');
   const [isComposing, setIsComposing] = useState(false);
@@ -57,6 +65,22 @@ export function ChatArea() {
   const [showAgents, setShowAgents] = useState(false);
   const [attachments, setAttachments] = useState([]);
   const [showModelExperience, setShowModelExperience] = useState(false);
+  const [isLoadingConversation, setIsLoadingConversation] = useState(false);
+  const [showScrollButton, setShowScrollButton] = useState(false);
+  const [webSearchEnabled, setWebSearchEnabled] = useState(() => localStorage.getItem('webSearchEnabled') === 'true');
+  
+  // Artifact panel state - for live preview of HTML/SVG/Mermaid/React
+  const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
+  const [artifactContent, setArtifactContent] = useState(null);
+  
+  // Keyboard shortcuts for chat
+  const { copyToast } = useChatKeyboard({ textareaRef });
+  
+  // Handler for showing artifact preview
+  const handleShowArtifact = useCallback((messageId, content) => {
+    setArtifactContent(content);
+    setArtifactPanelOpen(true);
+  }, []);
   
   const workspace = WORKSPACES[currentWorkspace];
   
@@ -66,18 +90,22 @@ export function ChatArea() {
   // Soul store for friction signal recording
   const { recordUserAction } = useSoulStore();
   
-  // Friction signal handlers
-  const handleRegenerate = async (messageId) => {
-    await recordUserAction('regenerate', { 
+  // Regenerate: actually re-sends the last user message to get a new response
+  const handleRegenerate = useCallback(async (messageId) => {
+    recordUserAction('regenerate', { 
       messageId, 
       workspace: currentWorkspace,
       model: currentModel 
     });
-    // Trigger actual regeneration logic here if needed
-  };
+    // Actually regenerate the response
+    if (regenerateLastResponse) {
+      await regenerateLastResponse();
+    }
+  }, [recordUserAction, currentWorkspace, currentModel, regenerateLastResponse]);
   
-  const handleMessageEdit = async (messageId, originalContent, newContent) => {
-    await recordUserAction('edit', { 
+  // Edit: updates a user message and regenerates everything after it
+  const handleMessageEdit = useCallback(async (messageId, originalContent, newContent) => {
+    recordUserAction('edit', { 
       messageId, 
       workspace: currentWorkspace,
       metadata: {
@@ -85,7 +113,17 @@ export function ChatArea() {
         newLength: newContent?.length || 0,
       }
     });
-  };
+    if (editMessageAndRegenerate && newContent?.trim()) {
+      await editMessageAndRegenerate(messageId, newContent.trim());
+    }
+  }, [recordUserAction, currentWorkspace, editMessageAndRegenerate]);
+
+  // Delete: removes a single message
+  const handleDeleteMessage = useCallback(async (messageId) => {
+    if (deleteMessage) {
+      await deleteMessage(messageId);
+    }
+  }, [deleteMessage]);
   
   const handleFeedback = async (messageId, feedbackType) => {
     if (feedbackType === 'regenerate') {
@@ -141,42 +179,80 @@ export function ChatArea() {
     },
   });
 
-  // Check if user is near bottom (within 150px)
+  // Check if user is near bottom (within 200px)
   const isNearBottom = useCallback(() => {
     const container = messagesContainerRef.current;
     if (!container) return true;
-    const threshold = 150;
+    const threshold = 200;
     return container.scrollHeight - container.scrollTop - container.clientHeight < threshold;
   }, []);
 
-  // Auto-scroll to bottom - only when near bottom or for user messages
-  useEffect(() => {
-    if (isNearBottom() && !isUserScrollingRef.current) {
-      requestAnimationFrame(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  // Smooth scroll to bottom using scrollTop animation for buttery smooth feel
+  const scrollToBottom = useCallback((instant = false) => {
+    const container = messagesContainerRef.current;
+    if (!container) return;
+    
+    if (instant) {
+      container.scrollTop = container.scrollHeight;
+    } else {
+      // Use native smooth scroll
+      container.scrollTo({
+        top: container.scrollHeight,
+        behavior: 'smooth',
       });
     }
-  }, [messages, streamingContent, isNearBottom]);
+  }, []);
+
+  // Auto-scroll during streaming - smooth, only if user hasn't scrolled away
+  useEffect(() => {
+    if (isGenerating && streamingContent && !isUserScrollingRef.current) {
+      // During streaming: use requestAnimationFrame for 60fps smooth scroll
+      const raf = requestAnimationFrame(() => {
+        const container = messagesContainerRef.current;
+        if (container && isNearBottom()) {
+          container.scrollTop = container.scrollHeight;
+        }
+      });
+      return () => cancelAnimationFrame(raf);
+    }
+  }, [streamingContent, isGenerating, isNearBottom]);
+
+  // Auto-scroll when new messages arrive (not during streaming)
+  useEffect(() => {
+    if (!isGenerating && messages.length > 0) {
+      if (isNearBottom() && !isUserScrollingRef.current) {
+        requestAnimationFrame(() => scrollToBottom(false));
+      }
+    }
+  }, [messages.length, isGenerating, isNearBottom, scrollToBottom]);
 
   // Instant scroll for user's own messages
   useEffect(() => {
     const lastMessage = messages[messages.length - 1];
     if (lastMessage?.role === 'user') {
       isUserScrollingRef.current = false;
-      requestAnimationFrame(() => {
-        messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
-      });
+      requestAnimationFrame(() => scrollToBottom(true));
     }
-  }, [messages.length]);
+  }, [messages.length, scrollToBottom]);
 
-  // Track user scrolling
+  // Track user scrolling + show/hide "scroll to bottom" button
   const handleScroll = useCallback(() => {
     if (scrollTimeoutRef.current) clearTimeout(scrollTimeoutRef.current);
-    isUserScrollingRef.current = true;
+    
+    const wasNearBottom = isNearBottom();
+    setShowScrollButton(!wasNearBottom);
+    
+    if (!wasNearBottom) {
+      isUserScrollingRef.current = true;
+    }
+    
     scrollTimeoutRef.current = setTimeout(() => {
-      isUserScrollingRef.current = false;
-    }, 1000);
-  }, []);
+      if (isNearBottom()) {
+        isUserScrollingRef.current = false;
+        setShowScrollButton(false);
+      }
+    }, 1500);
+  }, [isNearBottom]);
 
   // Cleanup
   useEffect(() => {
@@ -218,7 +294,7 @@ export function ChatArea() {
       return [];
     });
     try {
-      await sendMessage(message, { attachments: payloadAttachments });
+      await sendMessage(message, { attachments: payloadAttachments, webSearchEnabled });
     } catch (error) {
       console.error('Failed to send message:', error);
     }
@@ -287,14 +363,31 @@ export function ChatArea() {
       {/* Model Capability Warning - shows if model doesn't match workspace */}
       <ModelCapabilityWarning />
 
+      {/* Error banner with guided recovery */}
+      <ChatErrorBanner />
+
+      {/* Copy toast notification */}
+      {copyToast && (
+        <div className="absolute top-4 left-1/2 -translate-x-1/2 z-50 px-4 py-2 rounded-xl bg-emerald-500/90 text-white text-xs font-medium shadow-lg animate-in fade-in slide-in-from-top-2 duration-200">
+          {copyToast}
+        </div>
+      )}
+
       <div 
         ref={messagesContainerRef}
         onScroll={handleScroll}
-        className="flex-1 overflow-y-auto px-4 py-4 scroll-smooth"
+        className="flex-1 overflow-y-auto px-4 py-4 relative"
+        style={{ scrollBehavior: 'auto' }}
       >
         <div className="max-w-3xl mx-auto mb-2 flex items-center justify-between">
-          <div className="text-xs text-text-muted">
-            {workspace?.name} workspace
+          <div className="flex items-center gap-3">
+            <div className="text-xs text-text-muted">
+              {workspace?.name} workspace
+            </div>
+            {/* Full context indicator - expandable */}
+            {messages.length > 0 && (
+              <ContextUtilizationIndicator className="max-w-xs" />
+            )}
           </div>
           <div className="flex items-center gap-3">
             <BranchSelector />
@@ -364,18 +457,21 @@ export function ChatArea() {
             )}
           </div>
         ) : (
-          <div className="max-w-3xl mx-auto space-y-4 enhanced-chat-container">
+          <div className="max-w-3xl mx-auto space-y-1 enhanced-chat-container">
             {messages.length === 0 && !isGenerating && (
               <WelcomeMessage modelName={currentModel} />
             )}
             {messages.map((message, idx) => (
-              <div key={message.id} className="message-appear">
+              <div key={message.id}>
                 <EnhancedMessageBubble 
                   message={message} 
                   showTimestamp={true}
-                  enableActions={message.role === 'assistant'}
+                  enableActions={true}
                   onRegenerate={() => handleRegenerate(message.id)}
+                  onEdit={(msgId, newContent) => handleMessageEdit(msgId, message.content, newContent)}
+                  onDelete={() => handleDeleteMessage(message.id)}
                   onFeedback={(msgId, type) => handleFeedback(msgId, type)}
+                  onShowArtifact={handleShowArtifact}
                 />
                 {message.role === 'assistant' && (
                   <BranchIndicator message={message} />
@@ -386,25 +482,40 @@ export function ChatArea() {
               </div>
             ))}
             {isGenerating && !streamingContent && (
-              <div className="message-appear">
-                <TypingBubble model={currentModel} />
-              </div>
+              <TypingBubble model={currentModel} />
             )}
             {isGenerating && streamingContent && (
-              <div className="message-appear">
-                <EnhancedMessageBubble 
-                  message={{
-                    id: 'streaming',
-                    role: 'assistant',
-                    content: streamingContent,
-                    model: currentModel
-                  }}
-                  isStreaming
-                />
-              </div>
+              <EnhancedMessageBubble 
+                message={{
+                  id: 'streaming',
+                  role: 'assistant',
+                  content: streamingContent,
+                  model: currentModel
+                }}
+                isStreaming
+              />
             )}
-            <div ref={messagesEndRef} />
+            <div ref={messagesEndRef} className="h-1" />
           </div>
+        )}
+
+        {/* Scroll to bottom button - appears when user scrolls up */}
+        {showScrollButton && (
+          <button
+            onClick={() => {
+              isUserScrollingRef.current = false;
+              scrollToBottom(false);
+              setShowScrollButton(false);
+            }}
+            className="sticky bottom-4 left-1/2 -translate-x-1/2 z-20 
+              w-10 h-10 rounded-full bg-white/10 backdrop-blur-md border border-white/20 
+              flex items-center justify-center text-white/70 hover:text-white hover:bg-white/20
+              transition-all duration-200 shadow-lg hover:shadow-xl
+              animate-in fade-in slide-in-from-bottom-2"
+            title="Scroll to bottom"
+          >
+            <ChevronDown size={20} />
+          </button>
         )}
       </div>
 
@@ -459,6 +570,23 @@ export function ChatArea() {
 
               {/* Action Buttons */}
               <div className="absolute right-2 bottom-2 flex items-center gap-1">
+                {/* Web Search Toggle */}
+                <button
+                  type="button"
+                  onClick={() => {
+                    const next = !webSearchEnabled;
+                    setWebSearchEnabled(next);
+                    localStorage.setItem('webSearchEnabled', next.toString());
+                  }}
+                  className={`flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                    webSearchEnabled 
+                      ? 'bg-blue-500/15 text-blue-400 border border-blue-500/25' 
+                      : 'text-text-muted hover:text-text-secondary hover:bg-forge-hover border border-transparent'
+                  }`}
+                  title={webSearchEnabled ? "Web search enabled" : "Enable web search"}
+                >
+                  <Globe size={14} />
+                </button>
                 {/* Templates */}
                 <TemplateSelector
                   onInsert={(text) =>
@@ -580,6 +708,7 @@ export function ChatArea() {
             {/* Model indicator + utilities */}
             <div className="flex items-center justify-between mt-2 px-1">
               <div className="flex items-center gap-3">
+                <ConnectionStatusDot />
                 <button
                   type="button"
                   onClick={toggleModelSelector}
@@ -598,13 +727,29 @@ export function ChatArea() {
                 </button>
               </div>
               
-              <span className="text-xs text-text-muted">
-                {input.length > 0 && `${input.length} chars`}
-              </span>
+              <div className="flex items-center gap-3">
+                {/* Context utilization indicator - shows how much of the context window is being used */}
+                <ContextUtilizationIndicator compact />
+                
+                {isGenerating && (
+                  <span className="text-[10px] text-white/30">Esc to stop</span>
+                )}
+                <span className="text-xs text-text-muted">
+                  {input.length > 0 && `${input.length} chars`}
+                </span>
+              </div>
             </div>
           </form>
         </div>
       </div>
+      
+      {/* Artifact Preview Panel - Shows live preview of HTML/SVG/Mermaid/React */}
+      <ArtifactPanel
+        content={artifactContent}
+        isOpen={artifactPanelOpen}
+        onClose={() => setArtifactPanelOpen(false)}
+        onToggle={() => setArtifactPanelOpen(!artifactPanelOpen)}
+      />
     </div>
   );
 }

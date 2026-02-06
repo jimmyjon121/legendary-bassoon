@@ -284,9 +284,17 @@ async function initDatabase(userDataPath) {
       context_length INTEGER,
       system_prompt TEXT,
       workspace TEXT,
-      is_default INTEGER DEFAULT 0
+      is_default INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
+
+  // Migration: add created_at to model_presets if it was created without it
+  try {
+    db.run(`ALTER TABLE model_presets ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP`);
+  } catch (_migrationErr) {
+    // Column already exists - ignore
+  }
 
   db.run(`
     CREATE TABLE IF NOT EXISTS conversation_branches (
@@ -473,11 +481,88 @@ function makeRequest(url, options = {}) {
 // Track active streaming requests for cancellation
 const activeStreams = new Map();
 
+// Retry configuration
+const RETRY_CONFIG = {
+  maxRetries: 3,
+  baseDelay: 1000, // 1 second
+  retryableErrors: [
+    'ECONNREFUSED',
+    'ECONNRESET',
+    'ETIMEDOUT',
+    'ENOTFOUND',
+    'EAI_AGAIN',
+    'EHOSTUNREACH',
+    'ENETUNREACH',
+    'socket hang up',
+  ],
+};
+
+/**
+ * Check if an error is retryable (network/connection errors only)
+ */
+function isRetryableError(error) {
+  const errorMsg = error?.message?.toLowerCase() || '';
+  const errorCode = error?.code || '';
+  
+  // Check error codes
+  if (RETRY_CONFIG.retryableErrors.includes(errorCode)) {
+    return true;
+  }
+  
+  // Check error messages
+  for (const retryable of RETRY_CONFIG.retryableErrors) {
+    if (errorMsg.includes(retryable.toLowerCase())) {
+      return true;
+    }
+  }
+  
+  // Also retry on generic connection errors
+  if (errorMsg.includes('connect') || errorMsg.includes('network') || errorMsg.includes('timeout')) {
+    return true;
+  }
+  
+  return false;
+}
+
+/**
+ * Execute a function with exponential backoff retry
+ * @param {Function} fn - Async function to execute
+ * @param {Object} options - Retry options
+ * @param {Function} onRetry - Callback when retrying (for UI updates)
+ */
+async function withRetry(fn, options = {}, onRetry = null) {
+  const { maxRetries = RETRY_CONFIG.maxRetries, baseDelay = RETRY_CONFIG.baseDelay } = options;
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      return await fn();
+    } catch (error) {
+      const isLastAttempt = attempt === maxRetries;
+      const shouldRetry = !isLastAttempt && isRetryableError(error);
+      
+      if (!shouldRetry) {
+        throw error;
+      }
+      
+      const delay = baseDelay * Math.pow(2, attempt); // Exponential backoff: 1s, 2s, 4s
+      console.log(`[LLM] Retry ${attempt + 1}/${maxRetries} after error: ${error.message}. Waiting ${delay}ms...`);
+      
+      // Notify UI about retry
+      if (onRetry) {
+        onRetry({ retrying: true, attempt: attempt + 1, maxRetries, delay, error: error.message });
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, delay));
+    }
+  }
+}
+
 // Streaming request for LLM
 function streamRequest(url, body, onChunk, channel) {
   return new Promise((resolve, reject) => {
     const protocol = url.startsWith('https') ? https : http;
     const urlObj = new URL(url);
+    const bodyStr = JSON.stringify(body);
     
     const reqOptions = {
       hostname: urlObj.hostname,
@@ -485,23 +570,61 @@ function streamRequest(url, body, onChunk, channel) {
       path: urlObj.pathname,
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json'
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(bodyStr),
       }
     };
     
+    // Buffer to handle partial JSON chunks split across TCP packets
+    let buffer = '';
+    
     const req = protocol.request(reqOptions, (res) => {
+      // Validate HTTP status code
+      if (res.statusCode !== 200) {
+        let errorBody = '';
+        res.on('data', (chunk) => { errorBody += chunk.toString(); });
+        res.on('end', () => {
+          activeStreams.delete(channel);
+          reject(new Error(`Ollama returned HTTP ${res.statusCode}: ${errorBody.substring(0, 200)}`));
+        });
+        return;
+      }
+
       res.on('data', (chunk) => {
-        const lines = chunk.toString().split('\n').filter(line => line.trim());
+        buffer += chunk.toString();
+        // Split on newlines and process complete lines
+        const lines = buffer.split('\n');
+        // Keep the last element (may be incomplete)
+        buffer = lines.pop() || '';
+
         for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed) continue;
           try {
-            const parsed = JSON.parse(line);
+            const parsed = JSON.parse(trimmed);
             onChunk(parsed);
           } catch {
-            // Ignore parse errors for partial chunks
+            // Ignore parse errors for genuinely malformed chunks
           }
         }
       });
+
+      // Handle response-level errors (e.g. connection reset mid-stream)
+      res.on('error', (error) => {
+        activeStreams.delete(channel);
+        reject(error);
+      });
+
       res.on('end', () => {
+        // Process any remaining data in buffer
+        if (buffer.trim()) {
+          try {
+            const parsed = JSON.parse(buffer.trim());
+            onChunk(parsed);
+          } catch {
+            // Ignore
+          }
+        }
         activeStreams.delete(channel);
         resolve();
       });
@@ -511,13 +634,20 @@ function streamRequest(url, body, onChunk, channel) {
       activeStreams.delete(channel);
       reject(error);
     });
+
+    // Add timeout (5 minutes for long generations)
+    req.setTimeout(300000, () => {
+      req.destroy();
+      activeStreams.delete(channel);
+      reject(new Error('Request timeout (5 minutes)'));
+    });
     
     // Store request for cancellation
     if (channel) {
       activeStreams.set(channel, req);
     }
     
-    req.write(JSON.stringify(body));
+    req.write(bodyStr);
     req.end();
   });
 }
@@ -603,46 +733,185 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   ipcMain.handle('llm:send', async (_, payload) => {
     const endpoint = store.get('llmEndpoint');
     try {
-      const response = await makeRequest(`${endpoint}/api/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: {
+      // Use /api/chat when messages array provided, else /api/generate
+      const useChat = Array.isArray(payload.messages) && payload.messages.length > 0;
+      
+      let apiPath, body;
+      if (useChat) {
+        apiPath = '/api/chat';
+        const messages = [];
+        if (payload.system) {
+          messages.push({ role: 'system', content: payload.system });
+        }
+        messages.push(...payload.messages);
+        body = { model: payload.model, messages, stream: false, options: payload.options || {} };
+      } else {
+        apiPath = '/api/generate';
+        body = {
           model: payload.model,
           prompt: payload.prompt,
           system: payload.system,
           stream: false,
           options: payload.options || {}
-        }
+        };
+      }
+      
+      const response = await makeRequest(`${endpoint}${apiPath}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body
       });
-      return response.data;
+      
+      // Normalize: /api/chat returns { message: { content } }, /api/generate returns { response }
+      const data = response.data;
+      if (useChat && data?.message?.content && !data.response) {
+        data.response = data.message.content;
+      }
+      return data;
     } catch (error) {
       throw new Error(`LLM request failed: ${error.message}`);
     }
   });
   
+  // Safe send helper - checks window is still valid before sending
+  const safeSend = (ch, data) => {
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(ch, data);
+      }
+    } catch (e) {
+      console.warn('[LLM Stream] Failed to send to renderer:', e.message);
+    }
+  };
+
   ipcMain.handle('llm:stream', async (_, payload) => {
     const endpoint = store.get('llmEndpoint');
     const { channel, ...rest } = payload;
     
+    // Track whether the stream already sent a done/error signal via Ollama's own done:true
+    let streamCompletedByOllama = false;
+
+    // ── Build the request body ──
+    // Use /api/chat (structured messages) when the frontend sends a messages array,
+    // fall back to /api/generate for legacy callers.
+    const useChat = Array.isArray(rest.messages) && rest.messages.length > 0;
+    
+    let requestBody;
+    let apiPath;
+    
+    if (useChat) {
+      // ── /api/chat path (proper chat format — model template applied correctly) ──
+      apiPath = '/api/chat';
+      
+      // Build messages array — system message first, then conversation
+      const messages = [];
+      if (rest.system) {
+        messages.push({ role: 'system', content: rest.system });
+      }
+      for (const msg of rest.messages) {
+        const entry = { role: msg.role, content: msg.content };
+        // Vision/multimodal: attach images to the last user message
+        if (msg.images && Array.isArray(msg.images) && msg.images.length > 0) {
+          entry.images = msg.images;
+          console.log(`[LLM Stream] Attached ${msg.images.length} image(s) to user message`);
+        }
+        messages.push(entry);
+      }
+      
+      // Build options: use frontend-provided values, only apply safety defaults when absent
+      const chatOpts = rest.options || {};
+      requestBody = {
+        model: rest.model,
+        messages,
+        stream: true,
+        options: {
+          ...chatOpts,
+          stop: [
+            ...(chatOpts.stop || []),
+            'Human:', 'human:', 'User:', 'user:',
+            '<|im_end|>', '<|eot_id|>', '<|end|>',
+          ],
+          // Use frontend value if provided; only apply floor default if missing
+          repeat_penalty: chatOpts.repeat_penalty ?? 1.1,
+          num_predict: chatOpts.num_predict ?? 4096,
+          frequency_penalty: chatOpts.frequency_penalty ?? 0.05,
+          presence_penalty: chatOpts.presence_penalty ?? 0.05,
+        }
+      };
+    } else {
+      // ── /api/generate fallback (legacy — raw prompt) ──
+      apiPath = '/api/generate';
+      
+      const genOpts = rest.options || {};
+      requestBody = {
+        model: rest.model,
+        prompt: rest.prompt,
+        system: rest.system,
+        stream: true,
+        options: {
+          ...genOpts,
+          stop: [
+            ...(genOpts.stop || []),
+            'Human:', 'human:', 'User:', 'user:',
+            '\nHuman:', '\nUser:', '\n\nHuman:', '\n\nUser:',
+            '### User', '\n### User',
+            '<|im_end|>', '<|eot_id|>', '<|end|>',
+          ],
+          // Use frontend value if provided; only apply floor default if missing
+          repeat_penalty: genOpts.repeat_penalty ?? 1.1,
+          num_predict: genOpts.num_predict ?? 4096,
+          frequency_penalty: genOpts.frequency_penalty ?? 0.05,
+          presence_penalty: genOpts.presence_penalty ?? 0.05,
+        }
+      };
+
+      // Vision/multimodal support for generate endpoint
+      if (rest.images && Array.isArray(rest.images) && rest.images.length > 0) {
+        requestBody.images = rest.images;
+        console.log(`[LLM Stream] Sending ${rest.images.length} image(s) for vision analysis`);
+      }
+    }
+    
     try {
-      await streamRequest(
-        `${endpoint}/api/generate`,
-        {
-          model: rest.model,
-          prompt: rest.prompt,
-          system: rest.system,
-          stream: true,
-          options: rest.options || {}
+      // Use retry wrapper for connection resilience
+      await withRetry(
+        async () => {
+          await streamRequest(
+            `${endpoint}${apiPath}`,
+            requestBody,
+            (chunk) => {
+              // Ollama sends { done: true } at the end of a stream
+              if (chunk.done) {
+                streamCompletedByOllama = true;
+                safeSend(channel, { done: true });
+                return;
+              }
+              
+              // Normalize response format:
+              // /api/chat returns { message: { content: "..." } }
+              // /api/generate returns { response: "..." }
+              if (useChat && chunk.message?.content) {
+                safeSend(channel, { response: chunk.message.content });
+              } else if (chunk.response) {
+                safeSend(channel, chunk);
+              }
+            },
+            channel
+          );
         },
-        (chunk) => {
-          mainWindow.webContents.send(channel, chunk);
-        },
-        channel
+        { maxRetries: 3, baseDelay: 1000 },
+        // Notify frontend about retry status
+        (retryInfo) => {
+          safeSend(channel, retryInfo);
+        }
       );
-      mainWindow.webContents.send(channel, { done: true });
+      // Only send our own done signal if Ollama didn't already
+      if (!streamCompletedByOllama) {
+        safeSend(channel, { done: true });
+      }
     } catch (error) {
       activeStreams.delete(channel);
-      mainWindow.webContents.send(channel, { error: error.message });
+      safeSend(channel, { error: error.message });
     }
   });
   
@@ -651,7 +920,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     if (req) {
       req.destroy();
       activeStreams.delete(channel);
-      mainWindow.webContents.send(channel, { cancelled: true });
+      safeSend(channel, { cancelled: true });
       return { success: true };
     }
     return { success: false, error: 'Stream not found' };
@@ -702,6 +971,71 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     }
   });
   
+  // ── Get real model metadata from Ollama /api/show ──
+  // Returns family, parameter size, quantization, and context length
+  // so the frontend doesn't have to guess from the filename.
+  ipcMain.handle('llm:modelInfo', async (_, modelName) => {
+    const endpoint = store.get('llmEndpoint');
+    try {
+      const response = await makeRequest(`${endpoint}/api/show`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: { name: modelName }
+      });
+
+      if (!response?.data) {
+        return { success: false, error: 'No data returned' };
+      }
+
+      const data = response.data;
+      const details = data.details || {};
+      const modelInfo = data.model_info || {};
+
+      // Extract real metadata
+      const family = details.family || null;
+      const parameterSize = details.parameter_size || null;
+      const quantizationLevel = details.quantization_level || null;
+
+      // Extract context length from model parameters or modelfile
+      // Ollama stores this in model_info under various keys
+      let contextLength = null;
+      for (const key of Object.keys(modelInfo)) {
+        const k = key.toLowerCase();
+        if (k.includes('context_length') || k.includes('context_window') || k.includes('max_position')) {
+          const val = modelInfo[key];
+          if (typeof val === 'number' && val > 0) {
+            contextLength = val;
+            break;
+          }
+        }
+      }
+
+      // Also try to get from the template/parameters
+      if (!contextLength && data.parameters) {
+        const ctxMatch = data.parameters.match(/num_ctx\s+(\d+)/);
+        if (ctxMatch) {
+          contextLength = parseInt(ctxMatch[1], 10);
+        }
+      }
+
+      return {
+        success: true,
+        family,
+        parameterSize,
+        quantizationLevel,
+        contextLength,
+        format: details.format || null,
+        parentModel: details.parent_model || null,
+        // Raw details for debugging
+        _raw: { families: details.families, format: details.format },
+      };
+    } catch (error) {
+      // Non-fatal — fallback to name-based detection
+      console.warn(`[IPC] llm:modelInfo failed for "${modelName}":`, error.message);
+      return { success: false, error: error.message };
+    }
+  });
+
   // Warmup/preload a model onto GPU
   ipcMain.handle('llm:warmup', async (_, modelName) => {
     const endpoint = store.get('llmEndpoint');
@@ -1015,6 +1349,10 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     try {
       const backend = getImageBackendAuto();
       if (!backend) throw new Error('Backend not available');
+      // Ensure event forwarding is set up for start progress
+      backend.onEvent((event, data) => {
+        mainWindow?.webContents?.send('imageAuto:event', { event, ...data });
+      });
       return await backend.start();
     } catch (error) {
       return { success: false, error: error.message };
@@ -1312,6 +1650,17 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   
   ipcMain.handle('fs:readFile', async (_, filePath) => {
     return await fsPromises.readFile(filePath, 'utf-8');
+  });
+
+  // Read file as base64 - used for vision/multimodal model image input
+  ipcMain.handle('fs:readFileBase64', async (_, filePath) => {
+    try {
+      const buffer = await fsPromises.readFile(filePath);
+      return buffer.toString('base64');
+    } catch (error) {
+      console.error('Failed to read file as base64:', error);
+      return null;
+    }
   });
   
   ipcMain.handle('fs:writeFile', async (_, filePath, content) => {

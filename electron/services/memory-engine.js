@@ -96,14 +96,19 @@ class MemoryEngine {
   /**
    * Build optimized context for a conversation
    * This is the key function that makes long conversations work
+   * 
+   * PHILOSOPHY: Use the FULL context window. Modern models support 32K-128K tokens.
+   * Don't artificially limit to 4K when we have 128K available!
    */
   async buildContext(conversationId, workspace, recentMessages, options = {}) {
     const {
-      maxTokens = 4096,      // Max tokens for context
+      maxTokens = 32768,     // Default to 32K - most modern models support this
       includeMemories = true,
       includeSummary = true,
       includePinned = true,
     } = options;
+    
+    console.log(`[MemoryEngine] Building context with ${maxTokens} token budget for ${recentMessages.length} messages`);
 
     const parts = [];
     let estimatedTokens = 0;
@@ -141,9 +146,13 @@ class MemoryEngine {
     }
 
     // 4. Calculate how many recent messages we can include
-    const remainingTokens = maxTokens - estimatedTokens - 500; // Reserve 500 for response
+    // Reserve 20% for response (not just 500 tokens)
+    const responseReserve = Math.max(1000, Math.floor(maxTokens * 0.20));
+    const remainingTokens = maxTokens - estimatedTokens - responseReserve;
     const messagesContext = this.buildMessagesContext(recentMessages, remainingTokens);
     parts.push({ type: 'messages', content: messagesContext.text, tokens: messagesContext.tokens });
+    
+    console.log(`[MemoryEngine] Context built: ${messagesContext.count}/${recentMessages.length} messages, ~${parts.reduce((sum, p) => sum + p.tokens, 0)} tokens used of ${maxTokens}`);
 
     return {
       contextText: parts.map(p => p.content).join(''),

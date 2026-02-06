@@ -259,6 +259,14 @@ function GitBadge({ status }) {
 function TreeNode({ node, depth, onOpen, onOpenInExplorer, onCopyPath, activeFilePath }) {
   const [open, setOpen] = React.useState(depth < 1);
   const isActive = node.type === 'file' && node.path === activeFilePath;
+  
+  const handleFileClick = () => {
+    if (node.type === 'file') {
+      onOpen(node.path);
+    } else {
+      setOpen(v => !v);
+    }
+  };
 
   if (node.type === 'dir') {
     const hasActiveChild = activeFilePath?.startsWith(node.path);
@@ -316,10 +324,10 @@ function TreeNode({ node, depth, onOpen, onOpenInExplorer, onCopyPath, activeFil
     >
       <button
         type="button"
-        onClick={() => onOpen(node.path)}
+        onClick={handleFileClick}
         className="flex items-center gap-1.5 flex-1 min-w-0 text-left"
       >
-        <Icon size={14} className={`flex-shrink-0 ${isActive ? style.color : style.color}`} />
+        <Icon size={14} className={`flex-shrink-0 ${isActive ? 'text-workspace-code' : style.color}`} />
         <span className={`truncate ${isActive ? 'text-text-primary font-medium' : 'text-text-secondary'}`}>
           {node.name}
         </span>

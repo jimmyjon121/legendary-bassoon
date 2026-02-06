@@ -3,7 +3,8 @@ import { FileText } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 
 export function DocumentContext() {
-  const { ragContext } = useAppStore();
+  // Use selector to avoid re-rendering on every store change
+  const ragContext = useAppStore(s => s.ragContext);
 
   if (!ragContext || ragContext.length === 0) return null;
 

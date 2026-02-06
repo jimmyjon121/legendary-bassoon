@@ -185,6 +185,10 @@ async function searchDocuments(db, store, workspace, query, limit = 4) {
   let queryEmbedding;
   try {
     const embedded = await embedTextsWithOllama(endpoint, [query]);
+    if (!embedded || embedded.length === 0) {
+      // Embedding model unavailable - degrade gracefully
+      return [];
+    }
     queryEmbedding = embedded[0];
   } catch (error) {
     console.error('Failed to embed query:', error);

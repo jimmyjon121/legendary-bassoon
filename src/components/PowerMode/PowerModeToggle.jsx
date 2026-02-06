@@ -71,6 +71,15 @@ export function PowerModeToggle({ compact = false }) {
       await window.electronAPI?.invoke?.('idle:setProfile', profileId);
       const config = await window.electronAPI?.invoke?.('idle:getConfig');
       if (config) setCurrentConfig(config);
+
+      // Keep the LLM performance system in sync with the system power profile.
+      // idle profiles: performance | balanced | powersaver | idle
+      // llm profiles:  speed | balanced | efficiency
+      const llmProfile =
+        profileId === 'performance' ? 'speed' :
+        profileId === 'balanced' ? 'balanced' :
+        'efficiency';
+      await window.electronAPI?.setPerformanceProfile?.(llmProfile);
       
       // Refresh power mode status
       const pmStatus = await window.electronAPI?.getPowerModeStatus?.();

@@ -12,23 +12,51 @@ export const isElectron = () => {
 };
 
 /**
+ * Resolve a method name to its actual property on window.electronAPI.
+ * Handles colon-separated IPC channel names (e.g. 'ledger:recordMessage' → 'ledgerRecordMessage').
+ */
+const _methodCache = new Map();
+function resolveMethod(method) {
+  if (_methodCache.has(method)) return _methodCache.get(method);
+
+  const api = window.electronAPI;
+  // Direct match first
+  if (typeof api[method] === 'function') {
+    _methodCache.set(method, method);
+    return method;
+  }
+
+  // Convert colon-separated to camelCase: 'ledger:recordMessage' → 'ledgerRecordMessage'
+  if (method.includes(':')) {
+    const camel = method.replace(/:([a-zA-Z])/g, (_, c) => c.toUpperCase());
+    if (typeof api[camel] === 'function') {
+      _methodCache.set(method, camel);
+      return camel;
+    }
+  }
+
+  // Not found
+  _methodCache.set(method, null);
+  return null;
+}
+
+/**
  * Safely call an Electron API method
  * Returns null/default value if API is unavailable or call fails
  */
 export async function safeCall(method, args = [], defaultValue = null) {
   if (!isElectron()) {
-    console.warn(`[ElectronAPI] Not in Electron environment, skipping: ${method}`);
     return defaultValue;
   }
 
-  const api = window.electronAPI;
-  if (typeof api[method] !== 'function') {
+  const resolved = resolveMethod(method);
+  if (!resolved) {
     console.warn(`[ElectronAPI] Method not available: ${method}`);
     return defaultValue;
   }
 
   try {
-    const result = await api[method](...args);
+    const result = await window.electronAPI[resolved](...args);
     return result ?? defaultValue;
   } catch (error) {
     console.error(`[ElectronAPI] Error calling ${method}:`, error);
@@ -45,19 +73,19 @@ export async function safeCallOrThrow(method, args = []) {
     throw new Error(`Electron API not available`);
   }
 
-  const api = window.electronAPI;
-  if (typeof api[method] !== 'function') {
+  const resolved = resolveMethod(method);
+  if (!resolved) {
     throw new Error(`Method not available: ${method}`);
   }
 
-  return await api[method](...args);
+  return await window.electronAPI[resolved](...args);
 }
 
 /**
  * Check if a specific API method is available
  */
 export function hasMethod(method) {
-  return isElectron() && typeof window.electronAPI[method] === 'function';
+  return isElectron() && resolveMethod(method) !== null;
 }
 
 /**
@@ -199,6 +227,14 @@ export const api = {
     safeCall('inspectModel', [filePath], { error: 'Inspector not available' }),
   autoTuneModel: (filePath) =>
     safeCall('autoTuneModel', [filePath], { error: 'Auto-tuner not available' }),
+
+  // Web Search - Real-time web search for AI
+  webSearch: (query, options) =>
+    safeCall('webSearch', [query, options], { results: [], query, took: 0, error: 'Not available' }),
+  webFetchPage: (url, options) =>
+    safeCall('webFetchPage', [url, options], { content: '', title: '', url, error: 'Not available' }),
+  webSearchAndFormat: (query, options) =>
+    safeCall('webSearchAndFormat', [query, options], { results: [], formatted: '', query, took: 0, error: 'Not available' }),
 };
 
 export default api;

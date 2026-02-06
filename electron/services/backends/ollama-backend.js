@@ -161,15 +161,36 @@ class OllamaBackend extends BaseBackend {
   }
 
   /**
+   * Build optimized options for this backend
+   * Ensures GPU offload, flash attention, and performance settings are applied
+   */
+  _buildOptions(payloadOptions = {}) {
+    const options = {
+      num_gpu: this.useCuda ? -1 : 0, // -1 = ALL layers on GPU, no exceptions
+      ...payloadOptions,
+    };
+
+    // ALWAYS force full GPU offload for CUDA backends
+    // Don't let caller accidentally set partial offload
+    if (this.useCuda && (options.num_gpu === 0 || options.num_gpu === undefined)) {
+      options.num_gpu = -1;
+    }
+
+    // Enable flash attention if not explicitly disabled
+    // Dramatically speeds up long-context inference on modern GPUs
+    if (options.flash_attn === undefined && this.useCuda) {
+      options.flash_attn = true;
+    }
+
+    return options;
+  }
+
+  /**
    * Generate a complete response
    */
   async generate(payload) {
     try {
-      // Ensure GPU acceleration is requested
-      const options = {
-        num_gpu: this.useCuda ? -1 : 0, // -1 = all layers on GPU
-        ...payload.options
-      };
+      const options = this._buildOptions(payload.options);
       
       const response = await this._makeRequest('/api/generate', {
         method: 'POST',
@@ -195,12 +216,6 @@ class OllamaBackend extends BaseBackend {
   async stream(payload, onChunk) {
     const requestId = `ollama-${Date.now()}`;
     
-    // Ensure GPU acceleration is requested
-    const options = {
-      num_gpu: this.useCuda ? -1 : 0, // -1 = all layers on GPU
-      ...payload.options
-    };
-    
     try {
       await this._streamRequest(
         '/api/generate',
@@ -209,7 +224,9 @@ class OllamaBackend extends BaseBackend {
           prompt: payload.prompt,
           system: payload.system,
           stream: true,
-          options
+          options,
+          // Pass images for vision models if present
+          ...(payload.images ? { images: payload.images } : {}),
         },
         onChunk,
         requestId
@@ -257,6 +274,7 @@ class OllamaBackend extends BaseBackend {
     console.log(`[OllamaBackend] Warming up model: ${modelName}`);
     try {
       // Send a minimal generation request to force model loading
+      // Use full GPU offload to preload all layers into VRAM
       const response = await this._makeRequest('/api/generate', {
         method: 'POST',
         body: {
@@ -265,8 +283,9 @@ class OllamaBackend extends BaseBackend {
           stream: false,
           options: {
             num_gpu: this.useCuda ? -1 : 0, // Full GPU offload
-            num_predict: 1, // Only generate 1 token
-            num_ctx: 512, // Minimal context
+            num_predict: 1,    // Only generate 1 token
+            num_ctx: 512,      // Minimal context for warmup
+            flash_attn: true,  // Enable flash attention from the start
           }
         },
         timeout: 120000 // 2 minutes for initial load

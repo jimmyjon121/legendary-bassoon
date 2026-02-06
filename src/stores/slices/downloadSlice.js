@@ -21,6 +21,8 @@ export const createDownloadSlice = (set, get) => ({
   downloads: [],
   downloadsLoading: false,
   downloadsInitialized: false,
+  downloadsListenersInitialized: false,
+  _downloadsListenerUnsubs: [],
   
   // Actions
   initializeDownloads: async () => {
@@ -48,54 +50,74 @@ export const createDownloadSlice = (set, get) => ({
   setupDownloadListeners: () => {
     const api = window.electronAPI;
     if (!api) return;
+    if (get().downloadsListenersInitialized) return;
+    
+    const unsubs = [];
     
     // Job created
-    api.onDownloadsJobCreated?.((job) => {
+    unsubs.push(api.onDownloadsJobCreated?.((job) => {
       set((state) => ({
         downloads: [job, ...state.downloads],
       }));
-    });
+    }));
     
     // Job started
-    api.onDownloadsJobStarted?.((job) => {
+    unsubs.push(api.onDownloadsJobStarted?.((job) => {
       set((state) => ({
         downloads: state.downloads.map(d => d.id === job.id ? job : d),
       }));
-    });
+    }));
     
     // Job progress
-    api.onDownloadsJobProgress?.((job) => {
+    unsubs.push(api.onDownloadsJobProgress?.((job) => {
       set((state) => ({
         downloads: state.downloads.map(d => d.id === job.id ? job : d),
       }));
-    });
+    }));
     
     // Job completed
-    api.onDownloadsJobCompleted?.((job) => {
+    unsubs.push(api.onDownloadsJobCompleted?.((job) => {
       set((state) => ({
         downloads: state.downloads.map(d => d.id === job.id ? job : d),
       }));
-    });
+    }));
     
     // Job error
-    api.onDownloadsJobError?.((job) => {
+    unsubs.push(api.onDownloadsJobError?.((job) => {
       set((state) => ({
         downloads: state.downloads.map(d => d.id === job.id ? job : d),
       }));
-    });
+    }));
     
     // Job paused
-    api.onDownloadsJobPaused?.((job) => {
+    unsubs.push(api.onDownloadsJobPaused?.((job) => {
       set((state) => ({
         downloads: state.downloads.map(d => d.id === job.id ? job : d),
       }));
-    });
+    }));
     
     // Job cancelled
-    api.onDownloadsJobCancelled?.((job) => {
+    unsubs.push(api.onDownloadsJobCancelled?.((job) => {
       set((state) => ({
         downloads: state.downloads.map(d => d.id === job.id ? job : d),
       }));
+    }));
+    
+    // Persist unsubs so we can tear down if needed
+    set({
+      downloadsListenersInitialized: true,
+      _downloadsListenerUnsubs: unsubs.filter(Boolean),
+    });
+  },
+
+  teardownDownloadListeners: () => {
+    const unsubs = get()._downloadsListenerUnsubs || [];
+    unsubs.forEach(fn => {
+      try { fn?.(); } catch {}
+    });
+    set({
+      downloadsListenersInitialized: false,
+      _downloadsListenerUnsubs: [],
     });
   },
   

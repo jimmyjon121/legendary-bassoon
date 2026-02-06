@@ -108,6 +108,24 @@ class PowerModeService {
       results.push({ optimization: 'memoryOptimized', success: false, error: error.message });
     }
 
+    // 7. NPU optimizations - ensure NPU server stays alive and configured
+    try {
+      await this.setNpuOptimizations(true);
+      results.push({ optimization: 'npuOptimized', success: true });
+    } catch (error) {
+      results.push({ optimization: 'npuOptimized', success: false, error: error.message });
+    }
+
+    // 8. Set NVIDIA GPU to prefer maximum performance mode
+    if (process.platform === 'win32') {
+      try {
+        await this.setNvidiaPerformanceMode(true);
+        results.push({ optimization: 'nvidiaPerf', success: true });
+      } catch (error) {
+        results.push({ optimization: 'nvidiaPerf', success: false, error: error.message });
+      }
+    }
+
     this.enabled = true;
     console.log('[PowerMode] Enabled with results:', results);
     
@@ -365,6 +383,92 @@ class PowerModeService {
         process.env.CUDA_CACHE_MAXSIZE = this.originalEnv.CUDA_CACHE_MAXSIZE;
       }
     }
+  }
+
+  /**
+   * NPU-specific optimizations
+   * - Ensure NPU server is running if NPU is detected
+   * - Set NPU-friendly environment variables
+   */
+  async setNpuOptimizations(enable) {
+    if (!enable) {
+      this.optimizations.npuOptimized = false;
+      return;
+    }
+
+    try {
+      const { getNpuBridge } = require('./npu-bridge');
+      const npuBridge = getNpuBridge();
+      const status = await npuBridge.getStatus();
+
+      if (status.openvinoInstalled && status.npuAvailable) {
+        // Set OpenVINO environment for maximum NPU performance
+        process.env.OPENVINO_LOG_LEVEL = '0'; // Reduce logging overhead
+        process.env.OV_NPU_COMPILER_TYPE = 'DRIVER'; // Use driver compiler for speed
+        
+        // If server isn't running but NPU is available, try to start it
+        if (!status.serverRunning) {
+          console.log('[PowerMode] NPU detected but server not running, attempting start...');
+          const result = await npuBridge.startServer({ device: 'NPU' });
+          if (result.success) {
+            console.log('[PowerMode] NPU server started for power mode');
+          }
+        }
+
+        this.optimizations.npuOptimized = true;
+        console.log('[PowerMode] NPU optimizations enabled');
+      }
+    } catch (error) {
+      console.warn('[PowerMode] NPU optimization failed (non-critical):', error.message);
+    }
+  }
+
+  /**
+   * Set NVIDIA GPU to maximum performance mode via nvidia-smi
+   * This tells the GPU driver to prefer maximum clocks
+   */
+  setNvidiaPerformanceMode(enable) {
+    return new Promise((resolve) => {
+      if (process.platform !== 'win32') {
+        resolve({ success: false });
+        return;
+      }
+
+      if (enable) {
+        // Set persistent mode and prefer maximum performance
+        // nvidia-smi --persistence-mode=1 requires admin, so we try the safe options
+        const commands = [
+          // Set compute mode to default (allows multiple processes)
+          'nvidia-smi --compute-mode=0',
+          // Set power limit to maximum (will fail without admin, that's ok)
+          // 'nvidia-smi -pm 1', // persistence mode
+        ];
+
+        // Set CUDA environment for max throughput
+        process.env.CUDA_DEVICE_MAX_CONNECTIONS = '8'; // Allow more concurrent kernels
+        process.env.CUDA_FORCE_PTX_JIT = '0'; // Don't force PTX JIT (use cached binaries)
+        
+        // TF32 mode for faster computation on Ampere+ GPUs
+        process.env.NVIDIA_TF32_OVERRIDE = '1';
+        
+        // Allow maximum GPU memory usage
+        process.env.PYTORCH_CUDA_ALLOC_CONF = 'max_split_size_mb:512';
+
+        exec(commands[0], { timeout: 5000 }, (error) => {
+          if (error) {
+            console.warn('[PowerMode] nvidia-smi not available (non-critical)');
+          } else {
+            console.log('[PowerMode] NVIDIA compute mode set');
+          }
+          resolve({ success: !error });
+        });
+      } else {
+        // Restore defaults
+        delete process.env.CUDA_DEVICE_MAX_CONNECTIONS;
+        delete process.env.NVIDIA_TF32_OVERRIDE;
+        resolve({ success: true });
+      }
+    });
   }
 
   /**

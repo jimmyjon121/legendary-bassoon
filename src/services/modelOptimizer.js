@@ -11,290 +11,255 @@
  */
 
 // Model family profiles with optimal defaults
-const MODEL_FAMILIES = {
-  // Code-focused models - lower temperature, precise output
+// EXPORTED so other services can access model context capabilities
+export const MODEL_FAMILIES = {
+  // ━━━ CODE MODELS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   codellama: {
-    type: 'code',
-    temperature: 0.3,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 16384,
-    stopTokens: ['</s>', '[/INST]', '```\n\n', '\n\n\n'],
+    type: 'code', temperature: 0.3, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 16384, stopTokens: ['</s>', '[/INST]'],
   },
   deepseek: {
-    type: 'code',
-    temperature: 0.2,
-    top_p: 0.95,
-    top_k: 50,
-    repeat_penalty: 1.05,
-    maxContext: 16384,
-    stopTokens: ['<|endoftext|>', '<｜end▁of▁sentence｜>'],
+    type: 'code', temperature: 0.2, top_p: 0.95, top_k: 50, repeat_penalty: 1.05,
+    maxContext: 16384, stopTokens: ['<|endoftext|>', '<｜end▁of▁sentence｜>'],
   },
   'deepseek-coder': {
-    type: 'code',
-    temperature: 0.1,
-    top_p: 0.95,
-    top_k: 40,
-    repeat_penalty: 1.0,
-    maxContext: 16384,
-    stopTokens: ['<|endoftext|>', '<｜end▁of▁sentence｜>'],
+    type: 'code', temperature: 0.1, top_p: 0.95, top_k: 40, repeat_penalty: 1.0,
+    maxContext: 16384, stopTokens: ['<|endoftext|>', '<｜end▁of▁sentence｜>'],
+  },
+  'deepseek-r1': {
+    type: 'chat', temperature: 0.6, top_p: 0.95, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 131072, stopTokens: ['<|endoftext|>', '<｜end▁of▁sentence｜>', '</think>'],
+  },
+  'deepseek-v2': {
+    type: 'chat', temperature: 0.6, top_p: 0.95, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 131072, stopTokens: ['<|endoftext|>', '<｜end▁of▁sentence｜>'],
+  },
+  'deepseek-v3': {
+    type: 'chat', temperature: 0.6, top_p: 0.95, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 131072, stopTokens: ['<|endoftext|>', '<｜end▁of▁sentence｜>'],
   },
   starcoder: {
-    type: 'code',
-    temperature: 0.2,
-    top_p: 0.95,
-    top_k: 50,
-    repeat_penalty: 1.0,
-    maxContext: 8192,
-    stopTokens: ['<|endoftext|>'],
+    type: 'code', temperature: 0.2, top_p: 0.95, top_k: 50, repeat_penalty: 1.0,
+    maxContext: 8192, stopTokens: ['<|endoftext|>'],
+  },
+  'starcoder2': {
+    type: 'code', temperature: 0.2, top_p: 0.95, top_k: 50, repeat_penalty: 1.0,
+    maxContext: 16384, stopTokens: ['<|endoftext|>'],
   },
   codegemma: {
-    type: 'code',
-    temperature: 0.2,
-    top_p: 0.95,
-    top_k: 40,
-    repeat_penalty: 1.0,
-    maxContext: 8192,
-    stopTokens: ['<end_of_turn>', '<eos>'],
+    type: 'code', temperature: 0.2, top_p: 0.95, top_k: 40, repeat_penalty: 1.0,
+    maxContext: 8192, stopTokens: ['<end_of_turn>', '<eos>'],
   },
   qwen2coder: {
-    type: 'code',
-    temperature: 0.2,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.05,
-    maxContext: 32768,
-    stopTokens: ['<|endoftext|>', '<|im_end|>'],
+    type: 'code', temperature: 0.2, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 131072, stopTokens: ['<|endoftext|>', '<|im_end|>'],
   },
   
-  // General chat models - balanced settings
+  // ━━━ CHAT MODELS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   llama: {
-    type: 'chat',
-    temperature: 0.7,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 4096,
-    stopTokens: ['</s>', '[/INST]'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 4096, stopTokens: ['</s>', '[/INST]'],
   },
   'llama2': {
-    type: 'chat',
-    temperature: 0.7,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 4096,
-    stopTokens: ['</s>', '[/INST]'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 4096, stopTokens: ['</s>', '[/INST]'],
   },
   'llama3': {
-    type: 'chat',
-    temperature: 0.6,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 8192,
-    stopTokens: ['<|eot_id|>', '<|end_of_text|>'],
+    type: 'chat', temperature: 0.6, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 8192, stopTokens: ['<|eot_id|>', '<|end_of_text|>'],
   },
   'llama3.1': {
-    type: 'chat',
-    temperature: 0.6,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 131072,
-    stopTokens: ['<|eot_id|>', '<|end_of_text|>'],
+    type: 'chat', temperature: 0.6, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 131072, stopTokens: ['<|eot_id|>', '<|end_of_text|>'],
   },
   'llama3.2': {
-    type: 'chat',
-    temperature: 0.6,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 131072,
-    stopTokens: ['<|eot_id|>', '<|end_of_text|>'],
+    type: 'chat', temperature: 0.6, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 131072, stopTokens: ['<|eot_id|>', '<|end_of_text|>'],
+  },
+  'llama3.3': {
+    type: 'chat', temperature: 0.6, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 131072, stopTokens: ['<|eot_id|>', '<|end_of_text|>'],
   },
   mistral: {
-    type: 'chat',
-    temperature: 0.7,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 32768,
-    stopTokens: ['</s>', '[/INST]'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 32768, stopTokens: ['</s>', '[/INST]'],
+  },
+  'mistral-nemo': {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 131072, stopTokens: ['</s>', '[/INST]'],
+  },
+  'mistral-small': {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 32768, stopTokens: ['</s>', '[/INST]'],
   },
   mixtral: {
-    type: 'chat',
-    temperature: 0.7,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 32768,
-    stopTokens: ['</s>', '[/INST]'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 32768, stopTokens: ['</s>', '[/INST]'],
   },
   qwen: {
-    type: 'chat',
-    temperature: 0.7,
-    top_p: 0.8,
-    top_k: 20,
-    repeat_penalty: 1.05,
-    maxContext: 32768,
-    stopTokens: ['<|endoftext|>', '<|im_end|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.8, top_k: 20, repeat_penalty: 1.05,
+    maxContext: 32768, stopTokens: ['<|endoftext|>', '<|im_end|>'],
   },
   qwen2: {
-    type: 'chat',
-    temperature: 0.7,
-    top_p: 0.8,
-    top_k: 20,
-    repeat_penalty: 1.05,
-    maxContext: 131072,
-    stopTokens: ['<|endoftext|>', '<|im_end|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.8, top_k: 20, repeat_penalty: 1.05,
+    maxContext: 131072, stopTokens: ['<|endoftext|>', '<|im_end|>'],
+  },
+  'qwen2.5': {
+    type: 'chat', temperature: 0.7, top_p: 0.8, top_k: 20, repeat_penalty: 1.05,
+    maxContext: 131072, stopTokens: ['<|endoftext|>', '<|im_end|>'],
   },
   phi: {
-    type: 'chat',
-    temperature: 0.7,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 4096,
-    stopTokens: ['<|endoftext|>', '<|end|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 4096, stopTokens: ['<|endoftext|>', '<|end|>'],
   },
   'phi3': {
-    type: 'chat',
-    temperature: 0.7,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 131072,
-    stopTokens: ['<|end|>', '<|endoftext|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 131072, stopTokens: ['<|end|>', '<|endoftext|>'],
+  },
+  'phi4': {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 16384, stopTokens: ['<|end|>', '<|endoftext|>'],
   },
   gemma: {
-    type: 'chat',
-    temperature: 0.7,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 8192,
-    stopTokens: ['<end_of_turn>', '<eos>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 8192, stopTokens: ['<end_of_turn>', '<eos>'],
   },
   gemma2: {
-    type: 'chat',
-    temperature: 0.7,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 8192,
-    stopTokens: ['<end_of_turn>', '<eos>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 8192, stopTokens: ['<end_of_turn>', '<eos>'],
+  },
+  'gemma3': {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 131072, stopTokens: ['<end_of_turn>', '<eos>'],
   },
   yi: {
-    type: 'chat',
-    temperature: 0.7,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 4096,
-    stopTokens: ['<|endoftext|>', '<|im_end|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 4096, stopTokens: ['<|endoftext|>', '<|im_end|>'],
+  },
+  'yi-1.5': {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 32768, stopTokens: ['<|endoftext|>', '<|im_end|>'],
   },
   vicuna: {
-    type: 'chat',
-    temperature: 0.7,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 4096,
-    stopTokens: ['</s>', 'USER:', 'ASSISTANT:'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 4096, stopTokens: ['</s>'],
   },
   solar: {
-    type: 'chat',
-    temperature: 0.7,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 4096,
-    stopTokens: ['</s>', '### User', '### Assistant'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 4096, stopTokens: ['</s>'],
+  },
+  // New 2024-2025 model families
+  'command-r': {
+    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 131072, stopTokens: ['<|END_OF_TURN_TOKEN|>'],
+  },
+  internlm: {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 32768, stopTokens: ['<|im_end|>', '</s>'],
+  },
+  'internlm2': {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 32768, stopTokens: ['<|im_end|>', '</s>'],
+  },
+  glm: {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 131072, stopTokens: ['<|endoftext|>', '<|user|>', '<|observation|>'],
+  },
+  'chatglm': {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 131072, stopTokens: ['<|endoftext|>', '<|user|>', '<|observation|>'],
+  },
+  exaone: {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 32768, stopTokens: ['[|endofturn|]'],
+  },
+  olmo: {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 4096, stopTokens: ['<|endoftext|>'],
+  },
+  'olmo2': {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 32768, stopTokens: ['<|endoftext|>'],
+  },
+  granite: {
+    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 8192, stopTokens: ['<|endoftext|>'],
+  },
+  'granite-code': {
+    type: 'code', temperature: 0.2, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 131072, stopTokens: ['<|endoftext|>'],
+  },
+  smollm: {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 8192, stopTokens: ['<|endoftext|>', '<|im_end|>'],
+  },
+  'smollm2': {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 8192, stopTokens: ['<|endoftext|>', '<|im_end|>'],
+  },
+  pixtral: {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 131072, stopTokens: ['</s>', '[/INST]'],
+  },
+  'llava': {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 4096, stopTokens: ['</s>'],
+  },
+  'bakllava': {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 4096, stopTokens: ['</s>'],
+  },
+  'moondream': {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 4096, stopTokens: ['<|endoftext|>'],
+  },
+  // Catch-all for GPT-style / generic GGUF models
+  'gpt': {
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.15,
+    maxContext: 4096, stopTokens: ['<|endoftext|>', '<|im_end|>'],
   },
   
-  // Creative/roleplay models - higher temperature, more variety
+  // ━━━ CREATIVE/ROLEPLAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   nous: {
-    type: 'creative',
-    temperature: 0.85,
-    top_p: 0.95,
-    top_k: 60,
-    repeat_penalty: 1.15,
-    maxContext: 4096,
-    stopTokens: ['</s>', '[/INST]'],
+    type: 'creative', temperature: 0.85, top_p: 0.95, top_k: 60, repeat_penalty: 1.15,
+    maxContext: 4096, stopTokens: ['</s>', '[/INST]'],
   },
   'hermes': {
-    type: 'creative',
-    temperature: 0.8,
-    top_p: 0.95,
-    top_k: 50,
-    repeat_penalty: 1.1,
-    maxContext: 8192,
-    stopTokens: ['<|im_end|>'],
+    type: 'creative', temperature: 0.8, top_p: 0.95, top_k: 50, repeat_penalty: 1.1,
+    maxContext: 8192, stopTokens: ['<|im_end|>'],
   },
   openhermes: {
-    type: 'creative',
-    temperature: 0.8,
-    top_p: 0.95,
-    top_k: 50,
-    repeat_penalty: 1.1,
-    maxContext: 8192,
-    stopTokens: ['<|im_end|>'],
+    type: 'creative', temperature: 0.8, top_p: 0.95, top_k: 50, repeat_penalty: 1.1,
+    maxContext: 8192, stopTokens: ['<|im_end|>'],
   },
   'dolphin': {
-    type: 'creative',
-    temperature: 0.8,
-    top_p: 0.95,
-    top_k: 50,
-    repeat_penalty: 1.1,
-    maxContext: 16384,
-    stopTokens: ['<|im_end|>'],
+    type: 'creative', temperature: 0.8, top_p: 0.95, top_k: 50, repeat_penalty: 1.1,
+    maxContext: 16384, stopTokens: ['<|im_end|>'],
   },
   neural: {
-    type: 'creative',
-    temperature: 0.8,
-    top_p: 0.95,
-    top_k: 50,
-    repeat_penalty: 1.15,
-    maxContext: 4096,
-    stopTokens: ['</s>'],
+    type: 'creative', temperature: 0.8, top_p: 0.95, top_k: 50, repeat_penalty: 1.15,
+    maxContext: 4096, stopTokens: ['</s>'],
+  },
+  'mythomax': {
+    type: 'creative', temperature: 0.85, top_p: 0.95, top_k: 60, repeat_penalty: 1.15,
+    maxContext: 4096, stopTokens: ['</s>'],
   },
   
-  // Instruct/assistant models - focused, instruction-following
+  // ━━━ INSTRUCT/ASSISTANT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   zephyr: {
-    type: 'instruct',
-    temperature: 0.5,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 8192,
-    stopTokens: ['</s>', '<|user|>', '<|assistant|>'],
+    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 8192, stopTokens: ['</s>', '<|user|>', '<|assistant|>'],
   },
   openchat: {
-    type: 'instruct',
-    temperature: 0.5,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 8192,
-    stopTokens: ['<|end_of_turn|>'],
+    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 8192, stopTokens: ['<|end_of_turn|>'],
   },
   orca: {
-    type: 'instruct',
-    temperature: 0.5,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
-    maxContext: 4096,
-    stopTokens: ['</s>'],
+    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 4096, stopTokens: ['</s>'],
   },
   wizard: {
-    type: 'instruct',
-    temperature: 0.5,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.1,
+    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
     maxContext: 4096,
     stopTokens: ['</s>', 'USER:', 'ASSISTANT:'],
   },
@@ -311,61 +276,85 @@ const MODEL_FAMILIES = {
 
 // Quantization affects memory and quality
 const QUANTIZATION_PROFILES = {
-  // High quality, high memory
+  // Full precision
   'F32': { qualityMultiplier: 1.0, memoryMultiplier: 4.0, contextScale: 0.5 },
   'F16': { qualityMultiplier: 0.99, memoryMultiplier: 2.0, contextScale: 0.7 },
   'BF16': { qualityMultiplier: 0.99, memoryMultiplier: 2.0, contextScale: 0.7 },
   
-  // Balanced
+  // MXFP (Microscaling Floating Point) - used by Intel/ONNX/OpenVINO
+  'MXFP8': { qualityMultiplier: 0.96, memoryMultiplier: 1.0, contextScale: 1.0 },
+  'MXFP4': { qualityMultiplier: 0.82, memoryMultiplier: 0.5, contextScale: 1.5 },
+  'FP8': { qualityMultiplier: 0.96, memoryMultiplier: 1.0, contextScale: 1.0 },
+  'FP4': { qualityMultiplier: 0.80, memoryMultiplier: 0.5, contextScale: 1.5 },
+  
+  // 8-bit
   'Q8_0': { qualityMultiplier: 0.95, memoryMultiplier: 1.0, contextScale: 1.0 },
   'Q8': { qualityMultiplier: 0.95, memoryMultiplier: 1.0, contextScale: 1.0 },
   
-  // Good balance of quality and memory
+  // 6-bit
   'Q6_K': { qualityMultiplier: 0.92, memoryMultiplier: 0.75, contextScale: 1.2 },
+  'Q6_K_L': { qualityMultiplier: 0.93, memoryMultiplier: 0.78, contextScale: 1.15 },
+  
+  // 5-bit
   'Q5_K_M': { qualityMultiplier: 0.90, memoryMultiplier: 0.65, contextScale: 1.3 },
   'Q5_K_S': { qualityMultiplier: 0.88, memoryMultiplier: 0.6, contextScale: 1.4 },
+  'Q5_K_L': { qualityMultiplier: 0.91, memoryMultiplier: 0.68, contextScale: 1.25 },
   'Q5_1': { qualityMultiplier: 0.89, memoryMultiplier: 0.65, contextScale: 1.3 },
   'Q5_0': { qualityMultiplier: 0.87, memoryMultiplier: 0.6, contextScale: 1.4 },
   
-  // Memory efficient, some quality loss
+  // 4-bit - most popular balance
   'Q4_K_M': { qualityMultiplier: 0.85, memoryMultiplier: 0.5, contextScale: 1.5 },
   'Q4_K_S': { qualityMultiplier: 0.82, memoryMultiplier: 0.45, contextScale: 1.6 },
+  'Q4_K_L': { qualityMultiplier: 0.86, memoryMultiplier: 0.52, contextScale: 1.45 },
   'Q4_1': { qualityMultiplier: 0.83, memoryMultiplier: 0.5, contextScale: 1.5 },
   'Q4_0': { qualityMultiplier: 0.80, memoryMultiplier: 0.45, contextScale: 1.6 },
   
-  // Very memory efficient
+  // 3-bit
   'Q3_K_M': { qualityMultiplier: 0.75, memoryMultiplier: 0.4, contextScale: 1.8 },
   'Q3_K_S': { qualityMultiplier: 0.72, memoryMultiplier: 0.35, contextScale: 2.0 },
+  'Q3_K_L': { qualityMultiplier: 0.77, memoryMultiplier: 0.42, contextScale: 1.7 },
+  
+  // 2-bit
   'Q2_K': { qualityMultiplier: 0.65, memoryMultiplier: 0.3, contextScale: 2.2 },
   
-  // IQuants
+  // IQuants (importance-based quantization)
   'IQ4_XS': { qualityMultiplier: 0.84, memoryMultiplier: 0.45, contextScale: 1.6 },
+  'IQ4_NL': { qualityMultiplier: 0.85, memoryMultiplier: 0.45, contextScale: 1.6 },
   'IQ3_M': { qualityMultiplier: 0.74, memoryMultiplier: 0.38, contextScale: 1.9 },
   'IQ3_S': { qualityMultiplier: 0.72, memoryMultiplier: 0.35, contextScale: 2.0 },
+  'IQ3_XS': { qualityMultiplier: 0.70, memoryMultiplier: 0.33, contextScale: 2.1 },
+  'IQ3_XXS': { qualityMultiplier: 0.68, memoryMultiplier: 0.31, contextScale: 2.15 },
   'IQ2_M': { qualityMultiplier: 0.60, memoryMultiplier: 0.28, contextScale: 2.3 },
   'IQ2_S': { qualityMultiplier: 0.55, memoryMultiplier: 0.25, contextScale: 2.5 },
+  'IQ2_XS': { qualityMultiplier: 0.52, memoryMultiplier: 0.23, contextScale: 2.6 },
+  'IQ2_XXS': { qualityMultiplier: 0.50, memoryMultiplier: 0.22, contextScale: 2.7 },
+  'IQ1_M': { qualityMultiplier: 0.45, memoryMultiplier: 0.2, contextScale: 2.8 },
+  'IQ1_S': { qualityMultiplier: 0.40, memoryMultiplier: 0.18, contextScale: 3.0 },
 };
 
 // Model size affects context and batch settings
+// gpuLayers: -1 = all layers on GPU (small enough to fit)
+// gpuLayers: N = partial offload (too big for most GPUs without quant)
+// vramEstimateGB: approximate VRAM for Q4_K_M quantization (for smart GPU decisions)
 const SIZE_PROFILES = {
-  '0.5B': { contextDefault: 2048, batchSize: 512, gpuLayers: -1 },
-  '1B': { contextDefault: 4096, batchSize: 512, gpuLayers: -1 },
-  '1.5B': { contextDefault: 4096, batchSize: 512, gpuLayers: -1 },
-  '2B': { contextDefault: 4096, batchSize: 512, gpuLayers: -1 },
-  '3B': { contextDefault: 4096, batchSize: 512, gpuLayers: -1 },
-  '4B': { contextDefault: 4096, batchSize: 256, gpuLayers: -1 },
-  '7B': { contextDefault: 4096, batchSize: 256, gpuLayers: -1 },
-  '8B': { contextDefault: 8192, batchSize: 256, gpuLayers: -1 },
-  '9B': { contextDefault: 8192, batchSize: 256, gpuLayers: -1 },
-  '13B': { contextDefault: 4096, batchSize: 128, gpuLayers: 35 },
-  '14B': { contextDefault: 4096, batchSize: 128, gpuLayers: 35 },
-  '20B': { contextDefault: 4096, batchSize: 64, gpuLayers: 30 },
-  '30B': { contextDefault: 4096, batchSize: 64, gpuLayers: 25 },
-  '32B': { contextDefault: 4096, batchSize: 64, gpuLayers: 25 },
-  '34B': { contextDefault: 4096, batchSize: 64, gpuLayers: 25 },
-  '70B': { contextDefault: 2048, batchSize: 32, gpuLayers: 20 },
-  '72B': { contextDefault: 2048, batchSize: 32, gpuLayers: 20 },
-  '405B': { contextDefault: 1024, batchSize: 16, gpuLayers: 10 },
+  '0.5B': { contextDefault: 4096, batchSize: 512, gpuLayers: -1, vramEstimateGB: 0.5 },
+  '1B':   { contextDefault: 4096, batchSize: 512, gpuLayers: -1, vramEstimateGB: 0.8 },
+  '1.5B': { contextDefault: 4096, batchSize: 512, gpuLayers: -1, vramEstimateGB: 1.2 },
+  '2B':   { contextDefault: 4096, batchSize: 512, gpuLayers: -1, vramEstimateGB: 1.5 },
+  '3B':   { contextDefault: 4096, batchSize: 512, gpuLayers: -1, vramEstimateGB: 2.2 },
+  '4B':   { contextDefault: 4096, batchSize: 256, gpuLayers: -1, vramEstimateGB: 3.0 },
+  '7B':   { contextDefault: 8192, batchSize: 256, gpuLayers: -1, vramEstimateGB: 4.5 },
+  '8B':   { contextDefault: 8192, batchSize: 256, gpuLayers: -1, vramEstimateGB: 5.0 },
+  '9B':   { contextDefault: 8192, batchSize: 256, gpuLayers: -1, vramEstimateGB: 5.5 },
+  '13B':  { contextDefault: 8192, batchSize: 128, gpuLayers: -1, vramEstimateGB: 8.0 },
+  '14B':  { contextDefault: 8192, batchSize: 128, gpuLayers: -1, vramEstimateGB: 9.0 },
+  '20B':  { contextDefault: 4096, batchSize: 64,  gpuLayers: -1, vramEstimateGB: 12.0 },
+  '30B':  { contextDefault: 4096, batchSize: 64,  gpuLayers: -1, vramEstimateGB: 18.0 },
+  '32B':  { contextDefault: 4096, batchSize: 64,  gpuLayers: -1, vramEstimateGB: 19.0 },
+  '34B':  { contextDefault: 4096, batchSize: 64,  gpuLayers: -1, vramEstimateGB: 20.0 },
+  '70B':  { contextDefault: 2048, batchSize: 32,  gpuLayers: -1, vramEstimateGB: 40.0 },
+  '72B':  { contextDefault: 2048, batchSize: 32,  gpuLayers: -1, vramEstimateGB: 42.0 },
+  '405B': { contextDefault: 1024, batchSize: 16,  gpuLayers: -1, vramEstimateGB: 230.0 },
 };
 
 /**
@@ -376,43 +365,72 @@ export function parseModelName(modelName) {
   
   const name = modelName.toLowerCase();
   
-  // Detect model family (check more specific patterns first)
+  // Detect model family (check more specific patterns first, then generic)
   let family = null;
   const familyPatterns = [
-    // Code models (check first - more specific)
+    // ── Code models (most specific first) ──
     { pattern: /deepseek[-_]?coder/i, family: 'deepseek-coder' },
     { pattern: /qwen2[-_]?\.?5[-_]?coder/i, family: 'qwen2coder' },
     { pattern: /qwen[-_]?coder/i, family: 'qwen2coder' },
     { pattern: /code[-_]?llama/i, family: 'codellama' },
     { pattern: /codellama/i, family: 'codellama' },
+    { pattern: /starcoder[-_]?2/i, family: 'starcoder2' },
     { pattern: /starcoder/i, family: 'starcoder' },
     { pattern: /code[-_]?gemma/i, family: 'codegemma' },
+    { pattern: /granite[-_]?code/i, family: 'granite-code' },
     
-    // Versioned models (check before generic)
+    // ── DeepSeek variants (before generic deepseek) ──
+    { pattern: /deepseek[-_]?r1/i, family: 'deepseek-r1' },
+    { pattern: /deepseek[-_]?v3/i, family: 'deepseek-v3' },
+    { pattern: /deepseek[-_]?v2/i, family: 'deepseek-v2' },
+    
+    // ── Versioned models (before generic) ──
+    { pattern: /llama[-_]?3\.3/i, family: 'llama3.3' },
     { pattern: /llama[-_]?3\.2/i, family: 'llama3.2' },
     { pattern: /llama[-_]?3\.1/i, family: 'llama3.1' },
     { pattern: /llama[-_]?3/i, family: 'llama3' },
     { pattern: /llama[-_]?2/i, family: 'llama2' },
+    { pattern: /phi[-_]?4/i, family: 'phi4' },
     { pattern: /phi[-_]?3/i, family: 'phi3' },
+    { pattern: /gemma[-_]?3/i, family: 'gemma3' },
     { pattern: /gemma[-_]?2/i, family: 'gemma2' },
-    { pattern: /qwen[-_]?2\.5/i, family: 'qwen2' },
+    { pattern: /qwen[-_]?2\.5/i, family: 'qwen2.5' },
     { pattern: /qwen[-_]?2/i, family: 'qwen2' },
+    { pattern: /yi[-_]?1\.5/i, family: 'yi-1.5' },
+    { pattern: /internlm[-_]?2/i, family: 'internlm2' },
+    { pattern: /smollm[-_]?2/i, family: 'smollm2' },
+    { pattern: /olmo[-_]?2/i, family: 'olmo2' },
     
-    // Creative models
+    // ── New 2024-2025 families ──
+    { pattern: /command[-_]?r/i, family: 'command-r' },
+    { pattern: /mistral[-_]?nemo/i, family: 'mistral-nemo' },
+    { pattern: /mistral[-_]?small/i, family: 'mistral-small' },
+    { pattern: /chatglm/i, family: 'chatglm' },
+    { pattern: /pixtral/i, family: 'pixtral' },
+    { pattern: /exaone/i, family: 'exaone' },
+    { pattern: /granite/i, family: 'granite' },
+    { pattern: /mythomax/i, family: 'mythomax' },
+    
+    // ── Creative models ──
     { pattern: /open[-_]?hermes/i, family: 'openhermes' },
     { pattern: /hermes/i, family: 'hermes' },
     { pattern: /dolphin/i, family: 'dolphin' },
     { pattern: /nous/i, family: 'nous' },
     { pattern: /neural[-_]?chat/i, family: 'neural' },
     
-    // Instruct models
+    // ── Instruct models ──
     { pattern: /zephyr/i, family: 'zephyr' },
     { pattern: /open[-_]?chat/i, family: 'openchat' },
     { pattern: /orca/i, family: 'orca' },
     { pattern: /wizard/i, family: 'wizard' },
-    { pattern: /command/i, family: 'command' },
+    { pattern: /command/i, family: 'command-r' },
     
-    // Generic models (check last)
+    // ── Vision models ──
+    { pattern: /bakllava/i, family: 'bakllava' },
+    { pattern: /llava/i, family: 'llava' },
+    { pattern: /moondream/i, family: 'moondream' },
+    
+    // ── Generic models (check last) ──
     { pattern: /llama/i, family: 'llama' },
     { pattern: /mistral/i, family: 'mistral' },
     { pattern: /mixtral/i, family: 'mixtral' },
@@ -420,9 +438,14 @@ export function parseModelName(modelName) {
     { pattern: /deepseek/i, family: 'deepseek' },
     { pattern: /phi/i, family: 'phi' },
     { pattern: /gemma/i, family: 'gemma' },
-    { pattern: /yi/i, family: 'yi' },
+    { pattern: /yi\b/i, family: 'yi' },
     { pattern: /vicuna/i, family: 'vicuna' },
     { pattern: /solar/i, family: 'solar' },
+    { pattern: /internlm/i, family: 'internlm' },
+    { pattern: /glm/i, family: 'glm' },
+    { pattern: /smollm/i, family: 'smollm' },
+    { pattern: /olmo/i, family: 'olmo' },
+    { pattern: /gpt/i, family: 'gpt' },
   ];
   
   for (const { pattern, family: f } of familyPatterns) {
@@ -432,18 +455,18 @@ export function parseModelName(modelName) {
     }
   }
   
-  // Detect parameter size
+  // Detect parameter size - supports: "7b", "7B", "7.5b", "20b", "1_5b", "0.5B", etc.
   let size = null;
-  const sizeMatch = name.match(/(\d+(?:\.\d+)?)\s*[bB](?![a-zA-Z])/);
+  const sizeMatch = name.match(/[-_.]?(\d+(?:[._]\d+)?)\s*[bB](?![a-zA-Z])/);
   if (sizeMatch) {
-    const num = parseFloat(sizeMatch[1]);
-    // Normalize to standard sizes
+    const num = parseFloat(sizeMatch[1].replace('_', '.'));
+    // Normalize to standard sizes with wider ranges
     if (num <= 0.6) size = '0.5B';
     else if (num <= 1.2) size = '1B';
     else if (num <= 1.8) size = '1.5B';
     else if (num <= 2.5) size = '2B';
-    else if (num <= 3.5) size = '3B';
-    else if (num <= 5) size = '4B';
+    else if (num <= 4.5) size = '3B';
+    else if (num <= 5.5) size = '4B';
     else if (num <= 7.5) size = '7B';
     else if (num <= 8.5) size = '8B';
     else if (num <= 10) size = '9B';
@@ -456,17 +479,25 @@ export function parseModelName(modelName) {
     else size = '405B';
   }
   
-  // Detect quantization
+  // Detect quantization - comprehensive pattern matching
   let quantization = null;
   const quantPatterns = [
+    // MXFP / FP variants (Intel, ONNX, OpenVINO)
+    /[._-](MXFP8|MXFP4|FP8|FP4)/i,
+    // Full precision
     /[._-](F32|F16|BF16)/i,
+    // Standard GGUF quants
     /[._-](Q8_0|Q8)/i,
-    /[._-](Q6_K)/i,
+    /[._-](Q6_K_L|Q6_K)/i,
     /[._-](Q5_K_[MSL]|Q5_[01])/i,
     /[._-](Q4_K_[MSL]|Q4_[01])/i,
     /[._-](Q3_K_[MSL])/i,
     /[._-](Q2_K)/i,
-    /[._-](IQ4_XS|IQ3_[MS]|IQ2_[MS])/i,
+    // IQuants (importance quantization)
+    /[._-](IQ4_XS|IQ4_NL)/i,
+    /[._-](IQ3_XXS|IQ3_XS|IQ3_[MS])/i,
+    /[._-](IQ2_XXS|IQ2_XS|IQ2_[MS])/i,
+    /[._-](IQ1_[MS])/i,
   ];
   
   for (const pattern of quantPatterns) {
@@ -487,43 +518,47 @@ export function getOptimalSettings(modelName, workspaceType = 'casual') {
   const parsed = parseModelName(modelName);
   const { family, size, quantization } = parsed;
   
-  // Start with defaults
+  // Start with solid defaults
   let settings = {
     temperature: 0.7,
     top_p: 0.9,
     top_k: 40,
-    repeat_penalty: 1.1,
+    repeat_penalty: 1.15,
     num_ctx: 4096,
     num_batch: 256,
-    num_gpu: -1,
-    stop: ['Human:', '\nHuman:', 'User:', '\nUser:'],
+    num_gpu: -1, // Default: all layers on GPU
+    num_predict: 4096,
+    stop: [],
     // Metadata for UI/debugging
     _detected: parsed,
     _source: 'default',
   };
   
   // Apply family-specific settings
-  if (family && MODEL_FAMILIES[family]) {
-    const familyProfile = MODEL_FAMILIES[family];
+  const familyProfile = family && MODEL_FAMILIES[family];
+  if (familyProfile) {
     settings = {
       ...settings,
       temperature: familyProfile.temperature,
       top_p: familyProfile.top_p,
       top_k: familyProfile.top_k,
-      repeat_penalty: familyProfile.repeat_penalty,
-      num_ctx: Math.min(familyProfile.maxContext, 8192), // Start conservative
-      stop: [...familyProfile.stopTokens, ...settings.stop],
+      repeat_penalty: Math.max(familyProfile.repeat_penalty, 1.1),
+      // Use the family's full context capability (adaptive generation will cap it based on hardware)
+      num_ctx: familyProfile.maxContext,
+      stop: [...familyProfile.stopTokens],
       _source: `family:${family}`,
       _modelType: familyProfile.type,
     };
   }
   
   // Apply size-specific settings
-  if (size && SIZE_PROFILES[size]) {
-    const sizeProfile = SIZE_PROFILES[size];
+  const sizeProfile = size && SIZE_PROFILES[size];
+  if (sizeProfile) {
+    // Use the LARGER of size default and family context (family knows the model's actual capability)
+    const familyMaxCtx = familyProfile?.maxContext || 4096;
     settings = {
       ...settings,
-      num_ctx: Math.min(settings.num_ctx, sizeProfile.contextDefault),
+      num_ctx: Math.min(familyMaxCtx, Math.max(settings.num_ctx, sizeProfile.contextDefault)),
       num_batch: sizeProfile.batchSize,
       num_gpu: sizeProfile.gpuLayers,
       _source: `${settings._source}+size:${size}`,
@@ -531,27 +566,30 @@ export function getOptimalSettings(modelName, workspaceType = 'casual') {
   }
   
   // Apply quantization adjustments
-  if (quantization && QUANTIZATION_PROFILES[quantization]) {
-    const quantProfile = QUANTIZATION_PROFILES[quantization];
-    // Lower quant = can use more context since model uses less memory
+  const quantProfile = quantization && QUANTIZATION_PROFILES[quantization];
+  if (quantProfile) {
+    // Lower quant = less memory = can use more context
+    const familyMax = familyProfile?.maxContext || 8192;
     const contextBoost = Math.floor(settings.num_ctx * quantProfile.contextScale);
-    settings = {
-      ...settings,
-      num_ctx: Math.min(contextBoost, family ? MODEL_FAMILIES[family]?.maxContext || 8192 : 8192),
-      _source: `${settings._source}+quant:${quantization}`,
-    };
+    settings.num_ctx = Math.min(contextBoost, familyMax);
+    
+    // MXFP models often need different batch sizes
+    if (quantization.startsWith('MXFP') || quantization.startsWith('FP')) {
+      settings.num_batch = Math.max(settings.num_batch, 128);
+    }
+    
+    settings._source += `+quant:${quantization}`;
   }
   
   // Workspace-specific adjustments
   if (workspaceType === 'code') {
-    // Lower temperature for code
     settings.temperature = Math.max(0.1, settings.temperature - 0.3);
     settings.top_p = Math.min(0.95, settings.top_p);
     settings._source += '+workspace:code';
   } else if (workspaceType === 'creative') {
-    // Higher temperature for creative
     settings.temperature = Math.min(1.0, settings.temperature + 0.15);
     settings.top_k = Math.min(100, settings.top_k + 20);
+    settings.repeat_penalty = Math.max(1.0, settings.repeat_penalty - 0.05);
     settings._source += '+workspace:creative';
   }
   
@@ -654,8 +692,260 @@ export function buildOptimizedOllamaOptions(modelName, workspaceType = 'casual',
     num_ctx: overrides.num_ctx ?? settings.num_ctx,
     num_batch: overrides.num_batch ?? settings.num_batch,
     num_gpu: overrides.num_gpu ?? settings.num_gpu,
+    num_predict: overrides.num_predict ?? settings.num_predict,
     stop: overrides.stop ?? settings.stop,
+    // Pass metadata for debugging
+    _detected: settings._detected,
+    _source: settings._source,
   };
+}
+
+/**
+ * Build optimized Ollama options using REAL model metadata from /api/show.
+ * 
+ * When modelInfo is provided (from Ollama's /api/show endpoint), we use the
+ * actual family, parameter_size, and quantization_level rather than guessing
+ * from the filename. This means even custom-named models like
+ * "my-custom-finetune.gguf" will be correctly identified.
+ * 
+ * Falls back to name-parsing if modelInfo is not available.
+ * 
+ * @param {string} modelName - The model name (used as fallback for parsing)
+ * @param {string} workspaceType - 'casual' | 'code' | 'creative'
+ * @param {object|null} modelInfo - Real metadata from /api/show (or null)
+ * @param {object} overrides - User overrides (explicit settings always win)
+ * @returns {object} Ollama options
+ */
+export function buildOptimizedOllamaOptionsWithInfo(modelName, workspaceType = 'casual', modelInfo = null, overrides = {}) {
+  // If we have real metadata, build a synthetic "parsed" result from it
+  // instead of guessing from the filename
+  let parsed;
+  
+  if (modelInfo && modelInfo.success !== false) {
+    // Map real family string from Ollama to our MODEL_FAMILIES keys
+    const realFamily = resolveFamily(modelInfo.family, modelName);
+    const realSize = normalizeParameterSize(modelInfo.parameterSize);
+    const realQuant = normalizeQuantization(modelInfo.quantizationLevel);
+    
+    parsed = {
+      family: realFamily,
+      size: realSize,
+      quantization: realQuant,
+    };
+  } else {
+    // Fallback: parse from filename (original behavior)
+    parsed = parseModelName(modelName);
+  }
+  
+  const { family, size, quantization } = parsed;
+  
+  // Start with solid defaults
+  let settings = {
+    temperature: 0.7,
+    top_p: 0.9,
+    top_k: 40,
+    repeat_penalty: 1.15,
+    num_ctx: 4096,
+    num_batch: 256,
+    num_gpu: -1,
+    num_predict: 4096,
+    stop: [],
+    _detected: parsed,
+    _source: modelInfo ? 'api/show' : 'default',
+  };
+  
+  // Apply family-specific settings
+  const familyProfile = family && MODEL_FAMILIES[family];
+  if (familyProfile) {
+    settings = {
+      ...settings,
+      temperature: familyProfile.temperature,
+      top_p: familyProfile.top_p,
+      top_k: familyProfile.top_k,
+      repeat_penalty: Math.max(familyProfile.repeat_penalty, 1.05),
+      num_ctx: familyProfile.maxContext,
+      stop: [...familyProfile.stopTokens],
+      _source: `${settings._source}+family:${family}`,
+      _modelType: familyProfile.type,
+    };
+  }
+  
+  // If /api/show gave us the real context length, trust it over family default
+  if (modelInfo?.contextLength && modelInfo.contextLength > 0) {
+    settings.num_ctx = modelInfo.contextLength;
+    settings._source += `+ctx:real(${modelInfo.contextLength})`;
+  }
+  
+  // Apply size-specific settings
+  const sizeProfile = size && SIZE_PROFILES[size];
+  if (sizeProfile) {
+    const familyMaxCtx = familyProfile?.maxContext || settings.num_ctx;
+    settings = {
+      ...settings,
+      num_ctx: Math.min(familyMaxCtx, Math.max(settings.num_ctx, sizeProfile.contextDefault)),
+      num_batch: sizeProfile.batchSize,
+      num_gpu: sizeProfile.gpuLayers,
+      _source: `${settings._source}+size:${size}`,
+    };
+    
+    // But if we had real context length from /api/show, re-apply it (it's authoritative)
+    if (modelInfo?.contextLength && modelInfo.contextLength > 0) {
+      settings.num_ctx = modelInfo.contextLength;
+    }
+  }
+  
+  // Apply quantization adjustments
+  const quantProfile = quantization && QUANTIZATION_PROFILES[quantization];
+  if (quantProfile) {
+    const familyMax = modelInfo?.contextLength || familyProfile?.maxContext || 8192;
+    const contextBoost = Math.floor(settings.num_ctx * quantProfile.contextScale);
+    settings.num_ctx = Math.min(contextBoost, familyMax);
+    
+    if (quantization.startsWith('MXFP') || quantization.startsWith('FP')) {
+      settings.num_batch = Math.max(settings.num_batch, 128);
+    }
+    
+    settings._source += `+quant:${quantization}`;
+  }
+  
+  // Workspace-specific adjustments
+  if (workspaceType === 'code') {
+    settings.temperature = Math.max(0.1, settings.temperature - 0.3);
+    settings.top_p = Math.min(0.95, settings.top_p);
+    settings._source += '+workspace:code';
+  } else if (workspaceType === 'creative') {
+    settings.temperature = Math.min(1.0, settings.temperature + 0.15);
+    settings.top_k = Math.min(100, settings.top_k + 20);
+    settings.repeat_penalty = Math.max(1.0, settings.repeat_penalty - 0.05);
+    settings._source += '+workspace:creative';
+  }
+  
+  // Remove duplicates from stop tokens
+  settings.stop = [...new Set(settings.stop)];
+  
+  // Apply user overrides last (explicit settings always win)
+  return {
+    temperature: overrides.temperature ?? settings.temperature,
+    top_p: overrides.top_p ?? settings.top_p,
+    top_k: overrides.top_k ?? settings.top_k,
+    repeat_penalty: overrides.repeat_penalty ?? settings.repeat_penalty,
+    num_ctx: overrides.num_ctx ?? settings.num_ctx,
+    num_batch: overrides.num_batch ?? settings.num_batch,
+    num_gpu: overrides.num_gpu ?? settings.num_gpu,
+    num_predict: overrides.num_predict ?? settings.num_predict,
+    stop: overrides.stop ?? settings.stop,
+    _detected: settings._detected,
+    _source: settings._source,
+    _modelType: settings._modelType,
+  };
+}
+
+/**
+ * Map Ollama's family string to our MODEL_FAMILIES key.
+ * Ollama returns families like "llama", "qwen2", etc.
+ * We need to match to our specific keys.
+ */
+function resolveFamily(ollamaFamily, modelName) {
+  if (!ollamaFamily) {
+    // Fallback to name parsing
+    return parseModelName(modelName).family;
+  }
+  
+  const f = ollamaFamily.toLowerCase().trim();
+  
+  // Direct match
+  if (MODEL_FAMILIES[f]) return f;
+  
+  // Common Ollama family → our key mappings
+  const familyMap = {
+    'llama': 'llama',
+    'qwen2': 'qwen2',
+    'qwen': 'qwen',
+    'gemma': 'gemma',
+    'gemma2': 'gemma2',
+    'gemma3': 'gemma3',
+    'phi3': 'phi3',
+    'phi': 'phi',
+    'mistral': 'mistral',
+    'mixtral': 'mixtral',
+    'command-r': 'command-r',
+    'starcoder': 'starcoder',
+    'starcoder2': 'starcoder2',
+    'deepseek': 'deepseek',
+    'deepseek2': 'deepseek-v2',
+    'yi': 'yi',
+    'internlm2': 'internlm2',
+    'internlm': 'internlm',
+    'chatglm': 'chatglm',
+    'glm': 'glm',
+    'granite': 'granite',
+    'olmo': 'olmo',
+    'olmo2': 'olmo2',
+    'smollm': 'smollm',
+    'smollm2': 'smollm2',
+    'exaone': 'exaone',
+    'pixtral': 'pixtral',
+  };
+  
+  if (familyMap[f]) return familyMap[f];
+  
+  // Partial match — check if the Ollama family contains a known key
+  for (const [key, value] of Object.entries(familyMap)) {
+    if (f.includes(key)) return value;
+  }
+  
+  // Try name parsing as ultimate fallback
+  return parseModelName(modelName).family;
+}
+
+/**
+ * Normalize Ollama's parameter_size string (e.g. "7.6B", "3B") to our SIZE_PROFILES keys.
+ */
+function normalizeParameterSize(parameterSize) {
+  if (!parameterSize) return null;
+  
+  const sizeStr = parameterSize.toString().toUpperCase();
+  const match = sizeStr.match(/([\d.]+)/);
+  if (!match) return null;
+  
+  const num = parseFloat(match[1]);
+  
+  if (num <= 0.6) return '0.5B';
+  if (num <= 1.2) return '1B';
+  if (num <= 1.8) return '1.5B';
+  if (num <= 2.5) return '2B';
+  if (num <= 4.5) return '3B';
+  if (num <= 5.5) return '4B';
+  if (num <= 7.5) return '7B';
+  if (num <= 8.5) return '8B';
+  if (num <= 10) return '9B';
+  if (num <= 13.5) return '13B';
+  if (num <= 16) return '14B';
+  if (num <= 25) return '20B';
+  if (num <= 31) return '30B';
+  if (num <= 35) return '34B';
+  if (num <= 73) return '70B';
+  return '405B';
+}
+
+/**
+ * Normalize Ollama's quantization_level string to our QUANTIZATION_PROFILES keys.
+ */
+function normalizeQuantization(quantLevel) {
+  if (!quantLevel) return null;
+  
+  const q = quantLevel.toUpperCase().trim();
+  
+  // Direct match
+  if (QUANTIZATION_PROFILES[q]) return q;
+  
+  // Common patterns: Ollama returns things like "Q4_K_M", "Q4_0", "F16", etc.
+  // Try partial matching
+  for (const key of Object.keys(QUANTIZATION_PROFILES)) {
+    if (q.includes(key)) return key;
+  }
+  
+  return null;
 }
 
 export default {
@@ -664,6 +954,7 @@ export default {
   estimateVRAMUsage,
   describeSettings,
   buildOptimizedOllamaOptions,
+  buildOptimizedOllamaOptionsWithInfo,
   MODEL_FAMILIES,
   QUANTIZATION_PROFILES,
   SIZE_PROFILES,

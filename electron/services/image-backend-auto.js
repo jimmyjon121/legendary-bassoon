@@ -49,36 +49,37 @@ const CONFIG = {
     amd: 'https://github.com/comfyanonymous/ComfyUI/releases/latest/download/ComfyUI_windows_portable_amd.7z',
     cpu: 'https://github.com/comfyanonymous/ComfyUI/releases/latest/download/ComfyUI_windows_portable.7z',
   },
-  // Starter model - small, fast, NSFW-capable
+  // Starter model - small, fast, great quality (all URLs are HuggingFace - free, no login)
   starterModel: {
     name: 'DreamShaper 8',
-    url: 'https://civitai.com/api/download/models/128713',
+    url: 'https://huggingface.co/jzli/DreamShaper-8/resolve/main/dreamshaper_8.safetensors',
     filename: 'dreamshaper_8.safetensors',
     size: '2.1 GB',
+    description: 'Dreamy artistic style, versatile, great for most prompts',
   },
-  // Alternative models (smaller/faster options)
+  // Alternative models - ALL hosted on HuggingFace (free, no auth, no API keys)
   alternativeModels: [
     {
       name: 'Stable Diffusion 1.5',
-      url: 'https://huggingface.co/runwayml/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors',
+      url: 'https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors',
       filename: 'sd_v1-5-pruned-emaonly.safetensors',
       size: '4.27 GB',
-      description: 'Original SD 1.5 - great all-rounder'
+      description: 'The original classic - great all-rounder, huge community support'
     },
     {
-      name: 'Deliberate v2',
-      url: 'https://civitai.com/api/download/models/15236',
-      filename: 'deliberate_v2.safetensors', 
-      size: '2.0 GB',
-      description: 'Photorealistic, versatile'
+      name: 'Realistic Vision 6.0',
+      url: 'https://huggingface.co/Cristiants/comfyui/resolve/main/checkpoints/realistic-vision-v60-b1.safetensors',
+      filename: 'realistic_vision_v60.safetensors',
+      size: '2.1 GB',
+      description: 'Photorealistic images, people, landscapes'
     },
     {
-      name: 'ReV Animated',
-      url: 'https://civitai.com/api/download/models/46846',
-      filename: 'rev_animated.safetensors',
-      size: '2.0 GB',
-      description: 'Anime/illustration style'
-    }
+      name: 'Realistic Vision 4.0',
+      url: 'https://huggingface.co/fofr/comfyui/resolve/main/checkpoints/Realistic_Vision_V4.0.safetensors',
+      filename: 'realistic_vision_v40.safetensors',
+      size: '4.27 GB',
+      description: 'Photorealistic, versatile, excellent detail'
+    },
   ]
 };
 
@@ -470,7 +471,30 @@ class ImageBackendAuto {
   }
 
   /**
-   * Start the backend (hidden, no console window)
+   * Quick pre-flight check: can PyTorch see the CUDA GPU?
+   * Returns true if GPU mode should work, false if we should use --cpu.
+   */
+  async _checkGpuAvailable() {
+    if (!this.pythonExe || this.pythonExe === 'python') return true; // can't check, assume yes
+    try {
+      const { execFileSync } = require('child_process');
+      const out = execFileSync(this.pythonExe, [
+        '-s', '-c',
+        'import torch; print("OK" if torch.cuda.is_available() else "NO")'
+      ], { timeout: 30000, windowsHide: true, encoding: 'utf-8' });
+      const available = out.trim().endsWith('OK');
+      console.log(`[ImageBackend] GPU pre-check: CUDA available = ${available}`);
+      return available;
+    } catch (err) {
+      console.warn('[ImageBackend] GPU pre-check failed:', err.message);
+      return false; // safer to assume no GPU
+    }
+  }
+
+  /**
+   * Start the backend (hidden, no console window).
+   * Checks GPU availability first. If GPU is available, starts in GPU mode.
+   * If GPU crashes during startup, automatically retries with --cpu.
    */
   async start() {
     // Already running?
@@ -488,8 +512,42 @@ class ImageBackendAuto {
       return this.startupPromise;
     }
 
-    this.startupPromise = this._doStart();
-    
+    this.startupPromise = (async () => {
+      // If we already know CPU-only is needed, skip the GPU attempt
+      if (this._forceCpu) {
+        return this._doStart({ cpu: true });
+      }
+
+      // Pre-flight GPU check
+      const gpuOk = await this._checkGpuAvailable();
+      if (!gpuOk) {
+        console.warn('[ImageBackend] GPU not available (CUDA check failed), using CPU mode');
+        this.emit('backend:starting', {
+          message: 'GPU not available — starting in CPU mode...',
+          progress: 0
+        });
+        this._forceCpu = true;
+        return this._doStart({ cpu: true });
+      }
+
+      try {
+        return await this._doStart({ cpu: false });
+      } catch (gpuError) {
+        // If the process crashed (segfault / access violation), fall back to CPU
+        const isCrash = gpuError.message?.includes('exited') || gpuError.message?.includes('crashed');
+        if (isCrash) {
+          console.warn('[ImageBackend] GPU mode crashed, retrying with --cpu...');
+          this.emit('backend:starting', {
+            message: 'GPU mode failed — retrying with CPU (slower but works)...',
+            progress: 0
+          });
+          this._forceCpu = true;
+          return await this._doStart({ cpu: true });
+        }
+        throw gpuError;
+      }
+    })();
+
     try {
       const result = await this.startupPromise;
       return result;
@@ -498,13 +556,14 @@ class ImageBackendAuto {
     }
   }
 
-  async _doStart() {
+  async _doStart({ cpu = false } = {}) {
     // Ensure we have valid paths
     if (!this.isInstalled()) {
       throw new Error('ComfyUI not found. Please run setup first.');
     }
 
-    this.emit('backend:starting', { message: 'Starting image backend...', path: this.comfyDir });
+    const modeLabel = cpu ? 'CPU' : 'GPU';
+    this.emit('backend:starting', { message: `Starting image backend (${modeLabel})...`, path: this.comfyDir });
 
     return new Promise((resolve, reject) => {
       // Build command arguments
@@ -515,60 +574,151 @@ class ImageBackendAuto {
         args.push('--windows-standalone-build');
       }
 
+      // CPU fallback mode
+      if (cpu) {
+        args.push('--cpu');
+      }
+
       // Determine working directory
       const cwd = path.dirname(this.mainPy);
       
       console.log(`[ImageBackend] Starting: ${this.pythonExe} ${args.join(' ')}`);
       console.log(`[ImageBackend] Working dir: ${cwd}`);
 
-      // Start ComfyUI with hidden window
-      this.process = spawn(this.pythonExe, args, {
-        cwd: cwd,
-        detached: true,
-        stdio: 'ignore',
-        windowsHide: true, // Hide the console window on Windows
-        env: {
-          ...process.env,
-          // Ensure CUDA/GPU works properly
-          CUDA_VISIBLE_DEVICES: process.env.CUDA_VISIBLE_DEVICES || '0',
+      // Capture stdout/stderr so we can diagnose failures.
+      // We still hide the console window on Windows.
+      let capturedOutput = '';
+      let capturedErrors = '';
+      let processExited = false;
+      let exitCode = null;
+
+      try {
+        this.process = spawn(this.pythonExe, args, {
+          cwd: cwd,
+          detached: true,
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+          env: {
+            ...process.env,
+            CUDA_VISIBLE_DEVICES: process.env.CUDA_VISIBLE_DEVICES || '0',
+          }
+        });
+      } catch (spawnError) {
+        console.error('[ImageBackend] Failed to spawn process:', spawnError.message);
+        this.emit('backend:error', { error: `Failed to start: ${spawnError.message}` });
+        reject(new Error(`Failed to spawn ComfyUI: ${spawnError.message}`));
+        return;
+      }
+
+      // Capture output for diagnostics (keep last 2000 chars)
+      this.process.stdout?.on('data', (data) => {
+        const text = data.toString();
+        capturedOutput += text;
+        if (capturedOutput.length > 2000) capturedOutput = capturedOutput.slice(-2000);
+        // Log key lines
+        for (const line of text.split('\n')) {
+          const trimmed = line.trim();
+          if (trimmed && (trimmed.includes('Error') || trimmed.includes('error') || trimmed.includes('Starting') || trimmed.includes('ready') || trimmed.includes('http'))) {
+            console.log('[ComfyUI]', trimmed);
+          }
+        }
+      });
+
+      this.process.stderr?.on('data', (data) => {
+        const text = data.toString();
+        capturedErrors += text;
+        if (capturedErrors.length > 2000) capturedErrors = capturedErrors.slice(-2000);
+        // Log errors
+        for (const line of text.split('\n')) {
+          const trimmed = line.trim();
+          if (trimmed) {
+            console.log('[ComfyUI stderr]', trimmed);
+          }
         }
       });
 
       this.process.on('error', (err) => {
         console.error('[ImageBackend] Process error:', err);
         this.emit('backend:error', { error: err.message });
+        processExited = true;
       });
 
+      this.process.on('exit', (code, signal) => {
+        processExited = true;
+        exitCode = code;
+        console.log(`[ImageBackend] Process exited: code=${code}, signal=${signal}`);
+        this.process = null;
+      });
+
+      // Unref so the parent process can exit if needed
       this.process.unref();
 
-      // Wait for it to be ready
+      // Wait for ComfyUI to be ready (poll /system_stats)
       let attempts = 0;
-      const maxAttempts = 90; // 90 seconds max (first load can be slow)
+      const maxAttempts = 120; // 120 seconds max (first load can be very slow)
+      let settled = false;
+
+      const finish = (err, result) => {
+        if (settled) return;
+        settled = true;
+        if (err) reject(err);
+        else resolve(result);
+      };
 
       const checkReady = async () => {
+        if (settled) return;
         attempts++;
+
+        // If the process crashed, fail immediately instead of waiting
+        if (processExited) {
+          const diagnosis = capturedErrors || capturedOutput || `Process exited with code ${exitCode}`;
+          const shortDiag = diagnosis.length > 500 ? '...' + diagnosis.slice(-500) : diagnosis;
+          console.error('[ImageBackend] Process died during startup. Output:', shortDiag);
+          this.emit('backend:error', { error: `ComfyUI crashed during startup: ${shortDiag.split('\n').pop()}` });
+          finish(new Error(
+            `ComfyUI process exited (code ${exitCode}) before becoming ready.\n\n` +
+            `Last output:\n${shortDiag}\n\n` +
+            'Check that your GPU drivers are up to date and no other program is using port 8188.'
+          ));
+          return;
+        }
         
         if (await this.checkRunning()) {
+          console.log(`[ImageBackend] ComfyUI is ready after ${attempts}s`);
           this.emit('backend:ready', { message: 'Image backend ready!', port: CONFIG.port });
-          resolve({ success: true, port: CONFIG.port });
+          finish(null, { success: true, port: CONFIG.port });
           return;
         }
 
         if (attempts >= maxAttempts) {
-          this.emit('backend:error', { error: 'Startup timeout' });
-          reject(new Error('Backend startup timeout - check GPU drivers and try again'));
+          const diagnosis = capturedErrors || capturedOutput || 'No output captured';
+          const shortDiag = diagnosis.length > 500 ? '...' + diagnosis.slice(-500) : diagnosis;
+          console.error('[ImageBackend] Startup timeout. Last output:', shortDiag);
+          this.emit('backend:error', { error: `Startup timeout after ${maxAttempts}s` });
+          // Kill the hung process
+          try { if (this.process) this.process.kill(); } catch {}
+          this.process = null;
+          finish(new Error(
+            `ComfyUI did not respond on port ${CONFIG.port} after ${maxAttempts} seconds.\n\n` +
+            `Last output:\n${shortDiag}\n\n` +
+            'Possible causes:\n' +
+            '- Missing GPU drivers (install latest NVIDIA/AMD drivers)\n' +
+            '- Port 8188 is in use by another program\n' +
+            '- ComfyUI dependencies are missing (try reinstalling)\n' +
+            '- Not enough VRAM or RAM for the selected model'
+          ));
           return;
         }
 
-        // Emit progress
+        // Emit progress every 5 seconds
         if (attempts % 5 === 0) {
-          this.emit('backend:starting', { message: `Starting... ${attempts}s`, progress: Math.min(attempts, 80) });
+          this.emit('backend:starting', { message: `Starting ComfyUI... ${attempts}s`, progress: Math.min(Math.round((attempts / maxAttempts) * 100), 95) });
         }
 
         setTimeout(checkReady, 1000);
       };
 
-      // Give it a moment before first check (ComfyUI takes time to load models)
+      // Give ComfyUI a moment to initialize before first poll
       setTimeout(checkReady, 3000);
     });
   }
@@ -823,42 +973,83 @@ class ImageBackendAuto {
 
   /**
    * Download file with progress
+   * Handles redirects (HuggingFace uses them), auth errors, and network failures gracefully.
    */
-  downloadFile(url, destPath, onProgress) {
+  downloadFile(url, destPath, onProgress, _redirectCount = 0) {
+    const MAX_REDIRECTS = 10;
+    
     return new Promise((resolve, reject) => {
+      if (_redirectCount > MAX_REDIRECTS) {
+        reject(new Error('Too many redirects - download URL may be invalid'));
+        return;
+      }
+
       const file = createWriteStream(destPath);
       const protocol = url.startsWith('https') ? https : http;
 
       const request = protocol.get(url, {
-        headers: { 'User-Agent': 'DevForge/1.0' }
+        headers: { 'User-Agent': 'DevForge/1.0' },
+        timeout: 30000, // 30s connection timeout
       }, (response) => {
-        // Handle redirects
-        if (response.statusCode === 301 || response.statusCode === 302) {
+        // Handle redirects (HuggingFace and others use 301/302/307/308)
+        if ([301, 302, 303, 307, 308].includes(response.statusCode)) {
           file.close();
           try { fs.unlinkSync(destPath); } catch {}
-          return this.downloadFile(response.headers.location, destPath, onProgress)
+          const redirectUrl = response.headers.location;
+          if (!redirectUrl) {
+            reject(new Error('Redirect with no location header'));
+            return;
+          }
+          // Handle relative redirects
+          const absoluteUrl = redirectUrl.startsWith('http') 
+            ? redirectUrl 
+            : new URL(redirectUrl, url).href;
+          return this.downloadFile(absoluteUrl, destPath, onProgress, _redirectCount + 1)
             .then(resolve)
             .catch(reject);
         }
 
+        // Auth errors
+        if (response.statusCode === 401 || response.statusCode === 403) {
+          file.close();
+          try { fs.unlinkSync(destPath); } catch {}
+          reject(new Error(
+            `Download blocked (HTTP ${response.statusCode}). This model source may require authentication. ` +
+            'All default models in DevForge use free HuggingFace downloads that require no login.'
+          ));
+          return;
+        }
+
+        // Other HTTP errors
         if (response.statusCode !== 200) {
           file.close();
           try { fs.unlinkSync(destPath); } catch {}
-          reject(new Error(`Download failed: HTTP ${response.statusCode}`));
+          reject(new Error(`Download failed: HTTP ${response.statusCode} - The download URL may be outdated or the server is temporarily unavailable.`));
           return;
         }
 
         const totalSize = parseInt(response.headers['content-length'], 10);
         let downloadedSize = 0;
         let lastPercent = 0;
+        let lastProgressTime = Date.now();
 
         response.on('data', (chunk) => {
           downloadedSize += chunk.length;
           const percent = totalSize ? Math.round((downloadedSize / totalSize) * 100) : 0;
           
-          if (percent > lastPercent && onProgress) {
+          // Throttle progress updates to every 1% or every 500ms
+          const now = Date.now();
+          if ((percent > lastPercent || now - lastProgressTime > 500) && onProgress) {
             lastPercent = percent;
-            onProgress({ percent, downloaded: downloadedSize, total: totalSize });
+            lastProgressTime = now;
+            const downloadedMB = (downloadedSize / 1024 / 1024).toFixed(1);
+            const totalMB = totalSize ? (totalSize / 1024 / 1024).toFixed(0) : '?';
+            onProgress({ 
+              percent, 
+              downloaded: downloadedSize, 
+              total: totalSize,
+              message: `${downloadedMB} MB / ${totalMB} MB`
+            });
           }
         });
 
@@ -866,60 +1057,134 @@ class ImageBackendAuto {
 
         file.on('finish', () => {
           file.close();
+          // Verify the file was actually written (not an empty/error page)
+          try {
+            const fileSize = statSync(destPath).size;
+            if (fileSize < 1024 * 1024) { // Less than 1MB - probably an error page, not a model
+              fs.unlinkSync(destPath);
+              reject(new Error('Downloaded file is too small - the URL may be incorrect or the server returned an error page.'));
+              return;
+            }
+          } catch {}
           resolve(destPath);
         });
 
         file.on('error', (err) => {
           file.close();
           try { fs.unlinkSync(destPath); } catch {}
-          reject(err);
+          reject(new Error(`File write error: ${err.message}`));
         });
       });
 
       request.on('error', (err) => {
         file.close();
         try { fs.unlinkSync(destPath); } catch {}
-        reject(err);
+        if (err.code === 'ENOTFOUND' || err.code === 'EAI_AGAIN') {
+          reject(new Error('No internet connection. Connect to the internet to download models (only needed once - after that, everything works offline).'));
+        } else if (err.code === 'ECONNREFUSED') {
+          reject(new Error('Connection refused. The download server may be temporarily down. Try again in a few minutes.'));
+        } else if (err.code === 'ETIMEDOUT' || err.code === 'ESOCKETTIMEDOUT') {
+          reject(new Error('Download timed out. Check your internet connection and try again.'));
+        } else {
+          reject(new Error(`Download error: ${err.message}`));
+        }
+      });
+
+      request.on('timeout', () => {
+        request.destroy();
+        file.close();
+        try { fs.unlinkSync(destPath); } catch {}
+        reject(new Error('Connection timed out. Check your internet connection and try again.'));
       });
     });
   }
 
   /**
-   * Extract 7z archive (uses system 7-zip or falls back to manual extraction)
+   * Extract 7z archive (uses system 7-zip, searches common install locations)
    */
   async extractArchive(archivePath, destDir) {
-    // Try using 7-zip if available
-    const sevenZipPaths = [
+    const sevenZipPath = this._find7Zip();
+    
+    if (sevenZipPath) {
+      this.emit('install:extract', { message: 'Extracting files (this may take a few minutes)...', percent: 10 });
+      
+      return new Promise((resolve, reject) => {
+        const proc = spawn(sevenZipPath, ['x', archivePath, `-o${destDir}`, '-y', '-bsp1'], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          windowsHide: true,
+        });
+
+        // Parse progress from stdout (7z outputs percentage with -bsp1)
+        let lastPercent = 0;
+        proc.stdout?.on('data', (data) => {
+          const match = data.toString().match(/(\d+)%/);
+          if (match) {
+            const percent = parseInt(match[1], 10);
+            if (percent > lastPercent) {
+              lastPercent = percent;
+              this.emit('install:extract', { message: `Extracting... ${percent}%`, percent });
+            }
+          }
+        });
+
+        proc.on('close', (code) => {
+          if (code === 0) {
+            this.emit('install:extract', { message: 'Extraction complete!', percent: 100 });
+            resolve();
+          } else {
+            reject(new Error(`7-Zip extraction failed (exit code ${code}). The archive may be corrupted - try deleting it and running setup again.`));
+          }
+        });
+
+        proc.on('error', (err) => {
+          reject(new Error(`Failed to run 7-Zip: ${err.message}`));
+        });
+      });
+    }
+
+    // No 7-Zip found - provide a helpful error
+    throw new Error(
+      '7-Zip is required for first-time setup to extract ComfyUI.\n\n' +
+      'Install it free from: https://7-zip.org/\n\n' +
+      'After installing 7-Zip, click "One-Click Setup" again - DevForge will find it automatically.'
+    );
+  }
+
+  /**
+   * Find 7-Zip executable on the system
+   */
+  _find7Zip() {
+    // Common install locations on Windows
+    const searchPaths = [
       'C:\\Program Files\\7-Zip\\7z.exe',
       'C:\\Program Files (x86)\\7-Zip\\7z.exe',
       path.join(os.homedir(), 'AppData', 'Local', '7-Zip', '7z.exe'),
+      path.join(os.homedir(), 'scoop', 'apps', '7zip', 'current', '7z.exe'),
+      // Chocolatey installs
+      'C:\\ProgramData\\chocolatey\\bin\\7z.exe',
+      // WinGet/portable
+      path.join(os.homedir(), 'AppData', 'Local', 'Programs', '7-Zip', '7z.exe'),
     ];
 
-    for (const szPath of sevenZipPaths) {
-      if (existsSync(szPath)) {
-        return new Promise((resolve, reject) => {
-          const proc = spawn(szPath, ['x', archivePath, `-o${destDir}`, '-y'], {
-            stdio: 'ignore',
-            windowsHide: true,
-          });
-
-          proc.on('close', (code) => {
-            if (code === 0) {
-              resolve();
-            } else {
-              reject(new Error(`7-Zip extraction failed with code ${code}`));
-            }
-          });
-
-          proc.on('error', reject);
-        });
-      }
+    // Check PATH first (in case 7z is available globally)
+    const pathDirs = (process.env.PATH || '').split(path.delimiter);
+    for (const dir of pathDirs) {
+      const candidate = path.join(dir, '7z.exe');
+      if (existsSync(candidate)) return candidate;
     }
 
-    // If no 7-zip, throw helpful error
-    throw new Error(
-      '7-Zip is required to extract ComfyUI. Please install 7-Zip from https://7-zip.org/ and try again.'
-    );
+    // Check known install locations
+    for (const szPath of searchPaths) {
+      if (existsSync(szPath)) return szPath;
+    }
+
+    // Also check all drive letters (D:\, E:\, etc.)
+    for (const drive of ['D', 'E', 'F']) {
+      const p = `${drive}:\\Program Files\\7-Zip\\7z.exe`;
+      if (existsSync(p)) return p;
+    }
+
+    return null;
   }
 }
 

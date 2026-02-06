@@ -1,10 +1,16 @@
 /**
- * Image Generation IPC Handlers
+ * Image Generation IPC Handlers (Modular)
  * 
- * Handles image generation operations:
+ * NOTE: These handlers are currently NOT active. The legacy ipc-handlers.js
+ * registers all image channels. This file exists for future modularization.
+ * 
+ * When activated, remove the corresponding handlers from ipc-handlers.js
+ * to avoid duplicate registration errors.
+ * 
+ * Handles:
  * - ComfyUI management (install, start, stop)
- * - Image generation
- * - Model management for image gen
+ * - Image generation via ImageService
+ * - Auto backend detection/setup via ImageBackendAuto
  */
 
 const { getService } = require('../services/lazy-loader');
@@ -28,27 +34,17 @@ function setupImageHandlers(ipcMain, mainWindow) {
       if (!manager) {
         return { installed: false, running: false, error: 'ComfyUI manager not available' };
       }
-      return await manager.init();
+      return await manager.getStatus();
     } catch (error) {
       return { installed: false, running: false, error: error.message };
     }
   });
 
-  ipcMain.handle('comfyui:install', async () => {
+  ipcMain.handle('comfyui:install', async (_, options = {}) => {
     try {
       const manager = getComfyUIManager();
-      if (!manager) {
-        return { success: false, error: 'ComfyUI manager not available' };
-      }
-      
-      // Send progress updates to renderer
-      const onProgress = (data) => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('comfyui:progress', data);
-        }
-      };
-      
-      return await manager.installComfyUI(onProgress);
+      if (!manager) throw new Error('ComfyUI manager not available');
+      return await manager.install(options);
     } catch (error) {
       return { success: false, error: error.message };
     }
@@ -57,10 +53,8 @@ function setupImageHandlers(ipcMain, mainWindow) {
   ipcMain.handle('comfyui:start', async () => {
     try {
       const manager = getComfyUIManager();
-      if (!manager) {
-        return { success: false, error: 'ComfyUI manager not available' };
-      }
-      return await manager.startComfyUI();
+      if (!manager) throw new Error('ComfyUI manager not available');
+      return await manager.start();
     } catch (error) {
       return { success: false, error: error.message };
     }
@@ -69,129 +63,180 @@ function setupImageHandlers(ipcMain, mainWindow) {
   ipcMain.handle('comfyui:stop', async () => {
     try {
       const manager = getComfyUIManager();
-      if (!manager) {
-        return { success: false, error: 'ComfyUI manager not available' };
-      }
-      return await manager.stopComfyUI();
+      if (!manager) throw new Error('ComfyUI manager not available');
+      return await manager.stop();
     } catch (error) {
       return { success: false, error: error.message };
     }
   });
 
-  ipcMain.handle('comfyui:getModels', async () => {
+  ipcMain.handle('comfyui:getAvailableModels', async () => {
     try {
       const manager = getComfyUIManager();
-      if (!manager) {
-        return [];
-      }
-      return await manager.getAvailableModels();
+      if (!manager) throw new Error('ComfyUI manager not available');
+      return manager.getAvailableModels();
     } catch (error) {
-      console.error('Get ComfyUI models error:', error);
+      return {};
+    }
+  });
+
+  ipcMain.handle('comfyui:getInstalledModels', async () => {
+    try {
+      const manager = getComfyUIManager();
+      if (!manager) throw new Error('ComfyUI manager not available');
+      return await manager.getInstalledModels();
+    } catch (error) {
       return [];
     }
   });
 
-  ipcMain.handle('comfyui:downloadModel', async (_, modelUrl, modelName) => {
+  ipcMain.handle('comfyui:downloadModel', async (_, model) => {
     try {
       const manager = getComfyUIManager();
-      if (!manager) {
-        return { success: false, error: 'ComfyUI manager not available' };
-      }
-      
-      const onProgress = (progress) => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('comfyui:modelProgress', { modelName, progress });
-        }
-      };
-      
-      return await manager.downloadModel(modelUrl, modelName, onProgress);
+      if (!manager) throw new Error('ComfyUI manager not available');
+      return await manager.downloadModel(model, (progress) => {
+        mainWindow?.webContents?.send('comfyui:downloadProgress', {
+          modelId: model.id || model.name,
+          ...progress
+        });
+      });
     } catch (error) {
       return { success: false, error: error.message };
     }
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // IMAGE GENERATION
+  // IMAGE GENERATION (via ImageService)
   // ─────────────────────────────────────────────────────────────────────────
   
-  ipcMain.handle('image:generate', async (_, params) => {
+  ipcMain.handle('generateImage', async (_, params) => {
     try {
       const imageService = getImageService();
-      if (!imageService) {
-        return { success: false, error: 'Image service not available' };
-      }
+      if (!imageService) throw new Error('Image service not available');
+      if (!imageService.isInitialized) await imageService.initialize();
       return await imageService.generate(params);
     } catch (error) {
       return { success: false, error: error.message };
     }
   });
 
-  ipcMain.handle('image:getModels', async () => {
+  ipcMain.handle('getImageStatus', async () => {
     try {
       const imageService = getImageService();
-      if (!imageService) {
-        return [];
+      if (imageService) {
+        if (!imageService.isInitialized) await imageService.initialize();
+        return await imageService.getStatus();
       }
-      return await imageService.getModels();
+      // Fall back to ComfyUI manager
+      const manager = getComfyUIManager();
+      if (manager) {
+        const status = await manager.getStatus();
+        return { running: status.running, backend: status.running ? 'comfyui' : null };
+      }
+      return { running: false, error: 'No image backend available' };
     } catch (error) {
-      return [];
+      return { running: false, error: error.message };
     }
   });
 
-  ipcMain.handle('image:interrupt', async () => {
+  ipcMain.handle('pollImageResult', async (_, promptId) => {
     try {
       const imageService = getImageService();
-      if (!imageService) {
-        return { success: false };
-      }
-      return await imageService.interrupt();
+      if (!imageService) throw new Error('Image service not available');
+      return await imageService.pollComfyUIResult(promptId);
     } catch (error) {
       return { success: false, error: error.message };
     }
   });
 
-  ipcMain.handle('image:health', async () => {
+  ipcMain.handle('getImagePresets', async () => {
     try {
       const imageService = getImageService();
-      if (!imageService) {
-        return { healthy: false, error: 'Image service not available' };
-      }
-      return await imageService.healthCheck();
+      if (imageService) return imageService.getModelPresets();
+      return {
+        sd15: { name: 'SD 1.5', defaultWidth: 512, defaultHeight: 512, defaultSteps: 20, defaultCfg: 7 },
+        sdxl: { name: 'SDXL', defaultWidth: 1024, defaultHeight: 1024, defaultSteps: 25, defaultCfg: 7 },
+        flux: { name: 'Flux', defaultWidth: 1024, defaultHeight: 1024, defaultSteps: 20, defaultCfg: 1 }
+      };
     } catch (error) {
-      return { healthy: false, error: error.message };
+      return {};
     }
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // AUTO BACKEND DETECTION
+  // AUTO BACKEND (via ImageBackendAuto)
   // ─────────────────────────────────────────────────────────────────────────
   
-  ipcMain.handle('image:autoDetect', async () => {
+  ipcMain.handle('imageAuto:getStatus', async () => {
     try {
-      const autoBackend = getImageBackendAuto();
-      if (!autoBackend) {
-        return { detected: false, error: 'Auto detection not available' };
-      }
-      return await autoBackend.detect();
+      const backend = getImageBackendAuto();
+      if (!backend) return { installed: false, running: false, error: 'Backend not available' };
+      return await backend.getStatus();
     } catch (error) {
-      return { detected: false, error: error.message };
+      return { installed: false, running: false, error: error.message };
     }
   });
 
-  ipcMain.handle('image:autoSetup', async () => {
+  ipcMain.handle('imageAuto:setup', async (_, options = {}) => {
     try {
-      const autoBackend = getImageBackendAuto();
-      if (!autoBackend) {
-        return { success: false, error: 'Auto setup not available' };
-      }
-      
-      const onProgress = (data) => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send('image:autoSetupProgress', data);
-        }
-      };
-      
-      return await autoBackend.setup(onProgress);
+      const backend = getImageBackendAuto();
+      if (!backend) throw new Error('Backend not available');
+      backend.onEvent((event, data) => {
+        mainWindow?.webContents?.send('imageAuto:event', { event, ...data });
+      });
+      return await backend.autoSetup(options);
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('imageAuto:start', async () => {
+    try {
+      const backend = getImageBackendAuto();
+      if (!backend) throw new Error('Backend not available');
+      return await backend.start();
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('imageAuto:stop', async () => {
+    try {
+      const backend = getImageBackendAuto();
+      if (!backend) throw new Error('Backend not available');
+      return await backend.stop();
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('imageAuto:generate', async (_, params) => {
+    try {
+      const backend = getImageBackendAuto();
+      if (!backend) throw new Error('Backend not available');
+      return await backend.generate(params);
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('imageAuto:downloadModel', async (_, { url, filename }) => {
+    try {
+      const backend = getImageBackendAuto();
+      if (!backend) throw new Error('Backend not available');
+      return await backend.downloadModel(url, filename, (progress) => {
+        mainWindow?.webContents?.send('imageAuto:downloadProgress', progress);
+      });
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('imageAuto:ensureRunning', async () => {
+    try {
+      const backend = getImageBackendAuto();
+      if (!backend) throw new Error('Backend not available');
+      return await backend.ensureRunning();
     } catch (error) {
       return { success: false, error: error.message };
     }

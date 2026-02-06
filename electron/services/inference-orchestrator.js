@@ -151,7 +151,13 @@ class InferenceOrchestrator {
   }
 
   /**
-   * Select the optimal backend based on hardware and preferences
+   * Select the optimal backend based on hardware, preferences, and model size.
+   * 
+   * STRATEGY:
+   * - For models ≤3B params: prefer NPU if available (efficient, low power)
+   * - For models ≤13B params: prefer GPU (CUDA > Vulkan)
+   * - For larger models: prefer CUDA GPU with maximum VRAM
+   * - If selected backend fails health check, try to auto-start it
    */
   async selectOptimalBackend(modelSize = null) {
     // If user has a preference and it's available, use it
@@ -162,6 +168,44 @@ class InferenceOrchestrator {
         if (health.available) {
           this.currentBackend = preferred;
           return preferred;
+        }
+        // If preferred backend is NPU but not running, try to start it
+        if (this.preferredBackendId.includes('npu') || this.preferredBackendId.includes('openvino')) {
+          const started = await this._tryStartNpuServer();
+          if (started) {
+            const retryHealth = await preferred.checkHealth();
+            if (retryHealth.available) {
+              this.currentBackend = preferred;
+              return preferred;
+            }
+          }
+        }
+      }
+    }
+
+    // === SMART MODEL-SIZE-AWARE SELECTION ===
+    // If we know the model size, route to the best backend for that size
+    if (modelSize !== null && this.hardware?.npu?.detected) {
+      if (modelSize <= 3) {
+        // Small models: NPU is perfect - fast, efficient, frees up GPU
+        const npuBackend = this.backends.get('openvino-npu');
+        if (npuBackend) {
+          const health = await npuBackend.checkHealth();
+          if (health.available) {
+            console.log(`[Orchestrator] Routing ${modelSize}B model to NPU for efficiency`);
+            this.currentBackend = npuBackend;
+            return npuBackend;
+          }
+          // Try to auto-start NPU server
+          const started = await this._tryStartNpuServer();
+          if (started) {
+            const retryHealth = await npuBackend.checkHealth();
+            if (retryHealth.available) {
+              console.log(`[Orchestrator] Auto-started NPU server for ${modelSize}B model`);
+              this.currentBackend = npuBackend;
+              return npuBackend;
+            }
+          }
         }
       }
     }
@@ -199,6 +243,44 @@ class InferenceOrchestrator {
     // Fallback to CPU if nothing else available
     this.currentBackend = this.backends.get('ollama-cpu');
     return this.currentBackend;
+  }
+
+  /**
+   * Try to auto-start the NPU (OpenVINO) server
+   */
+  async _tryStartNpuServer() {
+    try {
+      const { getNpuBridge } = require('./npu-bridge');
+      const npuBridge = getNpuBridge();
+      
+      // Check if OpenVINO is installed first
+      const status = await npuBridge.getStatus();
+      if (!status.openvinoInstalled) {
+        console.log('[Orchestrator] OpenVINO not installed, skipping NPU auto-start');
+        return false;
+      }
+
+      if (status.serverRunning) {
+        return true; // Already running
+      }
+
+      // Auto-configure if needed
+      await npuBridge.autoConfigureModel({ enableAutoStart: true });
+
+      console.log('[Orchestrator] Auto-starting NPU server...');
+      const result = await npuBridge.startServer();
+      
+      if (result.success) {
+        console.log('[Orchestrator] NPU server auto-started successfully');
+        return true;
+      } else {
+        console.warn('[Orchestrator] NPU server auto-start failed:', result.error);
+        return false;
+      }
+    } catch (error) {
+      console.warn('[Orchestrator] NPU auto-start error:', error.message);
+      return false;
+    }
   }
 
   /**

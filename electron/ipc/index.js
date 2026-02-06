@@ -19,6 +19,8 @@ const { setupStorageHandlers } = require('./storage-handlers');
 const { setupAIHandlers } = require('./ai-handlers');
 const { setupModelHandlers } = require('./model-handlers');
 const { setupImageHandlers } = require('./image-handlers');
+const { setupCodeToolsHandlers } = require('./code-tools-handlers');
+const { setupWebSearchHandlers } = require('./web-search-handlers');
 
 /**
  * Setup all modular IPC handlers
@@ -44,6 +46,12 @@ function setupModularHandlers(ipcMain, mainWindow, store, db) {
   
   // Image handlers (ComfyUI, image generation)
   setupImageHandlers(ipcMain, mainWindow);
+  
+  // Code tools handlers (AI coding assistance)
+  setupCodeToolsHandlers(ipcMain, mainWindow, store);
+  
+  // Web search handlers (DuckDuckGo search for AI)
+  setupWebSearchHandlers(ipcMain);
   
   console.log('[IPC] Modular handlers setup complete');
 }

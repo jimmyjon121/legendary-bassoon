@@ -33,18 +33,20 @@ contextBridge.exposeInMainWorld('electronAPI', {
   unloadModel: () => ipcRenderer.invoke('llm:unload'),
   checkLLMHealth: () => ipcRenderer.invoke('llm:health'),
   warmupModel: (modelName) => ipcRenderer.invoke('llm:warmup', modelName),
+  getModelInfo: (modelName) => ipcRenderer.invoke('llm:modelInfo', modelName),
   getRunningModels: () => ipcRenderer.invoke('llm:running'),
   
-  // Image Generation
-  generateImage: (payload) => ipcRenderer.invoke('image:generate', payload),
-  getImageModels: () => ipcRenderer.invoke('image:models'),
-  interruptGeneration: () => ipcRenderer.invoke('image:interrupt'),
+  // Image Generation (raw ComfyUI passthrough - prefer imageAuto:* or generateImage for full service)
+  imageRawGenerate: (payload) => ipcRenderer.invoke('image:generate', payload),
+  imageRawGetModels: () => ipcRenderer.invoke('image:models'),
+  imageRawInterrupt: () => ipcRenderer.invoke('image:interrupt'),
   checkImageHealth: () => ipcRenderer.invoke('image:health'),
   
   // File System
   selectFile: (options) => ipcRenderer.invoke('fs:selectFile', options),
   selectFolder: (options) => ipcRenderer.invoke('fs:selectFolder', options),
   readFile: (filePath) => ipcRenderer.invoke('fs:readFile', filePath),
+  readFileBase64: (filePath) => ipcRenderer.invoke('fs:readFileBase64', filePath),
   writeFile: (filePath, content) => ipcRenderer.invoke('fs:writeFile', filePath, content),
   createFolder: (folderPath) => ipcRenderer.invoke('fs:createFolder', folderPath),
   listModels: (directory) => ipcRenderer.invoke('fs:listModels', directory),
@@ -80,6 +82,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   searchConversations: (query, options) => ipcRenderer.invoke('search:conversations', query, options),
   searchMessages: (query, options) => ipcRenderer.invoke('search:messages', query, options),
   searchAll: (query, options) => ipcRenderer.invoke('search:all', query, options),
+  
+  // Web Search - DuckDuckGo search for real-time information
+  webSearch: (query, options) => ipcRenderer.invoke('webSearch:search', query, options),
+  webFetchPage: (url, options) => ipcRenderer.invoke('webSearch:fetchPage', url, options),
+  webSearchAndFormat: (query, options) => ipcRenderer.invoke('webSearch:searchAndFormat', query, options),
   
   // NSFW Password Management
   setNsfwPassword: (password) => ipcRenderer.invoke('nsfw:setPassword', password),
@@ -350,6 +357,38 @@ contextBridge.exposeInMainWorld('electronAPI', {
   commitGitChanges: (rootPath, message) => ipcRenderer.invoke('git:commit', rootPath, message),
 
   // ============================================
+  // Code Tools - AI-Powered Code Assistance
+  // ============================================
+  
+  // Read file with optional line range
+  toolReadFile: (projectRoot, path, startLine, endLine) => 
+    ipcRenderer.invoke('tool:readFile', { projectRoot, path, startLine, endLine }),
+  
+  // List directory contents
+  toolListDirectory: (projectRoot, path, recursive, maxDepth) => 
+    ipcRenderer.invoke('tool:listDirectory', { projectRoot, path, recursive, maxDepth }),
+  
+  // Search code (grep-like)
+  toolSearchCode: (projectRoot, pattern, fileGlob, maxResults, caseSensitive) => 
+    ipcRenderer.invoke('tool:searchCode', { projectRoot, pattern, fileGlob, maxResults, caseSensitive }),
+  
+  // Run command (sandboxed)
+  toolRunCommand: (projectRoot, command, cwd, timeout) => 
+    ipcRenderer.invoke('tool:runCommand', { projectRoot, command, cwd, timeout }),
+  
+  // Apply a patch
+  toolApplyPatch: (projectRoot, patch) => 
+    ipcRenderer.invoke('tool:applyPatch', { projectRoot, patch }),
+  
+  // Generate diff preview
+  toolGenerateDiff: (oldContent, newContent, filePath) => 
+    ipcRenderer.invoke('tool:generateDiff', { oldContent, newContent, filePath }),
+  
+  // Check if command is allowed
+  toolIsCommandAllowed: (command) => 
+    ipcRenderer.invoke('tool:isCommandAllowed', { command }),
+
+  // ============================================
   // Model Inspection & Auto-tuning
   // ============================================
   inspectModel: (filePath) => ipcRenderer.invoke('inspectModel', filePath),
@@ -477,7 +516,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   imageAutoStart: () => ipcRenderer.invoke('imageAuto:start'),
   imageAutoStop: () => ipcRenderer.invoke('imageAuto:stop'),
   imageAutoGenerate: (params) => ipcRenderer.invoke('imageAuto:generate', params),
-  imageAutoDownloadModel: (url, filename) => ipcRenderer.invoke('imageAuto:downloadModel', { url, filename }),
+  imageAutoDownloadModel: (model) => ipcRenderer.invoke('imageAuto:downloadModel', model),
   imageAutoEnsureRunning: () => ipcRenderer.invoke('imageAuto:ensureRunning'),
   
   // Auto image backend event listeners
