@@ -45,6 +45,20 @@ export const useAppStore = create((set, get) => ({
       const savedWorkspace = settings.lastWorkspace ?? await window.electronAPI?.getSettings('lastWorkspace');
       const savedModel = settings.currentModel ?? await window.electronAPI?.getSettings('currentModel');
       const savedRagInfluence = settings.ragInfluence ?? await window.electronAPI?.getSettings('ragInfluence');
+
+      // Hydrate real model metadata on startup so first message uses proper
+      // context length/template behavior even before the user re-selects model.
+      let savedModelInfo = null;
+      if (savedModel && window.electronAPI?.getModelInfo) {
+        try {
+          const info = await window.electronAPI.getModelInfo(savedModel);
+          if (info?.success) {
+            savedModelInfo = info;
+          }
+        } catch {
+          // Non-fatal; fallback logic handles missing model info
+        }
+      }
       
       // Important: Set workspace FIRST so loadConversations filters correctly
       const workspace = savedWorkspace || 'casual';
@@ -59,6 +73,7 @@ export const useAppStore = create((set, get) => ({
         initialized: true,
         isLoading: false,
         currentModel: savedModel || null,
+        currentModelInfo: savedModelInfo,
         availableModels: models,
         conversations,
         ragInfluence: typeof savedRagInfluence === 'number' ? savedRagInfluence : 0.5,

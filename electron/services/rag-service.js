@@ -2,6 +2,7 @@ const fs = require('fs');
 const fsPromises = require('fs').promises;
 const path = require('path');
 const crypto = require('crypto');
+const { getOrchestrator } = require('./inference-orchestrator');
 
 // Optional dependencies - graceful degradation if not installed
 let pdfParse = null;
@@ -17,7 +18,53 @@ try {
   console.warn('mammoth not available - DOCX support disabled');
 }
 
-const { embedTextsWithOllama, cosineSimilarity } = require('./embedding-service');
+const { embedTextsWithRouting, cosineSimilarity } = require('./embedding-service');
+
+async function embedWithRuntime(store, texts = []) {
+  const payload = Array.isArray(texts)
+    ? texts.map((item) => String(item || '')).filter(Boolean)
+    : [];
+  if (payload.length === 0) {
+    return { vectors: [], route: null, fallbackReason: 'no-texts' };
+  }
+
+  try {
+    const orchestrator = getOrchestrator(store);
+    if (orchestrator && !orchestrator.initialized) {
+      await orchestrator.initialize();
+    }
+    if (orchestrator?.embedTexts) {
+      const runtimeResult = await orchestrator.embedTexts(payload, {
+        lane: 'lane_embedding',
+        workloadType: 'rag-embedding',
+        modelName: 'nomic-embed-text',
+        preferNpu: true,
+        allowFallback: true,
+        priority: -8,
+      });
+
+      if (Array.isArray(runtimeResult?.vectors) && runtimeResult.vectors.length === payload.length) {
+        return {
+          vectors: runtimeResult.vectors,
+          route: runtimeResult.route || 'orchestrator',
+          fallbackReason: runtimeResult.fallbackReason || null,
+        };
+      }
+    }
+  } catch (error) {
+    console.warn(`[RAG] Runtime embedding path unavailable: ${error.message}`);
+  }
+
+  const ollamaEndpoint = store.get('llmEndpoint');
+  const openvinoEndpoint = store.get('openvinoEndpoint') || 'http://127.0.0.1:8081';
+  return embedTextsWithRouting({
+    texts: payload,
+    ollamaEndpoint,
+    openvinoEndpoint,
+    modelName: 'nomic-embed-text',
+    preferNpu: true,
+  });
+}
 
 function hashContent(text) {
   return crypto.createHash('sha256').update(text || '').digest('hex');
@@ -103,10 +150,17 @@ async function ingestDocument(db, store, filePath, workspace) {
     [id, filename, filePath, contentHash, chunks.length, workspace || null],
   );
 
-  const endpoint = store.get('llmEndpoint');
   let embeddings = [];
   try {
-    embeddings = await embedTextsWithOllama(endpoint, chunks);
+    const embedded = await embedWithRuntime(store, chunks);
+    embeddings = embedded.vectors || [];
+    if (embedded.route) {
+      console.log(
+        `[RAG] Document embeddings routed via ${embedded.route} (${embeddings.length}/${chunks.length})`,
+      );
+    } else if (embedded.fallbackReason) {
+      console.warn(`[RAG] Embedding routing fallback: ${embedded.fallbackReason}`);
+    }
   } catch (error) {
     console.error('Failed to generate embeddings:', error);
     // Still store chunks without embeddings; RAG search will be disabled
@@ -181,15 +235,14 @@ async function searchDocuments(db, store, workspace, query, limit = 4) {
   if (!db) return [];
   if (!query || !query.trim()) return [];
 
-  const endpoint = store.get('llmEndpoint');
   let queryEmbedding;
   try {
-    const embedded = await embedTextsWithOllama(endpoint, [query]);
-    if (!embedded || embedded.length === 0) {
+    const embedded = await embedWithRuntime(store, [query]);
+    if (!embedded?.vectors || embedded.vectors.length === 0) {
       // Embedding model unavailable - degrade gracefully
       return [];
     }
-    queryEmbedding = embedded[0];
+    queryEmbedding = embedded.vectors[0];
   } catch (error) {
     console.error('Failed to embed query:', error);
     return [];
@@ -356,5 +409,3 @@ module.exports = {
   exportWorkspace,
   importWorkspace,
 };
-
-

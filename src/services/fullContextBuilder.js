@@ -69,11 +69,15 @@ export async function buildFullContext(options) {
     messages = [],
     systemPromptBase = '',
     projectContext = null,      // For code workspace
+    projectContextMode = 'full', // 'full' | 'light' for code workspace
     ragQuery = null,            // Query for document search
+    modelContextLength = null,  // Real context length from /api/show (overrides guessing)
   } = options;
   
-  // Get actual model context size
-  const maxContextTokens = await getModelContextSize(modelName);
+  // Use real context length from Ollama when available, otherwise guess from name
+  const maxContextTokens = modelContextLength && modelContextLength > 0
+    ? modelContextLength
+    : await getModelContextSize(modelName);
   
   // Reserve tokens for response (20%)
   const responseReserve = Math.floor(maxContextTokens * 0.20);
@@ -164,76 +168,111 @@ export async function buildFullContext(options) {
   // 5. PROJECT CONTEXT (Code workspace)
   // ═══════════════════════════════════════════════════════════════════════════
   if (workspace === 'code' && projectContext) {
-    const { rootPath, activeFilePath, openFiles, files, projectAnalysis } = projectContext;
-    
-    if (rootPath) {
+    const {
+      rootPath,
+      activeFilePath,
+      openFiles,
+      files,
+      projectAnalysis,
+      openFilesList: hintedOpenFilesList,
+    } = projectContext;
+
+    const contextMode = projectContextMode === 'light' ? 'light' : 'full';
+    const knownOpenFiles = Array.isArray(hintedOpenFilesList) && hintedOpenFilesList.length > 0
+      ? hintedOpenFilesList
+      : Object.keys(openFiles || {});
+
+    if (rootPath || activeFilePath) {
       const projectParts = [];
-      
-      projectParts.push(`## Current Project: ${rootPath}`);
-      
+
+      projectParts.push(rootPath ? `## Current Project: ${rootPath}` : '## Current Project: (not loaded)');
+
       // Tech stack detection (put early so the model knows the stack upfront)
       if (projectAnalysis?.techStack?.length > 0) {
         projectParts.push(`### Tech Stack: ${projectAnalysis.techStack.join(', ')}`);
       }
-      
-      // Project structure (condensed but generous)
+
+      // Project structure (condensed)
       if (files?.length > 0) {
-        const fileTree = buildCondensedFileTree(files, 80); // Max 80 lines
+        const maxTreeLines = contextMode === 'light' ? 40 : 80;
+        const fileTree = buildCondensedFileTree(files, maxTreeLines);
         projectParts.push(`### Project Structure\n\`\`\`\n${fileTree}\n\`\`\``);
       }
-      
-      // Currently open file (FULL content - this is what they're working on)
-      if (activeFilePath && openFiles?.[activeFilePath]) {
-        const content = openFiles[activeFilePath].content || '';
-        const lines = content.split('\n');
-        
-        // Include full file if under 800 lines, otherwise smart truncation
-        let fileContent = content;
-        if (lines.length > 800) {
-          // Include first 200, last 200, and note about omission
-          fileContent = [
-            lines.slice(0, 200).join('\n'),
-            `\n// ... ${lines.length - 400} lines omitted (file is ${lines.length} lines total) ...\n`,
-            lines.slice(-200).join('\n'),
-          ].join('\n');
-        }
-        
-        projectParts.push(`### Currently Open: ${activeFilePath}\n\`\`\`\n${fileContent}\n\`\`\``);
-      }
-      
-      // Other open files - include first ~50 lines of each (not just names)
-      const otherFiles = Object.keys(openFiles || {}).filter(p => p !== activeFilePath);
-      if (otherFiles.length > 0) {
-        const otherFileParts = [];
-        const maxOtherFiles = 5;
-        const maxLinesPerFile = 50;
-        
-        for (const filePath of otherFiles.slice(0, maxOtherFiles)) {
-          const content = openFiles[filePath]?.content || '';
+
+      // Active file context (light mode: metadata only, full mode: content)
+      if (activeFilePath) {
+        if (contextMode === 'light') {
+          const activeContent = openFiles?.[activeFilePath]?.content || '';
+          const activeLineCount = activeContent ? activeContent.split('\n').length : null;
+          const activeSummary = [
+            '### Active File',
+            `- Path: ${activeFilePath}`,
+            activeLineCount ? `- Lines: ${activeLineCount}` : null,
+          ].filter(Boolean).join('\n');
+          projectParts.push(activeSummary);
+        } else if (openFiles?.[activeFilePath]) {
+          const content = openFiles[activeFilePath].content || '';
           const lines = content.split('\n');
-          const preview = lines.slice(0, maxLinesPerFile).join('\n');
-          const truncated = lines.length > maxLinesPerFile ? `\n// ... ${lines.length - maxLinesPerFile} more lines ...` : '';
-          otherFileParts.push(`#### ${filePath} (${lines.length} lines)\n\`\`\`\n${preview}${truncated}\n\`\`\``);
+
+          // Include full file if under 800 lines, otherwise smart truncation
+          let fileContent = content;
+          if (lines.length > 800) {
+            // Include first 200, last 200, and note about omission
+            fileContent = [
+              lines.slice(0, 200).join('\n'),
+              `\n// ... ${lines.length - 400} lines omitted (file is ${lines.length} lines total) ...\n`,
+              lines.slice(-200).join('\n'),
+            ].join('\n');
+          }
+
+          projectParts.push(`### Currently Open: ${activeFilePath}\n\`\`\`\n${fileContent}\n\`\`\``);
+        } else {
+          projectParts.push(`### Active File\n${activeFilePath}`);
         }
-        
-        if (otherFiles.length > maxOtherFiles) {
-          otherFileParts.push(`_...and ${otherFiles.length - maxOtherFiles} more open files_`);
-        }
-        
-        projectParts.push(`### Other Open Files\n${otherFileParts.join('\n\n')}`);
       }
-      
+
+      // Other/open files context
+      const otherFiles = knownOpenFiles.filter((p) => p && p !== activeFilePath);
+      if (otherFiles.length > 0) {
+        if (contextMode === 'light') {
+          const list = otherFiles.slice(0, 20).map((p) => `- ${p}`).join('\n');
+          const extra = otherFiles.length > 20 ? `\n- ...and ${otherFiles.length - 20} more open files` : '';
+          projectParts.push(`### Open Files\n${list}${extra}`);
+        } else {
+          const otherFileParts = [];
+          const maxOtherFiles = 5;
+          const maxLinesPerFile = 50;
+
+          for (const filePath of otherFiles.slice(0, maxOtherFiles)) {
+            const content = openFiles[filePath]?.content || '';
+            const lines = content.split('\n');
+            const preview = lines.slice(0, maxLinesPerFile).join('\n');
+            const truncated = lines.length > maxLinesPerFile ? `\n// ... ${lines.length - maxLinesPerFile} more lines ...` : '';
+            otherFileParts.push(`#### ${filePath} (${lines.length} lines)\n\`\`\`\n${preview}${truncated}\n\`\`\``);
+          }
+
+          if (otherFiles.length > maxOtherFiles) {
+            otherFileParts.push(`_...and ${otherFiles.length - maxOtherFiles} more open files_`);
+          }
+
+          projectParts.push(`### Other Open Files\n${otherFileParts.join('\n\n')}`);
+        }
+      }
+
       const projectText = projectParts.join('\n\n') + '\n';
       const tokens = estimateTokens(projectText);
-      
-      // Project context is critical for code workspace - be very generous
-      const projectBudget = budget.projectContext * 2; // Allow 100% overage for code
+
+      // Full mode can overrun budget for richer code context; light mode should stay tighter.
+      const projectBudget = contextMode === 'light'
+        ? budget.projectContext
+        : budget.projectContext * 2; // Allow 100% overage for full code context
+
       if (tokens <= projectBudget) {
         contextParts.push({ type: 'projectContext', content: projectText, tokens, priority: 'high' });
         totalTokensUsed += tokens;
       } else {
-        // If still too big, try with just active file and tree (no other files preview)
-        const fallbackParts = projectParts.filter(p => !p.startsWith('### Other Open Files'));
+        // If still too big, try with just active file and tree (no other files preview/list)
+        const fallbackParts = projectParts.filter((p) => !p.startsWith('### Other Open Files') && !p.startsWith('### Open Files'));
         const fallbackText = fallbackParts.join('\n\n') + '\n';
         const fallbackTokens = estimateTokens(fallbackText);
         if (fallbackTokens <= projectBudget) {

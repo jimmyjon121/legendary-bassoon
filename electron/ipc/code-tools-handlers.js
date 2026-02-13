@@ -356,12 +356,36 @@ async function runCommand(projectRoot, command, cwd, timeout = 30000) {
 // Patch Operations
 // ============================================================================
 
+function normalizePatchOperation(operation) {
+  const value = String(operation || '').trim().toLowerCase();
+  if (!value) return 'update';
+
+  if (['create', 'new', 'mk', 'touch', 'create_file'].includes(value)) {
+    return 'create';
+  }
+  if (['update', 'edit', 'modify', 'change', 'replace', 'patch', 'overwrite', 'update_file'].includes(value)) {
+    return 'update';
+  }
+  if (['delete', 'remove', 'rm', 'del', 'delete_file'].includes(value)) {
+    return 'delete';
+  }
+  if (['rename', 'move', 'mv', 'rename_file', 'move_file'].includes(value)) {
+    return 'rename';
+  }
+  // "add" is ambiguous in model outputs; treat as insert/append-or-create.
+  if (['add', 'insert', 'append'].includes(value)) {
+    return 'add';
+  }
+  return value;
+}
+
 /**
  * Apply a structured patch to a file
  */
 async function applyPatch(projectRoot, patch) {
   const { path: filePath, operation, startLine, endLine, oldContent, newContent, newPath } = patch;
   const fullPath = path.join(projectRoot, filePath);
+  const normalizedOperation = normalizePatchOperation(operation);
   
   // Validate path is within project
   const normalizedPath = path.normalize(fullPath);
@@ -370,7 +394,7 @@ async function applyPatch(projectRoot, patch) {
     throw new Error('Path traversal detected - access denied');
   }
   
-  switch (operation) {
+  switch (normalizedOperation) {
     case 'create': {
       // Ensure directory exists
       await fsPromises.mkdir(path.dirname(fullPath), { recursive: true });
@@ -382,6 +406,43 @@ async function applyPatch(projectRoot, patch) {
       
       await fsPromises.writeFile(fullPath, newContent, 'utf-8');
       return { success: true, operation: 'created', path: filePath };
+    }
+
+    case 'add': {
+      // Insert into existing file or create a new one if the target does not exist.
+      const exists = fs.existsSync(fullPath);
+      if (!exists) {
+        await fsPromises.mkdir(path.dirname(fullPath), { recursive: true });
+        await fsPromises.writeFile(fullPath, newContent || '', 'utf-8');
+        return { success: true, operation: 'created', path: filePath };
+      }
+
+      const content = await fsPromises.readFile(fullPath, 'utf-8');
+      const lines = content.split('\n');
+      const insertion = String(newContent || '');
+
+      let insertIndex = lines.length;
+      if (Number.isInteger(startLine) && startLine > 0) {
+        insertIndex = Math.min(startLine - 1, lines.length);
+      }
+
+      const insertionLines = insertion.split('\n');
+      const resultLines = [
+        ...lines.slice(0, insertIndex),
+        ...insertionLines,
+        ...lines.slice(insertIndex),
+      ];
+
+      await fsPromises.writeFile(fullPath, resultLines.join('\n'), 'utf-8');
+      return {
+        success: true,
+        operation: 'updated',
+        path: filePath,
+        linesChanged: {
+          removed: 0,
+          added: insertionLines.length
+        }
+      };
     }
     
     case 'update': {
@@ -518,69 +579,110 @@ function generateDiff(oldContent, newContent, filePath) {
 // IPC Handler Setup
 // ============================================================================
 
+function okResult(payload = {}) {
+  return {
+    ok: true,
+    success: true,
+    data: payload,
+    ...(payload && typeof payload === 'object' ? payload : { value: payload }),
+  };
+}
+
+function errorResult(error, code = 'tool_error', retryable = false, details = null) {
+  const message = typeof error === 'string' ? error : (error?.message || 'Unknown tool error');
+  return {
+    ok: false,
+    success: false,
+    error: message,
+    code,
+    retryable,
+    details,
+  };
+}
+
 function setupCodeToolsHandlers(ipcMain, mainWindow, store) {
   console.log('[IPC] Setting up code tools handlers...');
   
   // Read file with optional line range
   ipcMain.handle('tool:readFile', async (_, { projectRoot, path: filePath, startLine, endLine }) => {
     try {
-      return await readFileWithRange(projectRoot, filePath, startLine, endLine);
+      return okResult(await readFileWithRange(projectRoot, filePath, startLine, endLine));
     } catch (error) {
-      return { error: error.message };
+      return errorResult(error, 'read_failed');
     }
   });
   
   // List directory contents
   ipcMain.handle('tool:listDirectory', async (_, { projectRoot, path: dirPath, recursive, maxDepth }) => {
     try {
-      return await listDirectory(projectRoot, dirPath, recursive, maxDepth);
+      return okResult(await listDirectory(projectRoot, dirPath, recursive, maxDepth));
     } catch (error) {
-      return { error: error.message };
+      return errorResult(error, 'list_failed');
     }
   });
   
   // Search code
   ipcMain.handle('tool:searchCode', async (_, { projectRoot, pattern, fileGlob, maxResults, caseSensitive }) => {
     try {
-      return await searchCode(projectRoot, pattern, fileGlob, maxResults, caseSensitive);
+      return okResult(await searchCode(projectRoot, pattern, fileGlob, maxResults, caseSensitive));
     } catch (error) {
-      return { error: error.message };
+      return errorResult(error, 'search_failed');
     }
   });
   
   // Run command (sandboxed)
   ipcMain.handle('tool:runCommand', async (_, { projectRoot, command, cwd, timeout }) => {
     try {
-      return await runCommand(projectRoot, command, cwd, timeout);
+      const result = await runCommand(projectRoot, command, cwd, timeout);
+      if (result?.success) return okResult(result);
+      return errorResult(result?.error || result?.stderr || 'Command failed', 'command_failed', false, result);
     } catch (error) {
-      return { error: error.message };
+      return errorResult(error, 'command_failed');
     }
   });
   
   // Apply patch
   ipcMain.handle('tool:applyPatch', async (_, { projectRoot, patch }) => {
     try {
-      return await applyPatch(projectRoot, patch);
+      return okResult(await applyPatch(projectRoot, patch));
     } catch (error) {
-      return { error: error.message };
+      return errorResult(error, 'patch_failed');
     }
   });
   
   // Generate diff preview
   ipcMain.handle('tool:generateDiff', async (_, { oldContent, newContent, filePath }) => {
     try {
-      return generateDiff(oldContent, newContent, filePath);
+      return okResult(generateDiff(oldContent, newContent, filePath));
     } catch (error) {
-      return { error: error.message };
+      return errorResult(error, 'diff_failed');
     }
   });
   
   // Check if command is allowed
   ipcMain.handle('tool:isCommandAllowed', async (_, { command }) => {
-    return { allowed: isCommandAllowed(command) };
+    const payload = { allowed: isCommandAllowed(command) };
+    return okResult(payload);
+  });
+
+  // Health/registration check for startup assertions and agent gating
+  ipcMain.handle('tool:health', async () => {
+    return okResult({
+      handlersReady: true,
+      channels: [
+        'tool:readFile',
+        'tool:listDirectory',
+        'tool:searchCode',
+        'tool:runCommand',
+        'tool:applyPatch',
+        'tool:generateDiff',
+        'tool:isCommandAllowed',
+      ],
+    });
   });
   
   console.log('[IPC] Code tools handlers setup complete');
+  return { success: true };
 }
 
 module.exports = {

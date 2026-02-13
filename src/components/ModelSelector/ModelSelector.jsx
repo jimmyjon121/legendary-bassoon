@@ -1,9 +1,59 @@
 import React, { useEffect, useRef, useMemo } from 'react';
-import { X, Search, RefreshCw, Check, Cpu, HardDrive, FolderSearch, Loader, Zap, Code, MessageSquare, Sparkles, BookOpen } from 'lucide-react';
+import { X, Search, RefreshCw, Check, Cpu, HardDrive, FolderSearch, Loader, Zap, Code, MessageSquare, Sparkles, BookOpen, Bot } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { motion } from 'framer-motion';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { parseModelName } from '../../services/modelOptimizer';
+
+const AGENTIC_FAMILY_HINTS = [
+  'qwen',
+  'llama',
+  'mistral',
+  'mixtral',
+  'deepseek',
+  'gemma',
+  'phi',
+  'command-r',
+  'nemotron',
+];
+
+const AGENTIC_SIGNAL_TERMS = [
+  'agent',
+  'tool',
+  'function',
+  'search',
+  'research',
+  'reasoning',
+  'analysis',
+  'instruct',
+  'coder',
+  'long context',
+  '128k',
+  '200k',
+];
+
+function getAgenticModelScore(modelName = '') {
+  const parsed = parseModelName(modelName || '');
+  const name = String(modelName || '').toLowerCase();
+  const family = String(parsed?.family || '').toLowerCase();
+  const combined = `${name} ${family}`;
+  let score = 0;
+
+  for (const term of AGENTIC_SIGNAL_TERMS) {
+    if (combined.includes(term)) score += 1;
+  }
+  for (const hint of AGENTIC_FAMILY_HINTS) {
+    if (combined.includes(hint)) {
+      score += 2;
+      break;
+    }
+  }
+  if (name.includes('code') || name.includes('coder')) score += 1;
+  if (name.includes('instruct')) score += 1;
+  if (name.includes('r1') || name.includes('reason')) score += 2;
+
+  return score;
+}
 
 export function ModelSelector({ onClose }) {
   const {
@@ -14,10 +64,13 @@ export function ModelSelector({ onClose }) {
     setModel,
     refreshModels
   } = useAppStore();
+  const currentWorkspace = useAppStore(s => s.currentWorkspace);
+  const isResearchWorkspace = currentWorkspace === 'research';
 
   const [searchQuery, setSearchQuery] = React.useState('');
   const [isRefreshing, setIsRefreshing] = React.useState(false);
   const [localError, setLocalError] = React.useState(null);
+  const [modelTab, setModelTab] = React.useState(isResearchWorkspace ? 'agentic' : 'all');
   const [localModels, setLocalModels] = React.useState([]);
   const [isLoadingLocal, setIsLoadingLocal] = React.useState(true);
   const [isCreatingFromLocal, setIsCreatingFromLocal] = React.useState(false);
@@ -102,6 +155,12 @@ export function ModelSelector({ onClose }) {
     scanLMStudio();
   }, []);
 
+  useEffect(() => {
+    if (isResearchWorkspace) {
+      setModelTab('agentic');
+    }
+  }, [isResearchWorkspace]);
+
   const handleUseLocalModel = async (model) => {
     setIsCreatingFromLocal(true);
     setCreatingModelName(model.name || model.filename);
@@ -137,9 +196,34 @@ export function ModelSelector({ onClose }) {
     }
   };
 
-  const filteredModels = availableModels.filter(model =>
-    model.name?.toLowerCase().includes(searchQuery.toLowerCase())
+  const agenticModelCount = useMemo(
+    () => availableModels.filter((model) => getAgenticModelScore(model?.name || '') >= 3).length,
+    [availableModels]
   );
+
+  const filteredModels = useMemo(() => {
+    const query = searchQuery.toLowerCase();
+    let list = availableModels
+      .filter((model) => model.name?.toLowerCase().includes(query))
+      .map((model) => ({
+        model,
+        score: getAgenticModelScore(model?.name || ''),
+      }));
+
+    if (modelTab === 'agentic') {
+      list = list.filter((entry) => entry.score >= 3);
+    }
+
+    if (modelTab === 'agentic' || isResearchWorkspace) {
+      list.sort((a, b) => {
+        const scoreDiff = b.score - a.score;
+        if (scoreDiff !== 0) return scoreDiff;
+        return String(a.model?.name || '').localeCompare(String(b.model?.name || ''));
+      });
+    }
+
+    return list;
+  }, [availableModels, isResearchWorkspace, modelTab, searchQuery]);
 
   const filteredLocalModels = localModels.filter(model => {
     const query = searchQuery.toLowerCase();
@@ -227,6 +311,30 @@ export function ModelSelector({ onClose }) {
               autoFocus
             />
           </div>
+          <div className="mt-2 flex items-center gap-1 rounded-lg border border-forge-border bg-forge-bg p-1">
+            {[
+              { id: 'all', label: 'All Models' },
+              { id: 'agentic', label: 'Agentic Research' },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                type="button"
+                onClick={() => setModelTab(tab.id)}
+                className={`h-7 px-2.5 rounded-md text-[11px] transition-colors ${
+                  modelTab === tab.id
+                    ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
+                    : 'text-text-muted hover:text-text-secondary'
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
+          {isResearchWorkspace && (
+            <p className="mt-1 text-[11px] text-sky-300/85">
+              Research workspace active: agentic models are prioritized.
+            </p>
+          )}
         </div>
 
         {/* Error Display */}
@@ -241,13 +349,19 @@ export function ModelSelector({ onClose }) {
         <div className="max-h-80 overflow-y-auto">
           {/* Ollama models section */}
           <div className="p-2">
-            <p className="text-xs font-semibold text-text-muted mb-1">Ollama Models</p>
+            <p className="text-xs font-semibold text-text-muted mb-1">
+              {modelTab === 'agentic' ? 'Agentic Research Models' : 'Ollama Models'}
+            </p>
             {filteredModels.length === 0 ? (
               <div className="p-4 text-center border border-dashed border-forge-border rounded-lg">
                 <Cpu size={24} className="mx-auto text-text-muted mb-2" />
-                <p className="text-xs text-text-secondary">No Ollama models found</p>
+                <p className="text-xs text-text-secondary">
+                  {modelTab === 'agentic' ? 'No agentic research models found' : 'No Ollama models found'}
+                </p>
                 <p className="text-[11px] text-text-muted mt-1">
-                  Make sure Ollama is running and has models installed
+                  {modelTab === 'agentic'
+                    ? 'Try another search or switch to All Models.'
+                    : 'Make sure Ollama is running and has models installed'}
                 </p>
                 <button
                   onClick={handleRefresh}
@@ -259,9 +373,11 @@ export function ModelSelector({ onClose }) {
               </div>
             ) : (
               <div className="space-y-1">
-                {filteredModels.map((model) => {
+                {filteredModels.map((entry) => {
+                  const model = entry.model;
                   const typeInfo = getModelTypeInfo(model.name);
                   const TypeIcon = typeInfo.icon;
+                  const isAgentic = entry.score >= 3;
                   return (
                     <button
                       key={model.name}
@@ -287,6 +403,12 @@ export function ModelSelector({ onClose }) {
                           {model.name}
                         </p>
                         <div className="flex items-center gap-2 mt-0.5">
+                          {isAgentic && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 font-medium flex items-center gap-1">
+                              <Bot size={10} />
+                              Agentic
+                            </span>
+                          )}
                           <span className={`text-[10px] px-1.5 py-0.5 rounded ${typeInfo.bg} ${typeInfo.color} font-medium`}>
                             {typeInfo.label}
                           </span>
@@ -440,7 +562,7 @@ export function ModelSelector({ onClose }) {
         {/* Footer */}
         <div className="px-4 py-3 border-t border-forge-border bg-forge-bg/50">
           <p className="text-xs text-text-muted text-center">
-            {availableModels.length} Ollama • {lmStudioModels.length} LM Studio • {localModels.length} imported
+            {availableModels.length} Ollama • {agenticModelCount} agentic picks • {lmStudioModels.length} LM Studio • {localModels.length} imported
           </p>
         </div>
         </div>

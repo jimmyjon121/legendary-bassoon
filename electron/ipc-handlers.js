@@ -22,6 +22,9 @@ const crypto = require('crypto');
 const { exec } = require('child_process');
 const http = require('http');
 const https = require('https');
+const { setupWebSearchHandlers } = require('./ipc/web-search-handlers');
+const { setupCodeToolsHandlers } = require('./ipc/code-tools-handlers');
+const { setupResearchHandlers } = require('./ipc/research-handlers');
 
 // =============================================================================
 // LAZY SERVICE LOADING - Services are loaded on-demand for faster startup
@@ -30,6 +33,30 @@ const { getService, startIdleCleanup } = require('./services/lazy-loader');
 
 // Core services that need direct require (used at module level)
 const { getPowerMode } = require('./services/power-mode');
+
+// Optional model-inspection / model-experience services (graceful fallback)
+let inspectModelFn = null;
+let autoTuneModelFn = null;
+let getModelExperienceManagerFn = null;
+
+try {
+  inspectModelFn = require('./services/model-inspector').inspectModel;
+} catch (error) {
+  console.warn('[IPC] Model inspector unavailable:', error.message);
+}
+
+try {
+  autoTuneModelFn = require('./services/auto-tuner').autoTuneModel;
+} catch (error) {
+  console.warn('[IPC] Auto-tuner unavailable:', error.message);
+}
+
+try {
+  getModelExperienceManagerFn =
+    require('./services/model-experience-manager').getModelExperienceManager;
+} catch (error) {
+  console.warn('[IPC] Model Experience Manager unavailable:', error.message);
+}
 
 // =============================================================================
 // LAZY SERVICE GETTERS - Only load when first accessed
@@ -65,9 +92,17 @@ const backupService = {
   get importFromZip() { return getService('backup-service')?.importFromZip; },
 };
 const modelDownloader = {
+  // New downloader API (used throughout this file)
+  get startOllamaDownload() { return getService('model-downloader')?.startOllamaDownload; },
+  get startHuggingFaceDownload() { return getService('model-downloader')?.startHuggingFaceDownload; },
+  get startCustomDownload() { return getService('model-downloader')?.startCustomDownload; },
+  get fetchHuggingFaceRepo() { return getService('model-downloader')?.fetchHuggingFaceRepo; },
+  get cancelDownload() { return getService('model-downloader')?.cancelDownload; },
+  get getDownloads() { return getService('model-downloader')?.getDownloads; },
+
+  // Legacy aliases (kept for compatibility with older callers)
   get downloadModel() { return getService('model-downloader')?.downloadModel; },
   get getProgress() { return getService('model-downloader')?.getProgress; },
-  get cancelDownload() { return getService('model-downloader')?.cancelDownload; },
 };
 const createModelConverter = () => getService('model-converter')?.createModelConverter?.() || null;
 
@@ -142,21 +177,37 @@ const intentExecutor = {
 // LMA (Local Model Adaptation)
 const llamaBridge = {
   get initialize() { return getService('llama-bridge')?.initialize; },
-  get train() { return getService('llama-bridge')?.train; },
-  get getTrainingStatus() { return getService('llama-bridge')?.getTrainingStatus; },
+  get isAvailable() { return getService('llama-bridge')?.isAvailable; },
+  get listModels() { return getService('llama-bridge')?.listModels; },
+  get listAdapters() { return getService('llama-bridge')?.listAdapters; },
+  get loadAdapter() { return getService('llama-bridge')?.loadAdapter; },
+  get unloadAdapter() { return getService('llama-bridge')?.unloadAdapter; },
+  get getLoadedAdapters() { return getService('llama-bridge')?.getLoadedAdapters; },
+  get trainAdapter() { return getService('llama-bridge')?.trainAdapter; },
+  get getSystemInfo() { return getService('llama-bridge')?.getSystemInfo; },
 };
 const datasetBuilder = {
+  get buildDataset() { return getService('dataset-builder')?.buildDataset; },
+  get buildWorkspaceDatasets() { return getService('dataset-builder')?.buildWorkspaceDatasets; },
+  get estimateTrainingTime() { return getService('dataset-builder')?.estimateTrainingTime; },
   get buildFromFriction() { return getService('dataset-builder')?.buildFromFriction; },
 };
 const trainingScheduler = {
-  get schedule() { return getService('training-scheduler')?.schedule; },
-  get getSchedule() { return getService('training-scheduler')?.getSchedule; },
+  get initialize() { return getService('training-scheduler')?.initialize; },
+  get enable() { return getService('training-scheduler')?.enable; },
+  get disable() { return getService('training-scheduler')?.disable; },
+  get triggerTraining() { return getService('training-scheduler')?.triggerTraining; },
+  get cancelTraining() { return getService('training-scheduler')?.cancelTraining; },
+  get getStatus() { return getService('training-scheduler')?.getStatus; },
+  get getHistory() { return getService('training-scheduler')?.getHistory; },
 };
 const ollamaAdapters = {
-  get applyAdapter() { return getService('ollama-adapters')?.applyAdapter; },
-  get listAdapters() { return getService('ollama-adapters')?.listAdapters; },
-  get personalizeModel() { return getService('ollama-adapters')?.personalizeModel; },
-  get checkPersonalizationStatus() { return getService('ollama-adapters')?.checkPersonalizationStatus; },
+  get getOllamaModels() { return getService('ollama-adapters')?.getOllamaModels; },
+  get createPersonalizedModel() { return getService('ollama-adapters')?.createPersonalizedModel; },
+  get extractInsightsFromFriction() { return getService('ollama-adapters')?.extractInsightsFromFriction; },
+  get deletePersonalizedModel() { return getService('ollama-adapters')?.deletePersonalizedModel; },
+  get listPersonalizedModels() { return getService('ollama-adapters')?.listPersonalizedModels; },
+  get getAdapterStatus() { return getService('ollama-adapters')?.getAdapterStatus; },
 };
 
 // Backwards compatibility alias - directly returns the service for method access
@@ -174,6 +225,10 @@ const hardwareDetection = new Proxy({}, {
 let db = null;
 let dbPath = null;
 let SQL = null;
+const agentRunProgressState = {
+  snapshot: null,
+  updatedAt: 0,
+};
 
 async function initDatabase(userDataPath) {
   // Load sql.js
@@ -289,11 +344,29 @@ async function initDatabase(userDataPath) {
     )
   `);
 
-  // Migration: add created_at to model_presets if it was created without it
+  // Migration: add created_at to model_presets if it was created without it.
+  // Some SQLite builds reject ADD COLUMN with non-constant defaults, so keep this resilient.
   try {
-    db.run(`ALTER TABLE model_presets ADD COLUMN created_at DATETIME DEFAULT CURRENT_TIMESTAMP`);
-  } catch (_migrationErr) {
-    // Column already exists - ignore
+    const presetInfo = db.exec('PRAGMA table_info(model_presets)');
+    const hasCreatedAt = Array.isArray(presetInfo?.[0]?.values)
+      ? presetInfo[0].values.some((row) => row?.[1] === 'created_at')
+      : false;
+
+    if (!hasCreatedAt) {
+      try {
+        db.run(`ALTER TABLE model_presets ADD COLUMN created_at DATETIME`);
+      } catch (migrationErr) {
+        console.warn('[DB] model_presets.created_at migration skipped:', migrationErr.message);
+      }
+    }
+  } catch (migrationErr) {
+    console.warn('[DB] Failed to inspect model_presets schema:', migrationErr.message);
+  }
+
+  try {
+    db.run(`UPDATE model_presets SET created_at = CURRENT_TIMESTAMP WHERE created_at IS NULL`);
+  } catch (_backfillErr) {
+    // Column may still not exist - handled by query fallback in presets:getForModel
   }
 
   db.run(`
@@ -326,6 +399,127 @@ async function initDatabase(userDataPath) {
       embedding TEXT,
       chunk_index INTEGER,
       FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+    )
+  `);
+
+  // Research system tables (project-based multi-agent research)
+  db.run(`
+    CREATE TABLE IF NOT EXISTS research_projects (
+      id TEXT PRIMARY KEY,
+      workspace TEXT NOT NULL,
+      name TEXT NOT NULL,
+      description TEXT,
+      permanent_instructions TEXT,
+      schema_json TEXT NOT NULL DEFAULT '[]',
+      source_policy_json TEXT NOT NULL DEFAULT '{}',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS research_project_conversations (
+      project_id TEXT NOT NULL,
+      conversation_id TEXT NOT NULL,
+      linked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (project_id, conversation_id),
+      FOREIGN KEY (project_id) REFERENCES research_projects(id) ON DELETE CASCADE,
+      FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS research_project_documents (
+      project_id TEXT NOT NULL,
+      document_id TEXT NOT NULL,
+      linked_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (project_id, document_id),
+      FOREIGN KEY (project_id) REFERENCES research_projects(id) ON DELETE CASCADE,
+      FOREIGN KEY (document_id) REFERENCES documents(id) ON DELETE CASCADE
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS research_runs (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      status TEXT NOT NULL,
+      objective TEXT NOT NULL,
+      run_instructions TEXT,
+      worker_count INTEGER DEFAULT 4,
+      stats_json TEXT NOT NULL DEFAULT '{}',
+      convergence_count INTEGER DEFAULT 0,
+      prompt_snapshot_json TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      started_at DATETIME,
+      ended_at DATETIME,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (project_id) REFERENCES research_projects(id) ON DELETE CASCADE
+    )
+  `);
+
+  try {
+    db.run(`ALTER TABLE research_runs ADD COLUMN prompt_snapshot_json TEXT`);
+  } catch (_error) {
+    // Column already exists.
+  }
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS research_tasks (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      worker_id TEXT,
+      phase TEXT NOT NULL,
+      status TEXT NOT NULL,
+      input_json TEXT,
+      output_json TEXT,
+      error TEXT,
+      started_at DATETIME,
+      ended_at DATETIME,
+      FOREIGN KEY (run_id) REFERENCES research_runs(id) ON DELETE CASCADE
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS research_records (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      canonical_key TEXT NOT NULL,
+      record_json TEXT NOT NULL,
+      verified_official_url TEXT,
+      verified_at DATETIME,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (project_id) REFERENCES research_projects(id) ON DELETE CASCADE,
+      FOREIGN KEY (run_id) REFERENCES research_runs(id) ON DELETE CASCADE
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS research_evidence (
+      id TEXT PRIMARY KEY,
+      record_id TEXT NOT NULL,
+      field_key TEXT NOT NULL,
+      claim_text TEXT NOT NULL,
+      source_url TEXT NOT NULL,
+      source_domain TEXT,
+      source_title TEXT,
+      excerpt_text TEXT,
+      is_official INTEGER NOT NULL DEFAULT 0,
+      fetched_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (record_id) REFERENCES research_records(id) ON DELETE CASCADE
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS research_checkpoints (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      queue_json TEXT NOT NULL DEFAULT '{}',
+      state_json TEXT NOT NULL DEFAULT '{}',
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (run_id) REFERENCES research_runs(id) ON DELETE CASCADE
     )
   `);
 
@@ -395,6 +589,13 @@ async function initDatabase(userDataPath) {
   db.run(`CREATE INDEX IF NOT EXISTS idx_conv_starred ON conversations(starred)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_conv_pinned ON conversations(pinned)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_folders_workspace ON folders(workspace)`);
+  db.run(`CREATE UNIQUE INDEX IF NOT EXISTS idx_research_record_project_key ON research_records(project_id, canonical_key)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_research_runs_project ON research_runs(project_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_research_runs_status ON research_runs(status)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_research_tasks_run ON research_tasks(run_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_research_evidence_record ON research_evidence(record_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_research_project_conv_project ON research_project_conversations(project_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_research_project_doc_project ON research_project_documents(project_id)`);
   
   // Initialize Memory Engine for long conversation support
   try {
@@ -652,6 +853,263 @@ function streamRequest(url, body, onChunk, channel) {
   });
 }
 
+// Cache model template metadata for compatibility routing.
+const MODEL_TEMPLATE_CACHE_TTL_MS = 5 * 60 * 1000;
+const modelTemplateCache = new Map();
+
+function isRawPromptTemplate(template) {
+  if (!template || typeof template !== 'string') return false;
+  const normalized = template.replace(/\s+/g, ' ').trim();
+  if (!normalized) return false;
+  return (
+    normalized === '{{ .Prompt }}' ||
+    normalized === '{{.Prompt}}' ||
+    (normalized.includes('{{ .Prompt') && !normalized.includes('.Messages'))
+  );
+}
+
+function isLikelyGptOssModel(modelName, family = '') {
+  const modelLower = String(modelName || '').toLowerCase();
+  const familyLower = String(family || '').toLowerCase();
+  return (
+    modelLower.includes('gpt-oss') ||
+    modelLower.includes('gpt_oss') ||
+    familyLower === 'gpt-oss'
+  );
+}
+
+function normalizeChatMessages(messages = []) {
+  const normalized = [];
+  for (const msg of messages) {
+    const role = msg?.role === 'assistant' ? 'assistant' : (msg?.role === 'user' ? 'user' : null);
+    const content = typeof msg?.content === 'string' ? msg.content.trim() : '';
+    if (!role || !content) continue;
+
+    const previous = normalized[normalized.length - 1];
+    if (previous && previous.role === role) {
+      previous.content = `${previous.content}\n\n${content}`;
+    } else {
+      normalized.push({ role, content });
+    }
+  }
+
+  while (normalized.length > 0 && normalized[0].role === 'assistant') {
+    normalized.shift();
+  }
+
+  return normalized;
+}
+
+function buildRawModelHistory(messages = []) {
+  const normalized = normalizeChatMessages(messages);
+  if (normalized.length === 0) return [];
+
+  let lastUserIndex = -1;
+  for (let i = normalized.length - 1; i >= 0; i--) {
+    if (normalized[i].role === 'user') {
+      lastUserIndex = i;
+      break;
+    }
+  }
+
+  if (lastUserIndex < 0) return normalized.slice(-1);
+
+  const latestUserText = normalized[lastUserIndex]?.content || '';
+  // For greeting turns, don't carry forward previous assistant output.
+  if (isSimpleGreeting(latestUserText)) {
+    return [normalized[lastUserIndex]];
+  }
+
+  const result = [];
+  const previous = normalized[lastUserIndex - 1];
+  if (previous && previous.role === 'assistant') {
+    const previousText = previous.content || '';
+    const previousLooksNoisy =
+      previousText.length > 1200 ||
+      /we have a user|according to the policy|<\|start\|>|<\|message\|>|assistant:|user:/i.test(previousText);
+
+    if (!previousLooksNoisy) {
+      result.push(previous);
+    }
+  }
+  result.push(normalized[lastUserIndex]);
+  return result;
+}
+
+function buildGenerateFallbackPrompt(systemPrompt, chatMessages = []) {
+  const parts = [];
+  const sys = (systemPrompt || '').trim();
+  if (sys) {
+    parts.push(`System: ${sys}`);
+  }
+
+  for (const msg of chatMessages) {
+    const role = msg.role === 'assistant' ? 'Assistant' : 'User';
+    const content = (msg.content || '').trim();
+    if (!content) continue;
+    parts.push(`${role}: ${content}`);
+  }
+
+  parts.push('Assistant:');
+  return parts.join('\n\n');
+}
+
+function buildGptOssHarmonyPrompt(systemPrompt, chatMessages = []) {
+  const parts = [];
+  const sys = (systemPrompt || '').trim() || 'You are a helpful assistant.';
+  parts.push(`<|start|>system<|message|>${sys}<|end|>`);
+
+  for (const msg of chatMessages) {
+    const content = (msg.content || '').trim();
+    if (!content) continue;
+
+    if (msg.role === 'assistant') {
+      parts.push(`<|start|>assistant<|channel|>final<|message|>${content}<|end|>`);
+    } else {
+      parts.push(`<|start|>user<|message|>${content}<|end|>`);
+    }
+  }
+
+  parts.push('<|start|>assistant<|channel|>final<|message|>');
+  return parts.join('');
+}
+
+function extractLastUserImages(messages = []) {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg?.role !== 'user') continue;
+    if (Array.isArray(msg.images) && msg.images.length > 0) {
+      return msg.images;
+    }
+  }
+  return null;
+}
+
+function isSimpleGreeting(text) {
+  if (!text || typeof text !== 'string') return false;
+  return /^(hi|hello|hey|yo|sup|how are you|good morning|good afternoon|good evening|what's up|whats up)[!.? ]*$/i
+    .test(text.trim());
+}
+
+function isLikelyCodeRequest(text) {
+  if (!text || typeof text !== 'string') return false;
+  const raw = text.trim();
+  if (!raw) return false;
+
+  const codeSignals = [
+    /```/,
+    /`[^`]+`/,
+    /\b(error|exception|stack trace|traceback|bug|debug|refactor|compile|build|test|lint|runtime|syntax)\b/i,
+    /\b(function|class|method|variable|array|object|sql|regex|api|endpoint|typescript|javascript|python|java|c\+\+|c#|rust|go)\b/i,
+    /[{}()[\];]/,
+  ];
+  return codeSignals.some((pattern) => pattern.test(raw));
+}
+
+async function getModelTemplateMeta(endpoint, modelName) {
+  const key = String(modelName || '').trim().toLowerCase();
+  if (!key) return { template: null, family: null };
+
+  const now = Date.now();
+  const cached = modelTemplateCache.get(key);
+  if (cached && now - cached.ts < MODEL_TEMPLATE_CACHE_TTL_MS) {
+    return cached.value;
+  }
+
+  try {
+    const response = await makeRequest(`${endpoint}/api/show`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: { name: modelName },
+      timeout: 12000,
+    });
+    const template = response?.data?.template || null;
+    const family = response?.data?.details?.family || null;
+    const value = { template, family };
+    modelTemplateCache.set(key, { ts: now, value });
+    return value;
+  } catch {
+    const value = { template: null, family: null };
+    modelTemplateCache.set(key, { ts: now, value });
+    return value;
+  }
+}
+
+async function buildGenerateCompatRequest(endpoint, modelName, systemPrompt, messages, baseOptions = {}, stream = true) {
+  const meta = await getModelTemplateMeta(endpoint, modelName);
+  const isRawTemplate = isRawPromptTemplate(meta.template);
+  const isGptOss = isLikelyGptOssModel(modelName, meta.family);
+  if (!isRawTemplate && !isGptOss) return null;
+
+  const normalizedMessages = normalizeChatMessages(messages);
+  const latestUser = [...normalizedMessages].reverse().find((msg) => msg.role === 'user')?.content || '';
+  const history = isGptOss ? buildRawModelHistory(normalizedMessages) : normalizedMessages;
+  const greetingLike = isSimpleGreeting(latestUser);
+  const codeLike = isLikelyCodeRequest(latestUser);
+
+  const compatSystemPrompt = isGptOss
+    ? (codeLike
+      ? 'You are a precise coding assistant. Give direct, practical answers with runnable code when asked.'
+      : 'You are a helpful assistant. Reply naturally and directly in a concise way.')
+    : (systemPrompt || '');
+
+  const cappedCtx = isGptOss ? 8192 : 16384;
+  const cappedPredict = greetingLike ? 96 : (isGptOss ? 384 : 768);
+
+  const options = {
+    ...baseOptions,
+    repeat_penalty: Math.max(1.1, baseOptions.repeat_penalty || 1.05),
+    num_ctx: Number.isFinite(baseOptions.num_ctx) ? Math.min(baseOptions.num_ctx, cappedCtx) : cappedCtx,
+    num_predict: Number.isFinite(baseOptions.num_predict) ? Math.min(baseOptions.num_predict, cappedPredict) : cappedPredict,
+    temperature: greetingLike
+      ? Math.min(Math.max(baseOptions.temperature ?? 0.2, 0.2), 0.35)
+      : (baseOptions.temperature ?? 0.2),
+  };
+
+  if (isGptOss) {
+    const stops = Array.isArray(baseOptions.stop) ? baseOptions.stop : [];
+    options.stop = Array.from(new Set([
+      ...stops,
+      '<|return|>',
+      '<|end|>',
+      '<|start|>',
+    ]));
+  } else {
+    const stops = Array.isArray(baseOptions.stop) ? baseOptions.stop : [];
+    options.stop = Array.from(new Set([
+      ...stops,
+      'Human:', 'human:', 'User:', 'user:',
+      '\nHuman:', '\nUser:', '\n\nHuman:', '\n\nUser:',
+    ]));
+  }
+
+  const prompt = isGptOss
+    ? buildGptOssHarmonyPrompt(compatSystemPrompt, history)
+    : buildGenerateFallbackPrompt(compatSystemPrompt, history);
+
+  const requestBody = {
+    model: modelName,
+    prompt,
+    stream,
+    options: {
+      ...options,
+      frequency_penalty: options.frequency_penalty ?? 0.05,
+      presence_penalty: options.presence_penalty ?? 0.05,
+    },
+  };
+
+  const visionImages = extractLastUserImages(messages);
+  if (Array.isArray(visionImages) && visionImages.length > 0) {
+    requestBody.images = visionImages;
+  }
+
+  return {
+    apiPath: '/api/generate',
+    requestBody,
+    reason: isGptOss ? 'gpt-oss-harmony-compat' : 'raw-template-compat',
+  };
+}
+
 // Guard against double registration during HMR
 let handlersRegistered = false;
 
@@ -676,6 +1134,65 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   } catch (error) {
     console.error('Failed to initialize database:', error);
   }
+
+  // Web search IPC (DuckDuckGo-backed tool calls)
+  try {
+    setupWebSearchHandlers(ipcMain);
+  } catch (error) {
+    console.error('[IPC] Failed to setup web search handlers:', error.message);
+  }
+
+  // Code tools IPC (autonomous agent read/search/patch/command loop)
+  try {
+    const toolSetup = setupCodeToolsHandlers(ipcMain, mainWindow, store);
+    if (!toolSetup?.success) {
+      throw new Error('Code tools handlers did not report success');
+    }
+  } catch (error) {
+    console.error('[IPC] Failed to setup code tools handlers:', error.message);
+  }
+
+  // Research IPC (project-based multi-agent research workflows)
+  try {
+    setupResearchHandlers(ipcMain, mainWindow, { db, saveDatabase, store });
+  } catch (error) {
+    console.error('[IPC] Failed to setup research handlers:', error.message);
+  }
+
+  // Agent run progress mirror (renderer -> main, queryable from any surface)
+  ipcMain.handle('agent:updateRunProgress', async (_, payload = {}) => {
+    const now = Date.now();
+    agentRunProgressState.snapshot = {
+      ...(payload && typeof payload === 'object' ? payload : {}),
+      updatedAt: now,
+    };
+    agentRunProgressState.updatedAt = now;
+
+    try {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('agent:runProgress', agentRunProgressState.snapshot);
+      }
+    } catch (error) {
+      console.warn('[IPC] Failed to emit agent:runProgress event:', error.message);
+    }
+
+    return { success: true, updatedAt: now };
+  });
+
+  ipcMain.handle('agent:getRunProgress', async () => {
+    if (!agentRunProgressState.snapshot) {
+      return {
+        status: 'idle',
+        runId: null,
+        progressPct: 0,
+        updatedAt: agentRunProgressState.updatedAt || Date.now(),
+      };
+    }
+    return {
+      ...agentRunProgressState.snapshot,
+      updatedAt: agentRunProgressState.updatedAt || agentRunProgressState.snapshot.updatedAt || Date.now(),
+    };
+  });
   
   // Window controls
   ipcMain.handle('window:minimize', () => mainWindow.minimize());
@@ -713,6 +1230,283 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     }
     return true;
   });
+
+  // Model Experience manager bootstrap (lazy init, singleton-safe)
+  let modelExperienceInitPromise = null;
+  const ensureModelExperienceManager = async () => {
+    if (!getModelExperienceManagerFn) return null;
+    const manager = getModelExperienceManagerFn({
+      store,
+      mainWindow,
+      userDataPath,
+    });
+    if (!manager) return null;
+
+    if (!manager.initialized) {
+      if (!modelExperienceInitPromise) {
+        modelExperienceInitPromise = manager
+          .initialize()
+          .catch((error) => {
+            console.warn('[IPC] MAEE initialization failed:', error.message);
+            throw error;
+          })
+          .finally(() => {
+            modelExperienceInitPromise = null;
+          });
+      }
+      await modelExperienceInitPromise;
+    }
+
+    return manager;
+  };
+
+  // Model inspection / auto-tuning
+  ipcMain.handle('inspectModel', async (_, modelPath) => {
+    try {
+      if (!inspectModelFn) {
+        return { success: false, error: 'Model inspector unavailable' };
+      }
+      const inspected = await inspectModelFn(modelPath);
+      return { success: true, ...inspected };
+    } catch (error) {
+      return { success: false, error: error.message || 'Failed to inspect model' };
+    }
+  });
+
+  ipcMain.handle('autoTuneModel', async (_, modelPath) => {
+    try {
+      let recommendation = null;
+      let tunerError = null;
+
+      // Primary path: hardware-aware tuner (best when a local file path is provided)
+      if (autoTuneModelFn) {
+        try {
+          recommendation = await autoTuneModelFn(modelPath);
+        } catch (error) {
+          tunerError = error;
+        }
+      }
+
+      // Fallback path: derive a practical tuning profile from MAEE analysis
+      // so Ollama model tags (e.g. "llama3.2:3b") still get auto-adjustment.
+      if (!recommendation) {
+        const manager = await ensureModelExperienceManager();
+        const profile = manager ? await manager.analyzeModel(modelPath) : null;
+        const inference = profile?.inference || null;
+        if (inference) {
+          recommendation = {
+            backend: null,
+            device: null,
+            contextLength: Number(inference.num_ctx) || 4096,
+            batchSize: Number(inference.num_batch) || 256,
+            threads: Number(inference.num_thread) || null,
+            gpuLayers: inference.num_gpu ?? null,
+            kvCachePrecision: inference.f16_kv ? 'fp16' : undefined,
+            flashAttention: true,
+            temperature: Number(inference.temperature),
+            top_p: Number(inference.top_p),
+            top_k: Number(inference.top_k),
+            repeat_penalty: Number(inference.repeat_penalty),
+            source: 'maee-fallback',
+            family: profile?.model?.family || 'chat',
+          };
+        }
+      }
+
+      if (!recommendation) {
+        return {
+          success: false,
+          error: tunerError?.message || 'Auto-tune unavailable for this model',
+        };
+      }
+
+      return { success: true, recommendation, ...recommendation };
+    } catch (error) {
+      return { success: false, error: error.message || 'Failed to auto-tune model' };
+    }
+  });
+
+  // Model Experience Engine (MAEE) IPC handlers
+  ipcMain.handle('model:getExperience', async (_, modelPath) => {
+    const manager = await ensureModelExperienceManager();
+    if (!manager) return null;
+    const profile = await manager.analyzeModel(modelPath);
+    return profile || null;
+  });
+
+  ipcMain.handle('model:experienceStatus', async () => {
+    const manager = await ensureModelExperienceManager();
+    if (!manager) {
+      return {
+        initialized: false,
+        health: {
+          engineAvailable: false,
+          inspectorAvailable: Boolean(inspectModelFn),
+          tunerAvailable: Boolean(autoTuneModelFn),
+          orchestratorAvailable: false,
+          lastCheck: Date.now(),
+          errors: [{ time: Date.now(), error: 'Model Experience Manager unavailable' }],
+        },
+        currentModel: null,
+        currentFamily: 'unknown',
+        primaryStrength: 'generalChat',
+        capabilities: {
+          codeGeneration: 0.6,
+          generalChat: 1.0,
+          creative: 0.7,
+          reasoning: 0.8,
+          roleplay: 0.6,
+        },
+        lastError: 'Model Experience Manager unavailable',
+      };
+    }
+    return manager.getStatus();
+  });
+
+  ipcMain.handle('model:healthCheck', async () => {
+    const manager = await ensureModelExperienceManager();
+    if (!manager) {
+      return {
+        timestamp: Date.now(),
+        overall: 'limited',
+        components: {
+          coreEngine: { name: 'Core Engine', status: 'unavailable', details: null },
+          modelInspector: {
+            name: 'Model Inspector',
+            status: inspectModelFn ? 'healthy' : 'unavailable',
+            details: inspectModelFn ? { canInspectGGUF: true } : null,
+          },
+          autoTuner: {
+            name: 'Auto-Tuner',
+            status: autoTuneModelFn ? 'healthy' : 'unavailable',
+            details: null,
+          },
+        },
+        recommendations: ['Model Experience Manager unavailable in this build'],
+      };
+    }
+    return manager.runHealthCheck();
+  });
+
+  ipcMain.handle('model:analyzeExperience', async (_, modelPath) => {
+    const manager = await ensureModelExperienceManager();
+    if (!manager) return null;
+    const profile = await manager.analyzeModel(modelPath);
+    return profile || null;
+  });
+
+  ipcMain.handle('model:loadWithProfile', async (_, modelPath) => {
+    const manager = await ensureModelExperienceManager();
+    if (!manager) return null;
+    const profile = await manager.loadModelWithExperience(modelPath);
+    return profile || null;
+  });
+
+  ipcMain.handle('model:getInferenceParams', async (_, presetId) => {
+    const manager = await ensureModelExperienceManager();
+    if (!manager) return {};
+    return manager.getInferenceParams(presetId);
+  });
+
+  ipcMain.handle('model:getInferencePresets', async () => {
+    const manager = await ensureModelExperienceManager();
+    if (manager) {
+      const presets = manager.getAvailablePresets();
+      if (Array.isArray(presets) && presets.length > 0) return presets;
+    }
+    try {
+      const { INFERENCE_PRESETS } = require('./default-config');
+      return Object.values(INFERENCE_PRESETS || {});
+    } catch {
+      return [];
+    }
+  });
+
+  ipcMain.handle('model:getInferencePreset', async (_, presetId) => {
+    try {
+      const { getInferencePreset } = require('./default-config');
+      return getInferencePreset(presetId);
+    } catch {
+      const manager = await ensureModelExperienceManager();
+      return manager ? manager.getInferenceParams(presetId) : {};
+    }
+  });
+
+  ipcMain.handle('model:getAccuracyParams', async () => {
+    const manager = await ensureModelExperienceManager();
+    if (!manager) return {};
+    return manager.getAccuracyParams();
+  });
+
+  ipcMain.handle('model:getCreativeParams', async () => {
+    const manager = await ensureModelExperienceManager();
+    if (!manager) return {};
+    return manager.getCreativeParams();
+  });
+
+  ipcMain.handle('model:getUIHints', async () => {
+    const manager = await ensureModelExperienceManager();
+    if (!manager) return {};
+    return manager.getUIHints();
+  });
+
+  ipcMain.handle('model:getPromptTemplate', async () => {
+    const manager = await ensureModelExperienceManager();
+    if (!manager) return {};
+    return manager.getPromptTemplate();
+  });
+
+  ipcMain.handle('model:getCapabilities', async () => {
+    const manager = await ensureModelExperienceManager();
+    if (!manager) {
+      return {
+        codeGeneration: 0.6,
+        generalChat: 1.0,
+        creative: 0.7,
+        reasoning: 0.8,
+        roleplay: 0.6,
+      };
+    }
+    return manager.getCapabilities();
+  });
+
+  ipcMain.handle('model:isGoodFor', async (_, task) => {
+    const manager = await ensureModelExperienceManager();
+    if (!manager) return true;
+    return manager.isGoodFor(task);
+  });
+
+  ipcMain.handle('model:getRecommendedWorkspace', async () => {
+    const manager = await ensureModelExperienceManager();
+    if (!manager) return 'casual';
+    return manager.getRecommendedWorkspace();
+  });
+
+  ipcMain.handle('model:getRecommendedView', async () => {
+    const manager = await ensureModelExperienceManager();
+    if (!manager) return 'stream';
+    return manager.getRecommendedView();
+  });
+
+  ipcMain.handle('model:formatPrompt', async (_, userMessage, options = {}) => {
+    const manager = await ensureModelExperienceManager();
+    if (!manager) {
+      return {
+        prompt: String(userMessage || ''),
+        system: '',
+        assistantPrefix: '',
+        metadata: {},
+      };
+    }
+    return manager.formatPrompt(userMessage, options);
+  });
+
+  ipcMain.handle('model:clearExperienceCache', async () => {
+    const manager = await ensureModelExperienceManager();
+    if (!manager) return { success: false, error: 'Model Experience Manager unavailable' };
+    manager.clearCache();
+    return { success: true };
+  });
   
   // Sovereignty Status - reports whether app is running in local-only mode
   ipcMain.handle('sovereignty:getStatus', async () => {
@@ -733,18 +1527,53 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   ipcMain.handle('llm:send', async (_, payload) => {
     const endpoint = store.get('llmEndpoint');
     try {
-      // Use /api/chat when messages array provided, else /api/generate
-      const useChat = Array.isArray(payload.messages) && payload.messages.length > 0;
-      
-      let apiPath, body;
-      if (useChat) {
-        apiPath = '/api/chat';
-        const messages = [];
-        if (payload.system) {
-          messages.push({ role: 'system', content: payload.system });
+      const requestedTimeout = Number(
+        payload?.timeout ?? payload?.options?.timeout ?? 300000
+      );
+      const requestTimeout = Number.isFinite(requestedTimeout)
+        ? Math.max(10000, requestedTimeout)
+        : 300000;
+
+      // Use /api/chat when messages array is provided, else /api/generate.
+      // For raw-template models (notably GPT-OSS imports), force a safe
+      // generate-format compatibility prompt to avoid /api/chat degeneration.
+      const useChatPayload = Array.isArray(payload.messages) && payload.messages.length > 0;
+
+      let apiPath;
+      let body;
+      let responseMode = 'generate';
+
+      if (useChatPayload) {
+        const compat = await buildGenerateCompatRequest(
+          endpoint,
+          payload.model,
+          payload.system,
+          payload.messages,
+          payload.options || {},
+          false
+        );
+
+        if (compat) {
+          apiPath = compat.apiPath;
+          body = compat.requestBody;
+          responseMode = 'generate';
+          console.log(`[LLM Send] Using ${compat.reason} for model "${payload.model}"`);
+        } else {
+          apiPath = '/api/chat';
+          const messages = [];
+          if (payload.system) {
+            messages.push({ role: 'system', content: payload.system });
+          }
+          messages.push(...payload.messages);
+          body = {
+            model: payload.model,
+            messages,
+            stream: false,
+            options: payload.options || {},
+            ...(payload.format ? { format: payload.format } : {})
+          };
+          responseMode = 'chat';
         }
-        messages.push(...payload.messages);
-        body = { model: payload.model, messages, stream: false, options: payload.options || {} };
       } else {
         apiPath = '/api/generate';
         body = {
@@ -752,19 +1581,41 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
           prompt: payload.prompt,
           system: payload.system,
           stream: false,
-          options: payload.options || {}
+          options: payload.options || {},
+          ...(payload.format ? { format: payload.format } : {})
         };
       }
       
-      const response = await makeRequest(`${endpoint}${apiPath}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body
-      });
-      
+      const inferencePayload = {
+        model: body.model || payload.model,
+        options: body.options || payload.options || {},
+        format: body.format || payload.format,
+        lane: payload?.lane || 'lane_interactive',
+        priority: payload?.priority,
+        allowFallback: payload?.allowFallback !== false,
+        workloadType: payload?.workloadType || (payload?.tools ? 'agent' : 'chat'),
+        ...(body.messages ? { messages: body.messages } : {}),
+        ...(body.prompt ? { prompt: body.prompt } : {}),
+        ...(body.system ? { system: body.system } : {}),
+        ...(body.images ? { images: body.images } : {}),
+        ...(Array.isArray(payload?.tools) ? { tools: payload.tools } : {}),
+      };
+
+      let data = null;
+      if (orchestrator) {
+        data = await orchestrator.generate(inferencePayload);
+      } else {
+        const response = await makeRequest(`${endpoint}${apiPath}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body,
+          timeout: requestTimeout
+        });
+        data = response.data;
+      }
+
       // Normalize: /api/chat returns { message: { content } }, /api/generate returns { response }
-      const data = response.data;
-      if (useChat && data?.message?.content && !data.response) {
+      if (responseMode === 'chat' && data?.message?.content && !data.response) {
         data.response = data.message.content;
       }
       return data;
@@ -773,15 +1624,68 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     }
   });
   
+  const NON_SERIALIZABLE_IPC_KEYS = new Set(['request', 'fileStream', 'socket', 'connection', 'req', 'res']);
+
+  const toIpcSafePayload = (value, depth = 0, seen = new WeakSet()) => {
+    if (value === null || value === undefined) return value;
+    if (typeof value === 'string' || typeof value === 'boolean') return value;
+    if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+    if (typeof value === 'bigint') return value.toString();
+    if (typeof value === 'function' || typeof value === 'symbol') return undefined;
+
+    if (value instanceof Date) return value.toISOString();
+    if (value instanceof Error) {
+      return {
+        name: value.name,
+        message: value.message,
+        stack: value.stack,
+      };
+    }
+
+    if (Buffer.isBuffer(value)) {
+      return value.toString('base64');
+    }
+
+    if (typeof value !== 'object') return undefined;
+    if (seen.has(value)) return '[Circular]';
+    if (depth >= 7) return '[Truncated]';
+
+    seen.add(value);
+
+    if (Array.isArray(value)) {
+      return value
+        .map((item) => toIpcSafePayload(item, depth + 1, seen))
+        .filter((item) => item !== undefined);
+    }
+
+    const output = {};
+    for (const [key, nested] of Object.entries(value)) {
+      if (NON_SERIALIZABLE_IPC_KEYS.has(key)) continue;
+      const safeValue = toIpcSafePayload(nested, depth + 1, seen);
+      if (safeValue !== undefined) {
+        output[key] = safeValue;
+      }
+    }
+    return output;
+  };
+
+  const emitRendererEvent = (channel, payload, context = 'IPC') => {
+    try {
+      if (!mainWindow || mainWindow.isDestroyed()) return;
+      mainWindow.webContents.send(channel, payload);
+    } catch (error) {
+      try {
+        if (!mainWindow || mainWindow.isDestroyed()) return;
+        mainWindow.webContents.send(channel, toIpcSafePayload(payload));
+      } catch (fallbackError) {
+        console.warn(`[${context}] Failed to send ${channel}:`, fallbackError.message || error.message);
+      }
+    }
+  };
+
   // Safe send helper - checks window is still valid before sending
   const safeSend = (ch, data) => {
-    try {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.send(ch, data);
-      }
-    } catch (e) {
-      console.warn('[LLM Stream] Failed to send to renderer:', e.message);
-    }
+    emitRendererEvent(ch, data, 'LLM Stream');
   };
 
   ipcMain.handle('llm:stream', async (_, payload) => {
@@ -794,12 +1698,31 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     // ── Build the request body ──
     // Use /api/chat (structured messages) when the frontend sends a messages array,
     // fall back to /api/generate for legacy callers.
-    const useChat = Array.isArray(rest.messages) && rest.messages.length > 0;
-    
+    const useChatPayload = Array.isArray(rest.messages) && rest.messages.length > 0;
+    let effectiveUseChat = useChatPayload;
+
     let requestBody;
     let apiPath;
-    
-    if (useChat) {
+
+    if (useChatPayload) {
+      const compat = await buildGenerateCompatRequest(
+        endpoint,
+        rest.model,
+        rest.system,
+        rest.messages,
+        rest.options || {},
+        true
+      );
+
+      if (compat) {
+        effectiveUseChat = false;
+        apiPath = compat.apiPath;
+        requestBody = compat.requestBody;
+        console.log(`[LLM Stream] Using ${compat.reason} for model "${rest.model}"`);
+      }
+    }
+
+    if (!requestBody && effectiveUseChat) {
       // ── /api/chat path (proper chat format — model template applied correctly) ──
       apiPath = '/api/chat';
       
@@ -820,25 +1743,22 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       
       // Build options: use frontend-provided values, only apply safety defaults when absent
       const chatOpts = rest.options || {};
+      // With /api/chat, Ollama's chat template handles stop tokens natively.
+      // Do NOT inject manual stop tokens — they conflict with the template
+      // and cause premature truncation (especially for thinking models).
       requestBody = {
         model: rest.model,
         messages,
         stream: true,
         options: {
           ...chatOpts,
-          stop: [
-            ...(chatOpts.stop || []),
-            'Human:', 'human:', 'User:', 'user:',
-            '<|im_end|>', '<|eot_id|>', '<|end|>',
-          ],
-          // Use frontend value if provided; only apply floor default if missing
-          repeat_penalty: chatOpts.repeat_penalty ?? 1.1,
+          repeat_penalty: chatOpts.repeat_penalty ?? 1.05,
           num_predict: chatOpts.num_predict ?? 4096,
           frequency_penalty: chatOpts.frequency_penalty ?? 0.05,
           presence_penalty: chatOpts.presence_penalty ?? 0.05,
         }
       };
-    } else {
+    } else if (!requestBody) {
       // ── /api/generate fallback (legacy — raw prompt) ──
       apiPath = '/api/generate';
       
@@ -850,15 +1770,14 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         stream: true,
         options: {
           ...genOpts,
+          // /api/generate fallback: only add turn-leak prevention tokens
+          // (no template tokens — those conflict with the model's own EOS handling)
           stop: [
             ...(genOpts.stop || []),
             'Human:', 'human:', 'User:', 'user:',
             '\nHuman:', '\nUser:', '\n\nHuman:', '\n\nUser:',
-            '### User', '\n### User',
-            '<|im_end|>', '<|eot_id|>', '<|end|>',
           ],
-          // Use frontend value if provided; only apply floor default if missing
-          repeat_penalty: genOpts.repeat_penalty ?? 1.1,
+          repeat_penalty: genOpts.repeat_penalty ?? 1.05,
           num_predict: genOpts.num_predict ?? 4096,
           frequency_penalty: genOpts.frequency_penalty ?? 0.05,
           presence_penalty: genOpts.presence_penalty ?? 0.05,
@@ -873,6 +1792,71 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     }
     
     try {
+      if (orchestrator) {
+        const inferencePayload = {
+          model: requestBody.model,
+          options: requestBody.options || rest.options || {},
+          lane: rest?.lane || 'lane_interactive',
+          priority: rest?.priority,
+          allowFallback: rest?.allowFallback !== false,
+          workloadType: rest?.workloadType || (rest?.tools ? 'agent' : 'chat'),
+          ...(requestBody.messages ? { messages: requestBody.messages } : {}),
+          ...(requestBody.prompt ? { prompt: requestBody.prompt } : {}),
+          ...(requestBody.system ? { system: requestBody.system } : {}),
+          ...(requestBody.images ? { images: requestBody.images } : {}),
+          ...(Array.isArray(rest?.tools) ? { tools: rest.tools } : {}),
+        };
+
+        const streamResult = await orchestrator.stream(inferencePayload, (chunk) => {
+          if (!chunk) return;
+          if (chunk.done) {
+            streamCompletedByOllama = true;
+            safeSend(channel, { done: true });
+            return;
+          }
+
+          if (chunk.error) {
+            safeSend(channel, { error: chunk.error });
+            return;
+          }
+
+          if (chunk.message?.content) {
+            safeSend(channel, { response: chunk.message.content });
+            return;
+          }
+
+          if (chunk.response) {
+            safeSend(channel, { response: chunk.response });
+            return;
+          }
+        });
+
+        if (streamResult?.requestId) {
+          activeStreams.set(channel, { kind: 'orchestrator', requestId: streamResult.requestId });
+        }
+
+        if (streamResult?.streamTask && typeof streamResult.streamTask.then === 'function') {
+          streamResult.streamTask
+            .then(() => {
+              activeStreams.delete(channel);
+              if (!streamCompletedByOllama) {
+                safeSend(channel, { done: true });
+              }
+            })
+            .catch((error) => {
+              activeStreams.delete(channel);
+              safeSend(channel, { error: error.message || 'Stream failed' });
+            });
+        } else {
+          activeStreams.delete(channel);
+          if (!streamCompletedByOllama) {
+            safeSend(channel, { done: true });
+          }
+        }
+
+        return { started: true, channel };
+      }
+
       // Use retry wrapper for connection resilience
       await withRetry(
         async () => {
@@ -890,7 +1874,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
               // Normalize response format:
               // /api/chat returns { message: { content: "..." } }
               // /api/generate returns { response: "..." }
-              if (useChat && chunk.message?.content) {
+              if (effectiveUseChat && chunk.message?.content) {
                 safeSend(channel, { response: chunk.message.content });
               } else if (chunk.response) {
                 safeSend(channel, chunk);
@@ -909,21 +1893,40 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       if (!streamCompletedByOllama) {
         safeSend(channel, { done: true });
       }
+      return { started: true, channel };
     } catch (error) {
       activeStreams.delete(channel);
       safeSend(channel, { error: error.message });
+      return { started: false, error: error.message, channel };
     }
   });
   
-  ipcMain.handle('llm:cancel', (_, channel) => {
+  ipcMain.handle('llm:cancel', async (_, channel) => {
     const req = activeStreams.get(channel);
-    if (req) {
-      req.destroy();
-      activeStreams.delete(channel);
-      safeSend(channel, { cancelled: true });
-      return { success: true };
+    if (!req) {
+      return { success: false, error: 'Stream not found' };
     }
-    return { success: false, error: 'Stream not found' };
+
+    try {
+      if (req?.kind === 'orchestrator' && req.requestId) {
+        if (orchestrator?.cancel) {
+          await orchestrator.cancel(req.requestId);
+        }
+      } else if (typeof req?.destroy === 'function') {
+        req.destroy();
+      } else if (typeof req?.request?.destroy === 'function') {
+        req.request.destroy();
+      }
+    } catch (error) {
+      console.warn('[LLM Stream] Cancel failed:', error.message);
+      activeStreams.delete(channel);
+      safeSend(channel, { cancelled: true, warning: error.message });
+      return { success: false, error: error.message };
+    }
+
+    activeStreams.delete(channel);
+    safeSend(channel, { cancelled: true });
+    return { success: true };
   });
   
   ipcMain.handle('llm:unload', async () => {
@@ -1026,6 +2029,8 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         contextLength,
         format: details.format || null,
         parentModel: details.parent_model || null,
+        // Template: the chat template string (needed for thinking model detection)
+        template: data.template || null,
         // Raw details for debugging
         _raw: { families: details.families, format: details.format },
       };
@@ -1038,10 +2043,25 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
 
   // Warmup/preload a model onto GPU
   ipcMain.handle('llm:warmup', async (_, modelName) => {
-    const endpoint = store.get('llmEndpoint');
     console.log(`[IPC] Warming up model: ${modelName}`);
     try {
-      // Send a minimal generation request to force Ollama to load the model into GPU
+      if (orchestrator) {
+        const result = await orchestrator.warmupModel(modelName, {
+          lane: 'lane_interactive',
+          workloadType: 'warmup',
+          allowFallback: true,
+          priority: -60,
+        });
+        if (result?.success) {
+          console.log(`[IPC] Model ${modelName} warmed up successfully via orchestrator`);
+        } else {
+          console.warn(`[IPC] Warmup verification failed for ${modelName}: ${result?.fallbackReason || 'unknown reason'}`);
+        }
+        return result;
+      }
+
+      // Fallback path when orchestrator is unavailable.
+      const endpoint = store.get('llmEndpoint');
       const response = await makeRequest(`${endpoint}/api/generate`, {
         method: 'POST',
         body: {
@@ -1049,18 +2069,62 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
           prompt: 'Hi',
           stream: false,
           options: {
-            num_gpu: -1, // Full GPU offload
-            num_predict: 1, // Only generate 1 token
-            num_ctx: 512, // Minimal context
+            num_gpu: -1,
+            num_predict: 1,
+            num_ctx: 512,
           }
         },
-        timeout: 120000 // 2 minutes for initial model load
+        timeout: 120000
       });
-      console.log(`[IPC] Model ${modelName} warmed up successfully`);
-      return { success: true, model: modelName, response: response.data?.response };
+
+      if (response.status !== 200) {
+        return {
+          ok: false,
+          success: false,
+          model: modelName,
+          backend: 'ollama-cuda',
+          fallbackReason: response.data?.error || `HTTP ${response.status}`,
+          offloadEvidence: null,
+          timings: { elapsedMs: 0 },
+        };
+      }
+
+      const ps = await makeRequest(`${endpoint}/api/ps`, { timeout: 5000 });
+      const models = Array.isArray(ps?.data?.models) ? ps.data.models : [];
+      const target = models.find((row) =>
+        String(row?.name || '').toLowerCase().includes(String(modelName || '').toLowerCase().split(':')[0])
+      );
+      const sizeVram = Number(target?.size_vram || 0);
+      const verified = sizeVram > 0;
+
+      return {
+        ok: verified,
+        success: verified,
+        model: modelName,
+        backend: 'ollama-cuda',
+        offloadEvidence: {
+          verified,
+          backend: 'ollama-cuda',
+          method: 'ollama:/api/ps',
+          model: modelName,
+          sizeVram,
+          details: target || null,
+          checkedAt: Date.now(),
+        },
+        timings: { elapsedMs: 0 },
+        fallbackReason: verified ? null : 'gpu-offload-not-verified',
+      };
     } catch (error) {
       console.error(`[IPC] Warmup failed:`, error.message);
-      return { success: false, error: error.message };
+      return {
+        ok: false,
+        success: false,
+        model: modelName,
+        backend: null,
+        fallbackReason: error.message,
+        offloadEvidence: null,
+        timings: { elapsedMs: 0 },
+      };
     }
   });
   
@@ -2679,6 +3743,125 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     return orchestrator.getRecommendation(modelParams);
   });
 
+  ipcMain.handle('llm:getRuntimeState', async () => {
+    const buildDeviceSnapshot = async () => {
+      const snapshot = {
+        cpu: null,
+        memory: null,
+        gpus: [],
+        npu: null,
+      };
+
+      try {
+        if (hardwareDetection?.getHardwareStats) {
+          const stats = await hardwareDetection.getHardwareStats();
+          if (stats?.cpu) {
+            snapshot.cpu = {
+              usage: Number(stats.cpu.usage || 0),
+              temperature: stats.cpu.temperature ?? null,
+            };
+          }
+          if (stats?.memory) {
+            snapshot.memory = {
+              usagePercent: Number(stats.memory.usagePercent || 0),
+              usedGB: Number(stats.memory.used || 0),
+              totalGB: Number(stats.memory.total || 0),
+            };
+          }
+          if (Array.isArray(stats?.gpus)) {
+            snapshot.gpus = stats.gpus.map((gpu) => ({
+              name: gpu.name || 'GPU',
+              utilizationGpu: Number(gpu.utilizationGpu || 0),
+              utilizationMemory: Number(gpu.utilizationMemory || 0),
+              temperature: gpu.temperature ?? null,
+              vramUsed: Number(gpu.vramUsed || 0),
+              vramTotal: Number(gpu.vramTotal || 0),
+              vramPercent: Number(gpu.vramPercent || 0),
+              ollamaVramUsed: Number(gpu.ollamaVramUsed || 0),
+            }));
+          }
+          if (stats?.npu) {
+            snapshot.npu = {
+              detected: Boolean(stats.npu.detected),
+              active: Boolean(stats.npu.active),
+              serverRunning: Boolean(stats.npu.serverRunning),
+              modelLoaded: Boolean(stats.npu.modelLoaded),
+              name: stats.npu.name || 'NPU',
+              tops: Number(stats.npu.tops || 0),
+            };
+          }
+        }
+      } catch (error) {
+        console.warn('[IPC] Failed to gather device snapshot:', error.message);
+      }
+
+      // Fallback NPU probe if stats did not include it.
+      if (!snapshot.npu) {
+        try {
+          const npuBridge = getNpuBridge();
+          if (npuBridge?.getStatus) {
+            const npuStatus = await npuBridge.getStatus();
+            snapshot.npu = {
+              detected: Boolean(npuStatus?.npuAvailable || npuStatus?.detected),
+              active: Boolean(npuStatus?.modelLoaded),
+              serverRunning: Boolean(npuStatus?.serverRunning),
+              modelLoaded: Boolean(npuStatus?.modelLoaded),
+              name: npuStatus?.name || 'NPU',
+              tops: Number(npuStatus?.tops || 0),
+            };
+          }
+        } catch (error) {
+          console.warn('[IPC] Failed to gather NPU status:', error.message);
+        }
+      }
+
+      return snapshot;
+    };
+
+    if (!orchestrator) {
+      return {
+        profile: 'balanced',
+        preferredBackendId: 'auto',
+        currentBackend: null,
+        queue: { queued: 0, active: 0, lanes: {}, activeJobs: [], metrics: {} },
+        fallbackCounters: {},
+        recentDecisions: [],
+        offloadEvidence: [],
+        hardware: { gpuCount: 0, hasNpu: false, cpu: null },
+        deviceUtilization: await buildDeviceSnapshot(),
+        timestamp: Date.now(),
+      };
+    }
+    const runtime = orchestrator.getRuntimeState();
+    return {
+      ...runtime,
+      deviceUtilization: await buildDeviceSnapshot(),
+      timestamp: Date.now(),
+    };
+  });
+
+  ipcMain.handle('llm:benchmark', async (_, config = {}) => {
+    if (!orchestrator) {
+      return { ok: false, error: 'Orchestrator not available' };
+    }
+    try {
+      return await orchestrator.benchmark(config || {});
+    } catch (error) {
+      return { ok: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('llm:embed', async (_, payload = {}) => {
+    if (!orchestrator) {
+      return { ok: false, vectors: [], error: 'Orchestrator not available' };
+    }
+    try {
+      return await orchestrator.embedTexts(payload.texts || [], payload || {});
+    } catch (error) {
+      return { ok: false, vectors: [], error: error.message };
+    }
+  });
+
   // ============================================
   // Prompt Templates
   // ============================================
@@ -2760,13 +3943,22 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   ipcMain.handle('presets:getForModel', (_, { modelName, workspace }) => {
     if (!db) return [];
     try {
+      const presetInfo = db.exec('PRAGMA table_info(model_presets)');
+      const hasCreatedAt = Array.isArray(presetInfo?.[0]?.values)
+        ? presetInfo[0].values.some((row) => row?.[1] === 'created_at')
+        : false;
+
+      const orderBy = hasCreatedAt
+        ? 'ORDER BY is_default DESC, created_at DESC'
+        : 'ORDER BY is_default DESC';
+
       const result = db.exec(
         `
         SELECT id, model_name, temperature, top_p, top_k, context_length, system_prompt, workspace, is_default
         FROM model_presets
         WHERE model_name = ?
           AND (workspace IS NULL OR workspace = '' OR workspace = ?)
-        ORDER BY is_default DESC, created_at DESC
+        ${orderBy}
       `,
         [modelName, workspace || null],
       );
@@ -2920,7 +4112,20 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       switch (payload.type) {
         case 'ollama': {
           const endpoint = store.get('llmEndpoint');
-          const id = modelDownloader.startOllamaDownload(payload.name, endpoint);
+          const modelName = typeof payload.name === 'string' ? payload.name.trim() : '';
+          if (!modelName) {
+            return { success: false, error: 'Model name is required for Ollama download' };
+          }
+
+          const startOllamaDownload = modelDownloader.startOllamaDownload;
+          if (typeof startOllamaDownload !== 'function') {
+            return {
+              success: false,
+              error: 'Model downloader unavailable (startOllamaDownload missing)',
+            };
+          }
+
+          const id = startOllamaDownload(modelName, endpoint);
           return { success: true, id };
         }
         case 'huggingface': {
@@ -3311,65 +4516,103 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   
   ipcMain.handle('providers:pullOllamaModel', async (_, modelName) => {
     try {
+      const normalizedModelName =
+        typeof modelName === 'string' ? modelName.trim() : String(modelName ?? '').trim();
+      if (!normalizedModelName) {
+        return { success: false, error: 'Model name is required' };
+      }
+
       const endpoint = store.get('llmEndpoint') || 'http://localhost:11434';
       
       // Generate a V2-compatible job ID
-      const jobId = `ollama-${modelName.replace(/[^a-zA-Z0-9]/g, '-')}-${Date.now()}`;
+      const jobId = `ollama-${normalizedModelName.replace(/[^a-zA-Z0-9]/g, '-')}-${Date.now()}`;
       let jobCreated = false;
+
+      const toFiniteNumber = (value, fallback = 0) => {
+        const num = Number(value);
+        return Number.isFinite(num) ? num : fallback;
+      };
+
+      const toSafePullProgress = (download) => ({
+        id: String(download?.id || jobId),
+        model: normalizedModelName,
+        name: String(download?.name || normalizedModelName),
+        filename: normalizedModelName,
+        status: String(download?.status || 'queued'),
+        progress: toFiniteNumber(download?.progress, 0),
+        totalBytes: toFiniteNumber(download?.totalBytes, 0),
+        downloadedBytes: toFiniteNumber(download?.downloadedBytes, 0),
+        speed: toFiniteNumber(download?.speed, 0),
+        error: download?.error ? String(download.error) : null,
+        startedAt: download?.startedAt ? String(download.startedAt) : null,
+        updatedAt: download?.updatedAt ? String(download.updatedAt) : null,
+        statusMessage: download?.statusMessage ? String(download.statusMessage) : null,
+        digest: download?.digest ? String(download.digest) : null,
+      });
       
       // Callback for progress updates
       const onProgress = (download) => {
+        const safeDownload = toSafePullProgress(download);
+
         // Create a V2-compatible job object
         const job = {
           id: jobId,
-          name: modelName,
-          url: `ollama://pull/${modelName}`,
+          name: normalizedModelName,
+          url: `ollama://pull/${normalizedModelName}`,
           destinationDir: 'ollama',
-          filename: modelName,
-          status: download.status === 'downloading' ? 'downloading' : 
-                  download.status === 'completed' ? 'completed' :
-                  download.status === 'error' ? 'error' :
-                  download.status === 'cancelled' ? 'cancelled' : 'queued',
+          filename: normalizedModelName,
+          status: safeDownload.status === 'downloading' ? 'downloading' : 
+                  safeDownload.status === 'completed' ? 'completed' :
+                  safeDownload.status === 'error' ? 'error' :
+                  safeDownload.status === 'cancelled' ? 'cancelled' : 'queued',
           priority: 0,
-          totalBytes: download.totalBytes || 0,
-          downloadedBytes: download.downloadedBytes || 0,
-          progress: download.progress || 0,
-          speed: download.speed || 0,
+          totalBytes: safeDownload.totalBytes || 0,
+          downloadedBytes: safeDownload.downloadedBytes || 0,
+          progress: safeDownload.progress || 0,
+          speed: safeDownload.speed || 0,
           provider: 'ollama',
           modelType: 'llm',
-          lastError: download.error || null,
+          lastError: safeDownload.error || null,
           retryCount: 0,
-          createdAt: download.startedAt,
-          startedAt: download.startedAt,
-          completedAt: download.status === 'completed' ? new Date().toISOString() : null,
+          createdAt: safeDownload.startedAt,
+          startedAt: safeDownload.startedAt,
+          completedAt: safeDownload.status === 'completed' ? new Date().toISOString() : null,
           metadata: {
-            statusMessage: download.statusMessage,
-            digest: download.digest,
+            statusMessage: safeDownload.statusMessage,
+            digest: safeDownload.digest,
           },
         };
         
         // Emit V2-style events for DownloadCenter
         if (!jobCreated) {
-          mainWindow.webContents.send('downloads:jobCreated', job);
-          mainWindow.webContents.send('downloads:jobStarted', job);
+          emitRendererEvent('downloads:jobCreated', job, 'Provider Downloads');
+          emitRendererEvent('downloads:jobStarted', job, 'Provider Downloads');
           jobCreated = true;
         }
         
         // Send progress update
-        mainWindow.webContents.send('downloads:jobProgress', job);
-        mainWindow.webContents.send('providers:pullProgress', download);
+        emitRendererEvent('downloads:jobProgress', job, 'Provider Downloads');
+        emitRendererEvent('providers:pullProgress', safeDownload, 'Provider Downloads');
         
         // Send completion/error events
-        if (download.status === 'completed') {
-          mainWindow.webContents.send('downloads:jobCompleted', job);
-        } else if (download.status === 'error') {
-          mainWindow.webContents.send('downloads:jobError', job);
-        } else if (download.status === 'cancelled') {
-          mainWindow.webContents.send('downloads:jobCancelled', job);
+        if (safeDownload.status === 'completed') {
+          emitRendererEvent('downloads:jobCompleted', job, 'Provider Downloads');
+        } else if (safeDownload.status === 'error') {
+          emitRendererEvent('downloads:jobError', job, 'Provider Downloads');
+        } else if (safeDownload.status === 'cancelled') {
+          emitRendererEvent('downloads:jobCancelled', job, 'Provider Downloads');
         }
       };
       
-      const downloadId = modelDownloader.startOllamaDownload(modelName, endpoint, onProgress);
+      const startOllamaDownload = modelDownloader.startOllamaDownload;
+      if (typeof startOllamaDownload !== 'function') {
+        return {
+          success: false,
+          error: 'Model downloader unavailable (startOllamaDownload missing)',
+        };
+      }
+
+      const downloadId = startOllamaDownload(normalizedModelName, endpoint, onProgress);
       
       return { success: true, downloadId, jobId };
     } catch (error) {
@@ -3386,16 +4629,32 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       let downloadId;
       
       if (modelData.source === 'huggingface' || modelData.downloadUrl?.includes('huggingface.co')) {
+        const startHuggingFaceDownload = modelDownloader.startHuggingFaceDownload;
+        if (typeof startHuggingFaceDownload !== 'function') {
+          return {
+            success: false,
+            error: 'Model downloader unavailable (startHuggingFaceDownload missing)',
+          };
+        }
+
         // HuggingFace download
-        downloadId = modelDownloader.startHuggingFaceDownload({
+        downloadId = startHuggingFaceDownload({
           repo: modelData.repo || modelData.modelId,
           file: modelData.file || modelData.filename,
           targetDir,
           revision: modelData.revision || 'main',
         });
       } else if (modelData.source === 'civitai' || modelData.civitaiUrl) {
+        const startCustomDownload = modelDownloader.startCustomDownload;
+        if (typeof startCustomDownload !== 'function') {
+          return {
+            success: false,
+            error: 'Model downloader unavailable (startCustomDownload missing)',
+          };
+        }
+
         // CivitAI download - use custom URL
-        downloadId = modelDownloader.startCustomDownload({
+        downloadId = startCustomDownload({
           url: modelData.downloadUrl || modelData.civitaiUrl,
           fileName: modelData.filename || modelData.name,
           targetDir,
@@ -3418,7 +4677,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         const downloads = modelDownloader.getDownloads();
         const download = downloads.find(d => d.id === downloadId);
         if (download) {
-          mainWindow.webContents.send('providers:downloadProgress', download);
+          emitRendererEvent('providers:downloadProgress', download, 'Provider Downloads');
           if (download.status === 'completed' || download.status === 'error' || download.status === 'cancelled') {
             clearInterval(progressInterval);
           }
@@ -3462,7 +4721,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         const downloads = modelDownloader.getDownloads();
         const download = downloads.find(d => d.id === downloadId);
         if (download) {
-          mainWindow.webContents.send('providers:downloadProgress', download);
+          emitRendererEvent('providers:downloadProgress', download, 'Provider Downloads');
           if (download.status === 'completed' || download.status === 'error' || download.status === 'cancelled') {
             clearInterval(progressInterval);
           }
@@ -5633,7 +6892,11 @@ async function setupLedgerHandlers(ipcMain, userDataPath) {
   }
 
   // LMA handlers
-  if (llamaBridge && datasetBuilder && trainingScheduler) {
+  const lmaAvailable =
+    typeof llamaBridge.initialize === 'function' &&
+    typeof trainingScheduler.initialize === 'function';
+
+  if (lmaAvailable) {
     // Initialize LMA services
     llamaBridge.initialize(userDataPath).catch(console.error);
     trainingScheduler.initialize(userDataPath).catch(console.error);

@@ -17,16 +17,17 @@ if not exist "node_modules" (
 
 :: Kill any stuck electron processes
 taskkill /f /im electron.exe >nul 2>&1
+set ELECTRON_RUN_AS_NODE=
 
 echo [*] Starting DevForge...
-echo [*] Console will show logs for development
+echo [*] Launching stable app mode (built UI, no Vite dev server)
 echo [*] Close this window to stop the app
 echo.
 echo ========================================================
 echo.
 
-:: Start the development server + electron
-call npm run dev
+:: Start stable Electron app (auto-builds if needed)
+call npm run app
 
 echo.
 echo [*] DevForge closed.

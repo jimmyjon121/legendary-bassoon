@@ -475,11 +475,12 @@ export const useEditorStore = create((set, get) => ({
     const { openFiles, pendingAgentActions } = get();
     const previous = openFiles[path]?.content ?? '';
     const actionId = metadata.id || `${Date.now()}`;
+    const persisted = Boolean(metadata.persisted);
 
     set((state) => ({
       openFiles: {
         ...state.openFiles,
-        [path]: { ...(state.openFiles[path] || {}), content: nextContent, dirty: true },
+        [path]: { ...(state.openFiles[path] || {}), content: nextContent, dirty: !persisted },
       },
       fileHistory: {
         ...state.fileHistory,
@@ -554,5 +555,4 @@ export const useEditorStore = create((set, get) => ({
 }));
 
 export default useEditorStore;
-
 

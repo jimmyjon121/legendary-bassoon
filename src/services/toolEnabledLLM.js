@@ -17,6 +17,124 @@ import { safeCall } from '../utils/electronAPI';
 
 const MAX_TOOL_ITERATIONS = 15;
 const DEFAULT_TIMEOUT = 30000;
+const DEFAULT_OLLAMA_TIMEOUT = 300000;
+
+function normalizePatchOperation(operation, hasNewPath = false) {
+  const raw = String(operation || '').trim().toLowerCase();
+  if (!raw) return hasNewPath ? 'rename' : 'update';
+
+  if (['create', 'new', 'mk', 'touch', 'create_file'].includes(raw)) return 'create';
+  if (['update', 'edit', 'modify', 'change', 'replace', 'patch', 'overwrite', 'update_file'].includes(raw)) return 'update';
+  if (['delete', 'remove', 'rm', 'del', 'delete_file'].includes(raw)) return 'delete';
+  if (['rename', 'move', 'mv', 'rename_file', 'move_file'].includes(raw)) return 'rename';
+  if (['add', 'insert', 'append'].includes(raw)) return 'add';
+
+  return hasNewPath ? 'rename' : 'update';
+}
+
+function normalizeProposeEditArgs(rawArgs = {}) {
+  const args = rawArgs && typeof rawArgs === 'object' ? { ...rawArgs } : {};
+
+  const path =
+    args.path ||
+    args.file_path ||
+    args.filePath ||
+    args.targetPath ||
+    args.file ||
+    '';
+
+  const nestedChanges = args.changes && typeof args.changes === 'object' && !Array.isArray(args.changes)
+    ? args.changes
+    : {};
+
+  const changesText = Array.isArray(args.changes)
+    ? JSON.stringify(args.changes)
+    : typeof args.changes === 'string'
+      ? args.changes
+      : '';
+
+  const renamedFromText =
+    changesText.match(/renamed_to\s*[:=]\s*["']([^"']+)["']/i)?.[1] ||
+    changesText.match(/new_path\s*[:=]\s*["']([^"']+)["']/i)?.[1] ||
+    changesText.match(/newPath\s*[:=]\s*["']([^"']+)["']/i)?.[1] ||
+    null;
+
+  const newPath =
+    args.newPath ||
+    args.new_path ||
+    args.renamed_to ||
+    args.rename_to ||
+    nestedChanges.newPath ||
+    nestedChanges.new_path ||
+    nestedChanges.renamed_to ||
+    renamedFromText ||
+    null;
+
+  const newContent =
+    args.newContent ??
+    args.new_content ??
+    args.content ??
+    nestedChanges.newContent ??
+    nestedChanges.new_content ??
+    nestedChanges.content;
+
+  const oldContent =
+    args.oldContent ??
+    args.old_content ??
+    args.before ??
+    nestedChanges.oldContent ??
+    nestedChanges.old_content ??
+    nestedChanges.before;
+
+  const startLine =
+    args.startLine ??
+    args.start_line ??
+    nestedChanges.startLine ??
+    nestedChanges.start_line;
+
+  const endLine =
+    args.endLine ??
+    args.end_line ??
+    nestedChanges.endLine ??
+    nestedChanges.end_line;
+
+  const inferredOperation = normalizePatchOperation(
+    args.operation || nestedChanges.operation,
+    Boolean(newPath)
+  );
+
+  const operation = inferredOperation ||
+    (newPath ? 'rename' : (newContent !== undefined ? 'update' : 'update'));
+
+  return {
+    path,
+    operation,
+    startLine,
+    endLine,
+    oldContent,
+    newContent,
+    newPath,
+    rationale: args.rationale || args.reason || nestedChanges.rationale || 'Proposed by model',
+  };
+}
+
+function unwrapToolResponse(result, fallbackError = 'Tool not available') {
+  if (!result) {
+    return { ok: false, error: fallbackError };
+  }
+  if (result.ok === false || result.success === false) {
+    return {
+      ok: false,
+      error: result.error || fallbackError,
+      details: result.details || null,
+      code: result.code || null,
+    };
+  }
+  if (result.ok === true && result.data && typeof result.data === 'object') {
+    return { ok: true, ...result.data };
+  }
+  return { ok: true, ...result };
+}
 
 // ============================================================================
 // Tool Executor
@@ -34,10 +152,11 @@ async function executeTool(toolCall, projectRoot) {
   try {
     switch (name) {
       case 'read_file': {
-        const result = await safeCall('toolReadFile', [
+        const raw = await safeCall('toolReadFile', [
           projectRoot, args.path, args.startLine, args.endLine
         ], { error: 'Tool not available' });
-        if (result.error) throw new Error(result.error);
+        const result = unwrapToolResponse(raw);
+        if (!result.ok) throw new Error(result.error);
         return {
           success: true,
           type: 'file_read',
@@ -49,10 +168,11 @@ async function executeTool(toolCall, projectRoot) {
       }
       
       case 'search_code': {
-        const result = await safeCall('toolSearchCode', [
+        const raw = await safeCall('toolSearchCode', [
           projectRoot, args.pattern, args.fileGlob, args.maxResults || 20, args.caseSensitive || false
         ], { error: 'Tool not available' });
-        if (result.error) throw new Error(result.error);
+        const result = unwrapToolResponse(raw);
+        if (!result.ok) throw new Error(result.error);
         return {
           success: true,
           type: 'search',
@@ -64,10 +184,11 @@ async function executeTool(toolCall, projectRoot) {
       }
       
       case 'list_directory': {
-        const result = await safeCall('toolListDirectory', [
+        const raw = await safeCall('toolListDirectory', [
           projectRoot, args.path || '', args.recursive || false, args.maxDepth || 3
         ], { error: 'Tool not available' });
-        if (result.error) throw new Error(result.error);
+        const result = unwrapToolResponse(raw);
+        if (!result.ok) throw new Error(result.error);
         return {
           success: true,
           type: 'directory_list',
@@ -78,79 +199,130 @@ async function executeTool(toolCall, projectRoot) {
       }
       
       case 'propose_edit': {
+        const normalized = normalizeProposeEditArgs(args);
         return {
           success: true,
           type: 'proposed_edit',
           patch: {
-            path: args.path,
-            operation: args.operation,
-            startLine: args.startLine,
-            endLine: args.endLine,
-            oldContent: args.oldContent,
-            newContent: args.newContent,
-            newPath: args.newPath,
-            rationale: args.rationale
+            path: normalized.path,
+            operation: normalized.operation,
+            startLine: normalized.startLine,
+            endLine: normalized.endLine,
+            oldContent: normalized.oldContent,
+            newContent: normalized.newContent,
+            newPath: normalized.newPath,
+            rationale: normalized.rationale
           }
         };
       }
       
       case 'run_command': {
-        const result = await safeCall('toolRunCommand', [
+        const raw = await safeCall('toolRunCommand', [
           projectRoot, args.command, args.cwd, args.timeout || DEFAULT_TIMEOUT
         ], { success: false, error: 'Tool not available' });
+        const result = unwrapToolResponse(raw);
+        const details = raw?.details || raw;
         return {
-          success: result.success,
+          success: result.ok,
           type: 'command',
           command: args.command,
-          stdout: result.stdout,
-          stderr: result.stderr,
-          exitCode: result.exitCode,
+          stdout: result.stdout || details?.stdout,
+          stderr: result.stderr || details?.stderr,
+          exitCode: result.exitCode ?? details?.exitCode,
           error: result.error
         };
       }
       
       case 'run_lint': {
         const files = args.files?.length > 0 ? args.files.join(' ') : '.';
-        const result = await safeCall('toolRunCommand', [
+        const raw = await safeCall('toolRunCommand', [
           projectRoot, `npm run lint ${files}`, null, 60000
         ], { success: false, error: 'Tool not available' });
+        const result = unwrapToolResponse(raw);
+        const details = raw?.details || raw;
         return {
-          success: result.success,
+          success: result.ok,
           type: 'lint',
           files: args.files || ['all'],
-          output: result.stdout,
-          errors: result.stderr,
-          exitCode: result.exitCode
+          output: result.stdout || details?.stdout,
+          errors: result.stderr || details?.stderr || result.error,
+          exitCode: result.exitCode ?? details?.exitCode
         };
       }
       
       case 'run_tests': {
         const pattern = args.testPattern ? `-- ${args.testPattern}` : '';
-        const result = await safeCall('toolRunCommand', [
+        const raw = await safeCall('toolRunCommand', [
           projectRoot, `npm test ${pattern}`, null, 120000
         ], { success: false, error: 'Tool not available' });
+        const result = unwrapToolResponse(raw);
+        const details = raw?.details || raw;
         return {
-          success: result.success,
+          success: result.ok,
           type: 'test',
           pattern: args.testPattern,
-          output: result.stdout,
-          errors: result.stderr,
-          exitCode: result.exitCode
+          output: result.stdout || details?.stdout,
+          errors: result.stderr || details?.stderr || result.error,
+          exitCode: result.exitCode ?? details?.exitCode
         };
       }
       
       case 'check_types': {
         const files = args.files?.length > 0 ? args.files.join(' ') : '';
-        const result = await safeCall('toolRunCommand', [
+        const raw = await safeCall('toolRunCommand', [
           projectRoot, `npx tsc --noEmit ${files}`, null, 60000
         ], { success: false, error: 'Tool not available' });
+        const result = unwrapToolResponse(raw);
+        const details = raw?.details || raw;
         return {
-          success: result.exitCode === 0,
+          success: (result.exitCode ?? details?.exitCode ?? 1) === 0,
           type: 'typecheck',
           files: args.files || ['all'],
-          output: result.stdout,
-          errors: result.stderr,
-          exitCode: result.exitCode
+          output: result.stdout || details?.stdout,
+          errors: result.stderr || details?.stderr || result.error,
+          exitCode: result.exitCode ?? details?.exitCode
+        };
+      }
+
+      case 'web_search': {
+        const result = await safeCall(
+          'webSearch',
+          [args.query, { maxResults: args.maxResults || 5 }],
+          { results: [], query: args.query, error: 'Tool not available' }
+        );
+        if (result?.error) throw new Error(result.error);
+
+        const normalized = Array.isArray(result?.results)
+          ? result.results.slice(0, args.maxResults || 5).map((entry) => ({
+              title: entry?.title || '',
+              url: entry?.url || entry?.link || '',
+              snippet: entry?.snippet || entry?.description || '',
+            }))
+          : [];
+
+        return {
+          success: true,
+          type: 'web_search',
+          query: args.query,
+          results: normalized,
+          count: normalized.length,
+          tookMs: result?.took || null
+        };
+      }
+
+      case 'web_fetch_page': {
+        const result = await safeCall(
+          'webFetchPage',
+          [args.url, { maxChars: args.maxChars || 5000 }],
+          { content: '', title: '', url: args.url, error: 'Tool not available' }
+        );
+        if (result?.error) throw new Error(result.error);
+        return {
+          success: true,
+          type: 'web_page',
+          url: result?.url || args.url,
+          title: result?.title || '',
+          content: (result?.content || '').slice(0, args.maxChars || 5000)
         };
       }
       
@@ -192,6 +364,7 @@ export class ToolEnabledLLM {
     this.toolCalls = [];
     this.proposedChanges = [];
     this.iteration = 0;
+    this.defaultTextToolMode = Boolean(options.defaultTextToolMode);
   }
 
   /**
@@ -219,6 +392,7 @@ You are an AI coding assistant with access to tools that let you explore and mod
 3. **Verify changes**: After proposing edits, use run_lint or check_types to verify.
 4. **Explain rationale**: Always include clear reasoning when proposing edits.
 5. **Be precise**: When editing, specify exact line ranges to minimize unintended changes.
+6. **Research when needed**: If task references an existing product/framework (e.g. "like LM Studio"), use web_search first.
 
 ## Available Tools
 
@@ -230,6 +404,8 @@ You are an AI coding assistant with access to tools that let you explore and mod
 - **run_lint**: Run linter on files
 - **run_tests**: Run test suite
 - **check_types**: Run TypeScript type checker
+- **web_search**: Research external product/technical references
+- **web_fetch_page**: Pull content from a specific source URL
 
 ## Important
 
@@ -239,66 +415,323 @@ You are an AI coding assistant with access to tools that let you explore and mod
   }
 
   /**
-   * Parse tool calls from Ollama response
+   * Parse tool calls from Ollama response.
+   * First checks native tool_calls, then falls back to parsing JSON from text.
    */
   parseToolCalls(response) {
-    // Ollama returns tool_calls in the message
-    if (response.message?.tool_calls) {
-      return response.message.tool_calls.map((tc, idx) => ({
-        id: `call_${Date.now()}_${idx}`,
-        type: 'function',
-        function: {
-          name: tc.function.name,
-          arguments: typeof tc.function.arguments === 'string' 
-            ? JSON.parse(tc.function.arguments) 
-            : tc.function.arguments
+    // 1. Native tool_calls (models that support function calling)
+    if (Array.isArray(response.message?.tool_calls) && response.message.tool_calls.length > 0) {
+      return response.message.tool_calls.map((tc, idx) => {
+        const rawArgs = tc?.function?.arguments;
+        let parsedArgs = rawArgs;
+        if (typeof rawArgs === 'string') {
+          try {
+            parsedArgs = JSON.parse(rawArgs);
+          } catch {
+            parsedArgs = {};
+          }
         }
-      }));
+
+        return {
+          id: `call_${Date.now()}_${idx}`,
+          type: 'function',
+          function: {
+            name: tc?.function?.name,
+            arguments: parsedArgs || {}
+          }
+        };
+      });
     }
+
+    // 2. Text-based fallback: parse tool calls from model's text output
+    const content = response.message?.content || '';
+    if (content) {
+      const textCalls = this.parseToolCallsFromText(content);
+      if (textCalls.length > 0) return textCalls;
+    }
+
     return [];
   }
 
   /**
-   * Call Ollama with tools
+   * Parse tool calls from plain text output.
+   * Models that don't support native function calling often output JSON blocks
+   * like: ```json\n{"tool": "read_file", "arguments": {"path": "..."}}\n```
+   * Or structured text like: TOOL_CALL: read_file({"path": "..."})
+   */
+  parseToolCallsFromText(text) {
+    const calls = [];
+    const toolNames = new Set(this.tools.map(t => t.function.name));
+
+    // Strategy 1: JSON code blocks containing tool calls
+    const jsonBlockRegex = /```(?:json)?\s*\n?([\s\S]*?)\n?```/gi;
+    let match;
+    while ((match = jsonBlockRegex.exec(text)) !== null) {
+      try {
+        const parsed = JSON.parse(match[1].trim());
+        const extracted = this._extractToolFromJSON(parsed, toolNames);
+        if (extracted) calls.push(extracted);
+      } catch { /* not valid JSON, skip */ }
+    }
+    if (calls.length > 0) return calls;
+
+    // Strategy 2.5: propose_edit { ... } pseudo blocks (non-JSON but recoverable)
+    const pseudoProposeRegex = /propose_edit\s*\{([\s\S]{0,2500}?)\}/gi;
+    while ((match = pseudoProposeRegex.exec(text)) !== null) {
+      const block = match[1] || '';
+      const path =
+        block.match(/"(?:path|file_path|filePath)"\s*:\s*"([^"]+)"/i)?.[1] ||
+        block.match(/(?:path|file_path|filePath)\s*:\s*['"]([^'"]+)['"]/i)?.[1] ||
+        '';
+      const renamedTo =
+        block.match(/"(?:renamed_to|new_path|newPath)"\s*:\s*"([^"]+)"/i)?.[1] ||
+        block.match(/(?:renamed_to|new_path|newPath)\s*:\s*['"]([^'"]+)['"]/i)?.[1] ||
+        null;
+      const newContent =
+        block.match(/"(?:newContent|new_content|content)"\s*:\s*"([\s\S]*?)"\s*(?:,|$)/i)?.[1] ||
+        null;
+      if (!path) continue;
+      calls.push({
+        id: `call_${Date.now()}_${calls.length}`,
+        type: 'function',
+        function: {
+          name: 'propose_edit',
+          arguments: {
+            path,
+            operation: renamedTo ? 'rename' : (newContent ? 'update' : 'update'),
+            newPath: renamedTo,
+            newContent: newContent || undefined,
+            rationale: 'Recovered from pseudo propose_edit block'
+          }
+        }
+      });
+    }
+    if (calls.length > 0) return calls;
+
+    // Strategy 2: Inline JSON objects { "tool": "...", "arguments": {...} }
+    const inlineJsonRegex = /\{[^{}]*"(?:tool|name|function)"[^{}]*"(?:arguments|parameters|params)"[^{}]*\{[^}]*\}[^}]*\}/gi;
+    while ((match = inlineJsonRegex.exec(text)) !== null) {
+      try {
+        const parsed = JSON.parse(match[0]);
+        const extracted = this._extractToolFromJSON(parsed, toolNames);
+        if (extracted) calls.push(extracted);
+      } catch { /* skip */ }
+    }
+    if (calls.length > 0) return calls;
+
+    // Strategy 3: Function-call style: tool_name({"key": "value"})
+    const funcCallRegex = /\b([a-z_]+)\s*\(\s*(\{[\s\S]*?\})\s*\)/gi;
+    while ((match = funcCallRegex.exec(text)) !== null) {
+      const name = match[1];
+      if (!toolNames.has(name)) continue;
+      try {
+        const args = JSON.parse(match[2]);
+        calls.push({
+          id: `call_${Date.now()}_${calls.length}`,
+          type: 'function',
+          function: { name, arguments: args }
+        });
+      } catch { /* skip */ }
+    }
+
+    return calls;
+  }
+
+  /**
+   * Extract a tool call from a parsed JSON object, handling multiple formats.
+   */
+  _extractToolFromJSON(obj, toolNames) {
+    if (!obj || typeof obj !== 'object') return null;
+    const name = obj.tool || obj.name || obj.function?.name || obj.function;
+    const args = obj.arguments || obj.parameters || obj.params || obj.function?.arguments || {};
+    
+    if (typeof name === 'string' && toolNames.has(name)) {
+      let parsedArgs = args;
+      if (typeof args === 'string') {
+        try {
+          parsedArgs = JSON.parse(args);
+        } catch {
+          parsedArgs = {};
+        }
+      }
+      return {
+        id: `call_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+        type: 'function',
+        function: { name, arguments: parsedArgs || {} }
+      };
+    }
+    return null;
+  }
+
+  /**
+   * Build a text-based tool description for models without native tool support.
+   * This goes into the system prompt so the model knows how to "call" tools via JSON.
+   */
+  buildTextToolInstructions() {
+    const toolDescriptions = this.tools.map(t => {
+      const fn = t.function;
+      const params = fn.parameters?.properties || {};
+      const required = fn.parameters?.required || [];
+      const paramList = Object.entries(params).map(([k, v]) => {
+        const req = required.includes(k) ? ' (required)' : '';
+        return `    - ${k}: ${v.type}${req} — ${v.description || ''}`;
+      }).join('\n');
+      return `  ${fn.name}: ${fn.description}\n${paramList}`;
+    }).join('\n\n');
+
+    return `
+## How to Use Tools
+
+To use a tool, output a JSON code block with this EXACT format:
+
+\`\`\`json
+{"tool": "tool_name", "arguments": {"param1": "value1"}}
+\`\`\`
+
+After each tool result is returned to you, continue working.
+When you are done and have a final answer, respond in plain text WITHOUT any tool JSON.
+
+## Available Tools
+
+${toolDescriptions}
+`;
+  }
+
+  /**
+   * Call Ollama with tools.
+   * First attempts native tool calling. If the model doesn't support it,
+   * falls back to text-based tool instructions in the system prompt.
    */
   async callOllama(messages, systemPrompt) {
-    const endpoint = await safeCall('getSettings', ['llmEndpoint'], 'http://localhost:11434') || 'http://localhost:11434';
+    const endpoint = await safeCall('getSettings', ['llmEndpoint'], 'http://127.0.0.1:11434') || 'http://127.0.0.1:11434';
+
+    // Determine whether to use native tools or text-based fallback
+    const useNativeTools = !this._textToolMode;
     
+    let effectiveSystemPrompt = systemPrompt;
+    if (!useNativeTools) {
+      effectiveSystemPrompt = systemPrompt + '\n' + this.buildTextToolInstructions();
+    }
+
     const payload = {
       model: this.model,
       messages: [
-        { role: 'system', content: systemPrompt },
+        { role: 'system', content: effectiveSystemPrompt },
         ...messages
       ],
-      tools: this.getFormattedTools(),
-      stream: false
+      stream: false,
+      lane: 'lane_agent',
+      workloadType: 'agent',
+      allowFallback: true,
+      priority: 8,
     };
 
-    try {
-      const response = await fetch(`${endpoint}/api/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
+    // Only include tools array if using native mode
+    if (useNativeTools) {
+      payload.tools = this.getFormattedTools();
+    }
 
-      if (!response.ok) {
-        throw new Error(`Ollama error: ${response.status} ${response.statusText}`);
+    try {
+      // Prefer Electron IPC so all inference goes through the orchestrator.
+      if (typeof window !== 'undefined' && window.electronAPI?.sendToLLM) {
+        const result = await window.electronAPI.sendToLLM(payload);
+        if (!result) {
+          throw new Error('Empty response from llm:send');
+        }
+        if (result?.error) {
+          const details = typeof result.error === 'string' ? result.error : JSON.stringify(result.error);
+          if (useNativeTools && /support tools|unsupported|tool/i.test(details)) {
+            console.warn('[ToolEnabledLLM] Native tools rejected, switching to text-based mode');
+            this._textToolMode = true;
+            return this.callOllama(messages, systemPrompt);
+          }
+          throw new Error(`Ollama error: ${details}`);
+        }
+
+        if (useNativeTools && !result.message?.tool_calls?.length && !result.message?.content?.trim()) {
+          console.warn('[ToolEnabledLLM] Native tools returned empty, switching to text-based mode');
+          this._textToolMode = true;
+          return this.callOllama(messages, systemPrompt);
+        }
+
+        return result;
       }
 
-      return await response.json();
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), DEFAULT_OLLAMA_TIMEOUT);
+      try {
+        const response = await fetch(`${endpoint}/api/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: controller.signal
+        });
+
+        if (!response.ok) {
+          let details = '';
+          try {
+            const parsed = await response.json();
+            if (parsed?.error) {
+              details = parsed.error;
+            } else {
+              details = JSON.stringify(parsed);
+            }
+          } catch (_parseErr) {
+            try {
+              details = await response.text();
+            } catch (_textErr) {
+              details = '';
+            }
+          }
+
+          // If native tools caused the error, retry in text mode
+          if (useNativeTools && (
+            details.includes('does not support tools') ||
+            details.includes('unsupported') ||
+            details.includes('tool')
+          )) {
+            console.warn('[ToolEnabledLLM] Native tools rejected, switching to text-based mode');
+            this._textToolMode = true;
+            clearTimeout(timeout);
+            return this.callOllama(messages, systemPrompt);
+          }
+
+          const suffix = details ? ` - ${details}` : '';
+          throw new Error(`Ollama error: ${response.status} ${response.statusText}${suffix}`);
+        }
+
+        const result = await response.json();
+
+        // If native tools returned no tool_calls AND no content, try text mode
+        if (useNativeTools && !result.message?.tool_calls?.length && !result.message?.content?.trim()) {
+          console.warn('[ToolEnabledLLM] Native tools returned empty, switching to text-based mode');
+          this._textToolMode = true;
+          clearTimeout(timeout);
+          return this.callOllama(messages, systemPrompt);
+        }
+
+        return result;
+      } finally {
+        clearTimeout(timeout);
+      }
     } catch (error) {
+      if (error?.name === 'AbortError') {
+        throw new Error(`Ollama request timed out after ${Math.round(DEFAULT_OLLAMA_TIMEOUT / 1000)}s`);
+      }
       throw new Error(`Failed to call Ollama: ${error.message}`);
     }
   }
 
   /**
-   * Main chat method with tool loop
+   * Main chat method with tool loop.
+   * Works with both native tool-calling models and text-based fallback.
    */
   async chat(userMessage, conversationHistory = []) {
     this.iteration = 0;
     this.filesRead.clear();
     this.toolCalls = [];
     this.proposedChanges = [];
+    this._textToolMode = this.defaultTextToolMode; // Start native unless caller forces text mode
 
     const messages = [
       ...conversationHistory,
@@ -309,19 +742,28 @@ You are an AI coding assistant with access to tools that let you explore and mod
 
     while (this.iteration < this.maxIterations) {
       this.iteration++;
-      this.onThinking(`Iteration ${this.iteration}...`);
+      this.onThinking(`Iteration ${this.iteration}/${this.maxIterations}${this._textToolMode ? ' (text mode)' : ''}...`);
 
       const response = await this.callOllama(messages, systemPrompt);
       const toolCalls = this.parseToolCalls(response);
+      const assistantText = response.message?.content || '';
+
+      if (this._textToolMode && assistantText.trim()) {
+        messages.push({
+          role: 'assistant',
+          content: assistantText
+        });
+      }
 
       // If no tool calls, we have the final response
       if (toolCalls.length === 0) {
         return {
-          content: response.message?.content || '',
+          content: assistantText,
           filesRead: Array.from(this.filesRead),
           toolCalls: this.toolCalls,
           proposedChanges: this.proposedChanges,
-          iterations: this.iteration
+          iterations: this.iteration,
+          textToolMode: this._textToolMode
         };
       }
 
@@ -353,21 +795,33 @@ You are an AI coding assistant with access to tools that let you explore and mod
 
         this.onToolResult(toolCall, result);
 
-        // Add tool result to messages
-        messages.push({
-          role: 'assistant',
-          content: null,
-          tool_calls: [toolCall]
-        });
-        messages.push({
-          role: 'tool',
-          tool_call_id: toolCall.id,
-          content: JSON.stringify(result)
-        });
+        if (this._textToolMode) {
+          // In text mode, inject tool result as a user message for the next turn.
+          // Feed result back as a "system" message so the model sees it
+          const resultSummary = result.success
+            ? JSON.stringify(result, null, 2).slice(0, 4000)
+            : `Error: ${result.error || 'Tool execution failed'}`;
+          messages.push({
+            role: 'user',
+            content: `[Tool Result for ${toolCall.function.name}]:\n${resultSummary}\n\nContinue with the task. Use another tool if needed, or provide your final response.`
+          });
+        } else {
+          // Native mode: use proper tool_calls format
+          messages.push({
+            role: 'assistant',
+            content: null,
+            tool_calls: [toolCall]
+          });
+          messages.push({
+            role: 'tool',
+            tool_call_id: toolCall.id,
+            content: JSON.stringify(result)
+          });
+        }
       }
 
-      // Add partial response if any
-      if (response.message?.content) {
+      // Add partial text response if any (native mode only, not already added)
+      if (!this._textToolMode && response.message?.content) {
         messages.push({
           role: 'assistant',
           content: response.message.content
@@ -375,7 +829,16 @@ You are an AI coding assistant with access to tools that let you explore and mod
       }
     }
 
-    throw new Error(`Max tool iterations (${this.maxIterations}) reached`);
+    // Return partial results instead of throwing
+    return {
+      content: `Agent completed ${this.iteration} iterations. ${this.proposedChanges.length} changes proposed, ${this.filesRead.size} files read.`,
+      filesRead: Array.from(this.filesRead),
+      toolCalls: this.toolCalls,
+      proposedChanges: this.proposedChanges,
+      iterations: this.iteration,
+      textToolMode: this._textToolMode,
+      maxIterationsReached: true
+    };
   }
 
   /**

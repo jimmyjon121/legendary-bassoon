@@ -40,15 +40,13 @@ export function CompareMode({ isOpen, onClose }) {
     setError(null);
     setResults([]);
 
-    const systemPrompt = ''; // We can extend to use workspace system prompt later
-
     const tasks = selectedModels.map(async (modelName) => {
       const started = performance.now();
       try {
         const res = await window.electronAPI.sendToLLM({
           model: modelName,
-          prompt,
-          system: systemPrompt,
+          messages: [{ role: 'user', content: prompt }],
+          system: 'You are a helpful AI assistant. Answer concisely and directly.',
           options: { temperature: 0.7, top_p: 0.9 },
         });
         const ms = Math.round(performance.now() - started);

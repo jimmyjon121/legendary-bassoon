@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useEffect, memo } from 'react';
+import React, { useMemo, memo } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import hljs from 'highlight.js';
@@ -25,16 +25,31 @@ function createRenderer() {
   const renderer = new marked.Renderer();
 
   renderer.code = function (code, language) {
+    const token = code && typeof code === 'object' ? code : null;
+    const rawCode =
+      typeof code === 'string'
+        ? code
+        : (token?.text ?? token?.raw ?? String(code ?? ''));
+    const langFromArg = typeof language === 'string' ? language : '';
+    const langFromToken = typeof token?.lang === 'string'
+      ? token.lang
+      : (typeof token?.language === 'string' ? token.language : '');
+    const lang = (langFromArg || langFromToken).replace(/[^\w.+-]/g, '');
+
     let highlighted;
-    const lang = language || '';
     if (lang && hljs.getLanguage(lang)) {
-      try { highlighted = hljs.highlight(code, { language: lang }).value; }
-      catch { highlighted = hljs.highlightAuto(code).value; }
+      try { highlighted = hljs.highlight(rawCode, { language: lang }).value; }
+      catch { highlighted = hljs.highlightAuto(rawCode).value; }
     } else {
-      highlighted = hljs.highlightAuto(code).value;
+      highlighted = hljs.highlightAuto(rawCode).value;
     }
 
-    const encoded = code.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+    const encoded = rawCode
+      .replace(/&/g, '&amp;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
 
     return `<div class="code-block-wrapper relative group/code my-3">
       <div class="flex items-center justify-between px-4 py-2 bg-black/50 border-b border-white/[0.04]">
@@ -48,7 +63,7 @@ function createRenderer() {
         </div>
         <button class="copy-code-btn text-[10px] px-2.5 py-1 rounded-md text-white/35 hover:text-white/80 hover:bg-white/[0.06] transition-colors font-medium" data-code="${encoded}" onclick="(function(btn){navigator.clipboard.writeText(btn.getAttribute('data-code')).then(function(){btn.textContent='Copied!';setTimeout(function(){btn.textContent='Copy'},1500)});})(this)">Copy</button>
       </div>
-      <pre class="!mt-0 !rounded-t-none !py-3.5 !px-4"><code class="language-${lang}">${highlighted}</code></pre>
+      <pre class="!mt-0 !rounded-t-none !py-3.5 !px-4"><code class="language-${lang}" data-highlighted="true">${highlighted}</code></pre>
     </div>`;
   };
 
@@ -235,8 +250,6 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
   isStreaming = false,
   className = '',
 }) {
-  const contentRef = useRef(null);
-
   const htmlContent = useMemo(() => {
     if (!content) return '';
 
@@ -259,26 +272,10 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
     return html;
   }, [content, isStreaming]);
 
-  // After content updates, re-run highlight on any un-highlighted code blocks
-  useEffect(() => {
-    if (contentRef.current) {
-      const unhighlighted = contentRef.current.querySelectorAll('pre code:not([data-highlighted])');
-      unhighlighted.forEach(block => {
-        try {
-          hljs.highlightElement(block);
-          block.setAttribute('data-highlighted', 'true');
-        } catch {
-          // ignore
-        }
-      });
-    }
-  }, [htmlContent]);
-
   if (!content) return null;
 
   return (
     <div
-      ref={contentRef}
       className={`prose prose-sm prose-invert max-w-none streaming-markdown ${className}`}
       dangerouslySetInnerHTML={{ __html: htmlContent }}
     />

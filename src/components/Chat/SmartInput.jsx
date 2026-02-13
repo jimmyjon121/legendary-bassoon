@@ -27,7 +27,10 @@ import {
   Timer,
   ChevronUp,
   Sparkles,
-  Settings
+  Settings,
+  RefreshCw,
+  ShieldAlert,
+  ShieldCheck
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAppStore } from '../../stores/appStore';
@@ -92,7 +95,20 @@ export function SmartInput({ onSubmit, disabled = false, onImageGenerate, minima
   const currentModel = useAppStore(s => s.currentModel);
   const generationMetadata = useAppStore(s => s.generationMetadata);
   const contextUtilization = useAppStore(s => s.contextUtilization);
+  const lastGenerationProfile = useAppStore(s => s.lastGenerationProfile);
+  const modelHealthByModel = useAppStore(s => s.modelHealthByModel);
+  const stabilityModeByModel = useAppStore(s => s.stabilityModeByModel);
+  const runtimeNotice = useAppStore(s => s.runtimeNotice);
+  const dismissRuntimeNotice = useAppStore(s => s.dismissRuntimeNotice);
+  const recalibration = useAppStore(s => s.recalibration);
+  const recalibrateCurrentModel = useAppStore(s => s.recalibrateCurrentModel);
   const modelFamily = useModelExperience(s => s.modelFamily);
+
+  const activeProfile = currentModel && lastGenerationProfile?.model === currentModel
+    ? lastGenerationProfile
+    : null;
+  const modelHealth = currentModel ? modelHealthByModel?.[currentModel] : null;
+  const stabilityModeActive = currentModel ? !!stabilityModeByModel?.[currentModel]?.enabled : false;
 
   // Persist web search preference
   useEffect(() => {
@@ -336,6 +352,11 @@ export function SmartInput({ onSubmit, disabled = false, onImageGenerate, minima
     inputRef.current?.focus();
   };
 
+  const handleRecalibrate = useCallback(async () => {
+    if (!currentModel || recalibration?.running || isGenerating) return;
+    await recalibrateCurrentModel?.();
+  }, [currentModel, recalibration?.running, isGenerating, recalibrateCurrentModel]);
+
   const formatSize = (bytes) => {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -477,6 +498,40 @@ export function SmartInput({ onSubmit, disabled = false, onImageGenerate, minima
                 className="ml-auto flex items-center gap-1.5 px-3 py-1 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg text-xs font-medium transition-colors">
                 <Square size={11} />
                 Stop
+              </button>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Runtime notice (auto stability / recalibration updates) */}
+      <AnimatePresence>
+        {runtimeNotice && runtimeNotice.model === currentModel && (
+          <motion.div
+            initial={{ opacity: 0, y: 6 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 6 }}
+            className="mb-2"
+          >
+            <div className={`flex items-start gap-2.5 px-3 py-2 rounded-xl border ${
+              runtimeNotice.type === 'warning'
+                ? 'bg-amber-500/10 border-amber-500/25 text-amber-300'
+                : 'bg-emerald-500/10 border-emerald-500/25 text-emerald-300'
+            }`}>
+              {runtimeNotice.type === 'warning'
+                ? <ShieldAlert size={14} className="mt-0.5 flex-shrink-0" />
+                : <ShieldCheck size={14} className="mt-0.5 flex-shrink-0" />}
+              <div className="min-w-0 flex-1">
+                <div className="text-xs font-medium">{runtimeNotice.title}</div>
+                <div className="text-[11px] opacity-90">{runtimeNotice.message}</div>
+              </div>
+              <button
+                type="button"
+                onClick={dismissRuntimeNotice}
+                className="p-1 rounded-md hover:bg-black/20 transition-colors"
+                title="Dismiss"
+              >
+                <X size={12} />
               </button>
             </div>
           </motion.div>
@@ -665,6 +720,39 @@ export function SmartInput({ onSubmit, disabled = false, onImageGenerate, minima
               <span className="text-text-secondary truncate max-w-[180px]">{currentModel}</span>
             </span>
           )}
+          {activeProfile && (
+            <span
+              className="flex items-center gap-1 text-sky-400"
+              title={`Auto profile: ${activeProfile.mode} | ctx ${activeProfile.num_ctx ?? 'auto'} | predict ${activeProfile.num_predict ?? 'auto'} | temp ${activeProfile.temperature ?? 'auto'} | repeat ${activeProfile.repeat_penalty ?? 'auto'}`}
+            >
+              <Settings size={10} />
+              Auto {activeProfile.mode === 'compat-generate' ? 'compat' : 'chat'}
+            </span>
+          )}
+          {modelHealth?.status && (
+            <span className={`flex items-center gap-1 ${
+              modelHealth.status === 'stable'
+                ? 'text-emerald-400'
+                : modelHealth.status === 'warning'
+                  ? 'text-amber-400'
+                  : 'text-red-400'
+            }`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${
+                modelHealth.status === 'stable'
+                  ? 'bg-emerald-400'
+                  : modelHealth.status === 'warning'
+                    ? 'bg-amber-400'
+                    : 'bg-red-400'
+              }`} />
+              {modelHealth.status === 'stable' ? 'Stable' : modelHealth.status === 'warning' ? 'Guarded' : 'Unstable'}
+            </span>
+          )}
+          {stabilityModeActive && (
+            <span className="flex items-center gap-1 text-amber-400">
+              <ShieldAlert size={10} />
+              Stability mode
+            </span>
+          )}
           {contextUtilization?.utilizationPercent > 0 && (
             <span className="flex items-center gap-1">
               <span className="text-text-muted">Context:</span>
@@ -696,9 +784,27 @@ export function SmartInput({ onSubmit, disabled = false, onImageGenerate, minima
           )}
         </div>
 
-        <span className="text-[10px] text-text-muted/60">
-          Shift+Enter new line
-        </span>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleRecalibrate}
+            disabled={!currentModel || recalibration?.running || isGenerating}
+            className={`flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] border transition-colors ${
+              !currentModel || recalibration?.running || isGenerating
+                ? 'text-text-muted/40 border-border-subtle/40 cursor-not-allowed'
+                : 'text-text-muted hover:text-text-secondary border-border-subtle hover:border-border-muted hover:bg-surface-2'
+            }`}
+            title={currentModel ? 'Run quick model stability probe' : 'Select a model first'}
+          >
+            {recalibration?.running
+              ? <Loader2 size={10} className="animate-spin" />
+              : <RefreshCw size={10} />}
+            <span>{recalibration?.running ? 'Calibrating' : 'Recalibrate'}</span>
+          </button>
+          <span className="text-[10px] text-text-muted/60">
+            Shift+Enter new line
+          </span>
+        </div>
       </div>
     </div>
   );

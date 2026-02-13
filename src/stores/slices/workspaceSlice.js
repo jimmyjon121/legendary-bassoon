@@ -6,7 +6,7 @@ import { safeCall } from '../../utils/electronAPI';
 // Base instruction appended to every system prompt.
 // With /api/chat the model template handles turn boundaries, so we just need
 // to prevent small-model quirks like reasoning out loud or role-playing.
-const RESPONSE_INSTRUCTION = '\n\nIMPORTANT: Respond directly to the user. Never think out loud about policies, instructions, or what you should say. Never write "the user wants" or reason about your own response. Just answer naturally.';
+const RESPONSE_INSTRUCTION = '\n\nIMPORTANT: Respond directly to the user. Do not reason about policies or instructions. Do not write "the user wants" or narrate your own process. Just answer naturally and helpfully.';
 
 export const WORKSPACES = {
   casual: {
@@ -51,6 +51,15 @@ CRITICAL RULES:
 5. Be concise and specific. Avoid vague advice — use the actual code you can see.
 6. When generating code, match the project's existing style, patterns, and conventions.
 7. If asked to refactor or fix code, show the complete updated version, not just fragments.` + RESPONSE_INSTRUCTION
+  },
+  research: {
+    id: 'research',
+    name: 'Research',
+    icon: 'Beaker',
+    color: 'workspace-work',
+    description: 'Project-based deep research with verification',
+    defaultModel: null,
+    systemPrompt: 'You are a verification-first research assistant. Discover broadly, verify with official sources, cite evidence clearly, and avoid unsupported claims.' + RESPONSE_INSTRUCTION
   },
   nsfw: {
     id: 'nsfw',
@@ -158,6 +167,5 @@ export const createWorkspaceSlice = (set, get) => ({
     });
   },
 });
-
 
 

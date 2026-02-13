@@ -1,8 +1,33 @@
-const { app, BrowserWindow, ipcMain, globalShortcut, dialog, Menu } = require('electron');
+const electron = require('electron');
 const path = require('path');
 const crypto = require('crypto');
 const fs = require('fs');
-const { execSync } = require('child_process');
+const { execSync, spawn, spawnSync } = require('child_process');
+
+const isElectronMainProcess = Boolean(
+  electron &&
+  typeof electron === 'object' &&
+  electron.app &&
+  electron.BrowserWindow
+);
+
+if (!isElectronMainProcess) {
+  if (process.env.ELECTRON_RUN_AS_NODE && typeof electron === 'string') {
+    const cleanEnv = { ...process.env };
+    delete cleanEnv.ELECTRON_RUN_AS_NODE;
+    const rerun = spawnSync(electron, process.argv.slice(1), {
+      env: cleanEnv,
+      stdio: 'inherit',
+    });
+    process.exit(Number.isInteger(rerun.status) ? rerun.status : 1);
+  }
+
+  console.error('[FATAL] DevForge main process launched without Electron context.');
+  console.error('[FATAL] Start with `electron .` and unset ELECTRON_RUN_AS_NODE.');
+  process.exit(1);
+}
+
+const { app, BrowserWindow, ipcMain, globalShortcut, dialog, Menu } = electron;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LITE MODE: Memory optimizations for lightweight operation
@@ -30,9 +55,20 @@ let startupManager = null;
 const logPath = path.join(app.getPath('userData'), 'devforge.log');
 const logStream = fs.createWriteStream(logPath, { flags: 'a' });
 
+function normalizeLogSymbols(input) {
+  return String(input || '')
+    .replace(/âœ“|✓|✅/g, '[OK]')
+    .replace(/âœ—|✗|❌/g, '[FAIL]')
+    .replace(/âš |⚠️?|⚠/g, '[WARN]')
+    .replace(/â„¹|ℹ️?|ℹ/g, '[INFO]')
+    .replace(/ðŸ”„|🔄/g, '[RETRY]')
+    .replace(/â€“|–/g, '-');
+}
+
 function log(message, level = 'INFO') {
+  const normalizedMessage = normalizeLogSymbols(message);
   const timestamp = new Date().toISOString();
-  const logMessage = `[${timestamp}] [${level}] ${message}\n`;
+  const logMessage = `[${timestamp}] [${level}] ${normalizedMessage}\n`;
   logStream.write(logMessage);
   if (process.env.NODE_ENV !== 'production') {
     console.log(logMessage.trim());
@@ -270,9 +306,6 @@ async function ensureViteRunning() {
   
   const projectRoot = path.resolve(__dirname, '..');
   
-  // Start Vite in background
-  const { spawn } = require('child_process');
-  
   // On Windows, use the full path to npm.cmd to bypass PowerShell execution policy
   let npmCmd, npmArgs;
   if (process.platform === 'win32') {
@@ -433,14 +466,7 @@ async function createWindow() {
 
   const devUrl = viteDevServerUrl || 'http://localhost:5173';
   const distPath = path.join(__dirname, '../dist/index.html');
-  const hasBuiltApp = fs.existsSync(distPath);
-  
-  // Smart loading order:
-  // 1. If packaged (production build): Always use dist/
-  // 2. If --dev flag or DEV_MODE env: Use Vite dev server
-  // 3. If dist/ exists and is newer than src/: Use dist/
-  // 4. Fall back to dev server
-  const forceDevMode = process.argv.includes('--dev') || process.env.DEV_MODE === 'true';
+  const shouldUseDevServer = !app.isPackaged && needsDevServer();
   
   // Add webContents error handlers
   mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
@@ -458,13 +484,22 @@ async function createWindow() {
   });
 
   // Load the app
-  if (app.isPackaged) {
-    log('Loading production build from dist/');
-    mainWindow.loadFile(distPath);
-  } else {
+  // In non-packaged runs, only use Vite if `needsDevServer()` says we must
+  // (or --dev/DEV_MODE forced it). Otherwise, always load dist/ to avoid
+  // accidentally attaching to a stale localhost:5173 session.
+  if (shouldUseDevServer) {
     log(`Loading from Vite dev server: ${devUrl}`);
     mainWindow.loadURL(devUrl);
     // Dev tools can be opened manually with F12 or Ctrl+Shift+I
+  } else {
+    try {
+      // Prevent stale file:// cache from holding old split-chunk references.
+      await mainWindow.webContents.session.clearCache();
+    } catch (cacheErr) {
+      log(`Failed to clear renderer cache: ${cacheErr.message}`, 'WARN');
+    }
+    log('Loading pre-built app from dist/');
+    mainWindow.loadFile(distPath);
   }
 
   // Save window bounds on resize
@@ -475,11 +510,9 @@ async function createWindow() {
     }
   });
 
-  mainWindow.on('close', (e) => {
-    if (!isQuitting) {
-      e.preventDefault();
-      mainWindow.hide();
-    }
+  mainWindow.on('close', () => {
+    // Closing the window should end the session on desktop builds.
+    isQuitting = true;
   });
 
   // Setup Unified Ledger handlers

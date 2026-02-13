@@ -389,8 +389,7 @@ export function ModelLibrary({ onSelectModel, onClose }) {
       const start = performance.now();
       const response = await window.electronAPI.sendToLLM({
         model: modelName,
-        prompt:
-          'Benchmark request: respond with a single short word, e.g. "OK". Do not explain, only reply with that word.',
+        messages: [{ role: 'user', content: 'Benchmark request: respond with a single short word, e.g. "OK". Do not explain, only reply with that word.' }],
         system: '',
         options: {
           temperature: 0,

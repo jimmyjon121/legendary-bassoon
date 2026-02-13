@@ -18,9 +18,9 @@ function main() {
 
   // If node_modules is completely missing, do a full install
   if (!fs.existsSync(nodeModulesPath)) {
-    console.log('[ensure-deps] node_modules missing – running npm install...');
+    console.log('[ensure-deps] node_modules missing - running npm install...');
     execSync('npm install', { cwd: projectRoot, stdio: 'inherit' });
-    console.log('[ensure-deps] ✓ Done');
+    console.log('[ensure-deps] [OK] Done');
     return;
   }
 
@@ -50,27 +50,14 @@ function main() {
   }
 
   if (missing.length === 0) {
-    console.log('[ensure-deps] ✓ All dependencies present');
+    console.log('[ensure-deps] [OK] All dependencies present');
     return;
   }
 
   console.log(`[ensure-deps] Missing ${missing.length} packages: ${missing.join(', ')}`);
   console.log('[ensure-deps] Running npm install...');
   execSync('npm install', { cwd: projectRoot, stdio: 'inherit' });
-  console.log('[ensure-deps] ✓ Done');
+  console.log('[ensure-deps] [OK] Done');
 }
 
 main();
-
-
-
-
-
-
-
-
-
-
-
-
-

@@ -12,265 +12,274 @@
 
 // Model family profiles with optimal defaults
 // EXPORTED so other services can access model context capabilities
+//
+// NOTE: stopTokens have been intentionally REMOVED from all families.
+// With Ollama's /api/chat endpoint, the model's chat template already
+// handles stop tokens natively. Manually injecting stop tokens caused
+// premature truncation, broken thinking models, and conflicting behavior.
+// Only the /api/generate fallback path in ipc-handlers.js adds minimal
+// turn-leak prevention tokens (Human:, User:).
 export const MODEL_FAMILIES = {
   // ━━━ CODE MODELS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   codellama: {
     type: 'code', temperature: 0.3, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 16384, stopTokens: ['</s>', '[/INST]'],
+    maxContext: 16384,
   },
   deepseek: {
     type: 'code', temperature: 0.2, top_p: 0.95, top_k: 50, repeat_penalty: 1.05,
-    maxContext: 16384, stopTokens: ['<|endoftext|>', '<｜end▁of▁sentence｜>'],
+    maxContext: 16384,
   },
   'deepseek-coder': {
     type: 'code', temperature: 0.1, top_p: 0.95, top_k: 40, repeat_penalty: 1.0,
-    maxContext: 16384, stopTokens: ['<|endoftext|>', '<｜end▁of▁sentence｜>'],
+    maxContext: 16384,
   },
   'deepseek-r1': {
-    type: 'chat', temperature: 0.6, top_p: 0.95, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 131072, stopTokens: ['<|endoftext|>', '<｜end▁of▁sentence｜>', '</think>'],
+    type: 'reasoning', temperature: 0.6, top_p: 0.95, top_k: 40, repeat_penalty: 1.0,
+    maxContext: 131072,
   },
   'deepseek-v2': {
-    type: 'chat', temperature: 0.6, top_p: 0.95, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 131072, stopTokens: ['<|endoftext|>', '<｜end▁of▁sentence｜>'],
+    type: 'chat', temperature: 0.6, top_p: 0.95, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 131072,
   },
   'deepseek-v3': {
-    type: 'chat', temperature: 0.6, top_p: 0.95, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 131072, stopTokens: ['<|endoftext|>', '<｜end▁of▁sentence｜>'],
+    type: 'chat', temperature: 0.6, top_p: 0.95, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 131072,
   },
   starcoder: {
     type: 'code', temperature: 0.2, top_p: 0.95, top_k: 50, repeat_penalty: 1.0,
-    maxContext: 8192, stopTokens: ['<|endoftext|>'],
+    maxContext: 8192,
   },
   'starcoder2': {
     type: 'code', temperature: 0.2, top_p: 0.95, top_k: 50, repeat_penalty: 1.0,
-    maxContext: 16384, stopTokens: ['<|endoftext|>'],
+    maxContext: 16384,
   },
   codegemma: {
     type: 'code', temperature: 0.2, top_p: 0.95, top_k: 40, repeat_penalty: 1.0,
-    maxContext: 8192, stopTokens: ['<end_of_turn>', '<eos>'],
+    maxContext: 8192,
   },
   qwen2coder: {
     type: 'code', temperature: 0.2, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
-    maxContext: 131072, stopTokens: ['<|endoftext|>', '<|im_end|>'],
+    maxContext: 131072,
   },
   
   // ━━━ CHAT MODELS ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   llama: {
     type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 4096, stopTokens: ['</s>', '[/INST]'],
+    maxContext: 4096,
   },
   'llama2': {
     type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 4096, stopTokens: ['</s>', '[/INST]'],
+    maxContext: 4096,
   },
   'llama3': {
-    type: 'chat', temperature: 0.6, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 8192, stopTokens: ['<|eot_id|>', '<|end_of_text|>'],
+    type: 'chat', temperature: 0.6, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 8192,
   },
   'llama3.1': {
-    type: 'chat', temperature: 0.6, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 131072, stopTokens: ['<|eot_id|>', '<|end_of_text|>'],
+    type: 'chat', temperature: 0.6, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 131072,
   },
   'llama3.2': {
-    type: 'chat', temperature: 0.6, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 131072, stopTokens: ['<|eot_id|>', '<|end_of_text|>'],
+    type: 'chat', temperature: 0.6, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 131072,
   },
   'llama3.3': {
-    type: 'chat', temperature: 0.6, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 131072, stopTokens: ['<|eot_id|>', '<|end_of_text|>'],
+    type: 'chat', temperature: 0.6, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 131072,
   },
   mistral: {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 32768, stopTokens: ['</s>', '[/INST]'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 32768,
   },
   'mistral-nemo': {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 131072, stopTokens: ['</s>', '[/INST]'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 131072,
   },
   'mistral-small': {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 32768, stopTokens: ['</s>', '[/INST]'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 32768,
   },
   mixtral: {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 32768, stopTokens: ['</s>', '[/INST]'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 32768,
   },
   qwen: {
     type: 'chat', temperature: 0.7, top_p: 0.8, top_k: 20, repeat_penalty: 1.05,
-    maxContext: 32768, stopTokens: ['<|endoftext|>', '<|im_end|>'],
+    maxContext: 32768,
   },
   qwen2: {
     type: 'chat', temperature: 0.7, top_p: 0.8, top_k: 20, repeat_penalty: 1.05,
-    maxContext: 131072, stopTokens: ['<|endoftext|>', '<|im_end|>'],
+    maxContext: 131072,
   },
   'qwen2.5': {
     type: 'chat', temperature: 0.7, top_p: 0.8, top_k: 20, repeat_penalty: 1.05,
-    maxContext: 131072, stopTokens: ['<|endoftext|>', '<|im_end|>'],
+    maxContext: 131072,
+  },
+  'qwq': {
+    type: 'reasoning', temperature: 0.6, top_p: 0.95, top_k: 40, repeat_penalty: 1.0,
+    maxContext: 131072,
   },
   phi: {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 4096, stopTokens: ['<|endoftext|>', '<|end|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 4096,
   },
   'phi3': {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 131072, stopTokens: ['<|end|>', '<|endoftext|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 131072,
   },
   'phi4': {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 16384, stopTokens: ['<|end|>', '<|endoftext|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 16384,
   },
   gemma: {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 8192, stopTokens: ['<end_of_turn>', '<eos>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 8192,
   },
   gemma2: {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 8192, stopTokens: ['<end_of_turn>', '<eos>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 8192,
   },
   'gemma3': {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 131072, stopTokens: ['<end_of_turn>', '<eos>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 131072,
   },
   yi: {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 4096, stopTokens: ['<|endoftext|>', '<|im_end|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 4096,
   },
   'yi-1.5': {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 32768, stopTokens: ['<|endoftext|>', '<|im_end|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 32768,
   },
   vicuna: {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 4096, stopTokens: ['</s>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 4096,
   },
   solar: {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 4096, stopTokens: ['</s>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 4096,
   },
   // New 2024-2025 model families
   'command-r': {
     type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
-    maxContext: 131072, stopTokens: ['<|END_OF_TURN_TOKEN|>'],
+    maxContext: 131072,
   },
   internlm: {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 32768, stopTokens: ['<|im_end|>', '</s>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 32768,
   },
   'internlm2': {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 32768, stopTokens: ['<|im_end|>', '</s>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 32768,
   },
   glm: {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 131072, stopTokens: ['<|endoftext|>', '<|user|>', '<|observation|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 131072,
   },
   'chatglm': {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 131072, stopTokens: ['<|endoftext|>', '<|user|>', '<|observation|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 131072,
   },
   exaone: {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 32768, stopTokens: ['[|endofturn|]'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 32768,
   },
   olmo: {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 4096, stopTokens: ['<|endoftext|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 4096,
   },
   'olmo2': {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 32768, stopTokens: ['<|endoftext|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 32768,
   },
   granite: {
-    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 8192, stopTokens: ['<|endoftext|>'],
+    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 8192,
   },
   'granite-code': {
-    type: 'code', temperature: 0.2, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 131072, stopTokens: ['<|endoftext|>'],
+    type: 'code', temperature: 0.2, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 131072,
   },
   smollm: {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 8192, stopTokens: ['<|endoftext|>', '<|im_end|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 8192,
   },
   'smollm2': {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 8192, stopTokens: ['<|endoftext|>', '<|im_end|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 8192,
   },
   pixtral: {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 131072, stopTokens: ['</s>', '[/INST]'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 131072,
   },
   'llava': {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 4096, stopTokens: ['</s>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 4096,
   },
   'bakllava': {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 4096, stopTokens: ['</s>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 4096,
   },
   'moondream': {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 4096, stopTokens: ['<|endoftext|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 4096,
+  },
+  'gpt-oss': {
+    type: 'chat', temperature: 0.2, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 131072,
   },
   // Catch-all for GPT-style / generic GGUF models
   'gpt': {
-    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.15,
-    maxContext: 4096, stopTokens: ['<|endoftext|>', '<|im_end|>'],
+    type: 'chat', temperature: 0.7, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    maxContext: 4096,
   },
   
   // ━━━ CREATIVE/ROLEPLAY ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   nous: {
-    type: 'creative', temperature: 0.85, top_p: 0.95, top_k: 60, repeat_penalty: 1.15,
-    maxContext: 4096, stopTokens: ['</s>', '[/INST]'],
+    type: 'creative', temperature: 0.85, top_p: 0.95, top_k: 60, repeat_penalty: 1.1,
+    maxContext: 4096,
   },
   'hermes': {
-    type: 'creative', temperature: 0.8, top_p: 0.95, top_k: 50, repeat_penalty: 1.1,
-    maxContext: 8192, stopTokens: ['<|im_end|>'],
+    type: 'creative', temperature: 0.8, top_p: 0.95, top_k: 50, repeat_penalty: 1.05,
+    maxContext: 8192,
   },
   openhermes: {
-    type: 'creative', temperature: 0.8, top_p: 0.95, top_k: 50, repeat_penalty: 1.1,
-    maxContext: 8192, stopTokens: ['<|im_end|>'],
+    type: 'creative', temperature: 0.8, top_p: 0.95, top_k: 50, repeat_penalty: 1.05,
+    maxContext: 8192,
   },
   'dolphin': {
-    type: 'creative', temperature: 0.8, top_p: 0.95, top_k: 50, repeat_penalty: 1.1,
-    maxContext: 16384, stopTokens: ['<|im_end|>'],
+    type: 'creative', temperature: 0.8, top_p: 0.95, top_k: 50, repeat_penalty: 1.05,
+    maxContext: 16384,
   },
   neural: {
-    type: 'creative', temperature: 0.8, top_p: 0.95, top_k: 50, repeat_penalty: 1.15,
-    maxContext: 4096, stopTokens: ['</s>'],
+    type: 'creative', temperature: 0.8, top_p: 0.95, top_k: 50, repeat_penalty: 1.1,
+    maxContext: 4096,
   },
   'mythomax': {
-    type: 'creative', temperature: 0.85, top_p: 0.95, top_k: 60, repeat_penalty: 1.15,
-    maxContext: 4096, stopTokens: ['</s>'],
+    type: 'creative', temperature: 0.85, top_p: 0.95, top_k: 60, repeat_penalty: 1.1,
+    maxContext: 4096,
   },
   
   // ━━━ INSTRUCT/ASSISTANT ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   zephyr: {
-    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 8192, stopTokens: ['</s>', '<|user|>', '<|assistant|>'],
+    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 8192,
   },
   openchat: {
-    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 8192, stopTokens: ['<|end_of_turn|>'],
+    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 8192,
   },
   orca: {
-    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
-    maxContext: 4096, stopTokens: ['</s>'],
+    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
+    maxContext: 4096,
   },
   wizard: {
-    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.1,
+    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
     maxContext: 4096,
-    stopTokens: ['</s>', 'USER:', 'ASSISTANT:'],
   },
   command: {
-    type: 'instruct',
-    temperature: 0.5,
-    top_p: 0.9,
-    top_k: 40,
-    repeat_penalty: 1.05,
+    type: 'instruct', temperature: 0.5, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
     maxContext: 4096,
-    stopTokens: ['<|END_OF_TURN_TOKEN|>'],
   },
 };
 
@@ -429,6 +438,7 @@ export function parseModelName(modelName) {
     { pattern: /bakllava/i, family: 'bakllava' },
     { pattern: /llava/i, family: 'llava' },
     { pattern: /moondream/i, family: 'moondream' },
+    { pattern: /gpt[-_]?oss/i, family: 'gpt-oss' },
     
     // ── Generic models (check last) ──
     { pattern: /llama/i, family: 'llama' },
@@ -523,12 +533,14 @@ export function getOptimalSettings(modelName, workspaceType = 'casual') {
     temperature: 0.7,
     top_p: 0.9,
     top_k: 40,
-    repeat_penalty: 1.15,
+    repeat_penalty: 1.05,
     num_ctx: 4096,
     num_batch: 256,
     num_gpu: -1, // Default: all layers on GPU
     num_predict: 4096,
-    stop: [],
+    // NOTE: stop tokens are intentionally empty. With /api/chat, Ollama's
+    // chat template handles stop tokens natively. Manual injection caused
+    // premature truncation and broke thinking models.
     // Metadata for UI/debugging
     _detected: parsed,
     _source: 'default',
@@ -542,10 +554,9 @@ export function getOptimalSettings(modelName, workspaceType = 'casual') {
       temperature: familyProfile.temperature,
       top_p: familyProfile.top_p,
       top_k: familyProfile.top_k,
-      repeat_penalty: Math.max(familyProfile.repeat_penalty, 1.1),
+      repeat_penalty: familyProfile.repeat_penalty,
       // Use the family's full context capability (adaptive generation will cap it based on hardware)
       num_ctx: familyProfile.maxContext,
-      stop: [...familyProfile.stopTokens],
       _source: `family:${family}`,
       _modelType: familyProfile.type,
     };
@@ -592,9 +603,6 @@ export function getOptimalSettings(modelName, workspaceType = 'casual') {
     settings.repeat_penalty = Math.max(1.0, settings.repeat_penalty - 0.05);
     settings._source += '+workspace:creative';
   }
-  
-  // Remove duplicates from stop tokens
-  settings.stop = [...new Set(settings.stop)];
   
   return settings;
 }
@@ -693,10 +701,10 @@ export function buildOptimizedOllamaOptions(modelName, workspaceType = 'casual',
     num_batch: overrides.num_batch ?? settings.num_batch,
     num_gpu: overrides.num_gpu ?? settings.num_gpu,
     num_predict: overrides.num_predict ?? settings.num_predict,
-    stop: overrides.stop ?? settings.stop,
     // Pass metadata for debugging
     _detected: settings._detected,
     _source: settings._source,
+    _modelType: settings._modelType,
   };
 }
 
@@ -744,12 +752,11 @@ export function buildOptimizedOllamaOptionsWithInfo(modelName, workspaceType = '
     temperature: 0.7,
     top_p: 0.9,
     top_k: 40,
-    repeat_penalty: 1.15,
+    repeat_penalty: 1.05,
     num_ctx: 4096,
     num_batch: 256,
     num_gpu: -1,
     num_predict: 4096,
-    stop: [],
     _detected: parsed,
     _source: modelInfo ? 'api/show' : 'default',
   };
@@ -762,9 +769,8 @@ export function buildOptimizedOllamaOptionsWithInfo(modelName, workspaceType = '
       temperature: familyProfile.temperature,
       top_p: familyProfile.top_p,
       top_k: familyProfile.top_k,
-      repeat_penalty: Math.max(familyProfile.repeat_penalty, 1.05),
+      repeat_penalty: familyProfile.repeat_penalty,
       num_ctx: familyProfile.maxContext,
-      stop: [...familyProfile.stopTokens],
       _source: `${settings._source}+family:${family}`,
       _modelType: familyProfile.type,
     };
@@ -820,8 +826,9 @@ export function buildOptimizedOllamaOptionsWithInfo(modelName, workspaceType = '
     settings._source += '+workspace:creative';
   }
   
-  // Remove duplicates from stop tokens
-  settings.stop = [...new Set(settings.stop)];
+  // Detect thinking model (for UI and leak-detection bypass)
+  const template = modelInfo?.template || null;
+  const thinkingModel = isThinkingModel(family, modelName, template);
   
   // Apply user overrides last (explicit settings always win)
   return {
@@ -833,10 +840,10 @@ export function buildOptimizedOllamaOptionsWithInfo(modelName, workspaceType = '
     num_batch: overrides.num_batch ?? settings.num_batch,
     num_gpu: overrides.num_gpu ?? settings.num_gpu,
     num_predict: overrides.num_predict ?? settings.num_predict,
-    stop: overrides.stop ?? settings.stop,
     _detected: settings._detected,
     _source: settings._source,
     _modelType: settings._modelType,
+    _isThinkingModel: thinkingModel,
   };
 }
 
@@ -885,6 +892,8 @@ function resolveFamily(ollamaFamily, modelName) {
     'smollm2': 'smollm2',
     'exaone': 'exaone',
     'pixtral': 'pixtral',
+    'gpt-oss': 'gpt-oss',
+    'gpt_oss': 'gpt-oss',
   };
   
   if (familyMap[f]) return familyMap[f];
@@ -948,6 +957,52 @@ function normalizeQuantization(quantLevel) {
   return null;
 }
 
+/**
+ * Determine if a model is a "thinking" / reasoning model.
+ * 
+ * Thinking models (DeepSeek-R1, QwQ, Gemma3 with thinking, etc.) emit
+ * their chain-of-thought inside <think>...</think> tags. These should NOT
+ * be caught by prompt-leak detection, and their output should be rendered
+ * with the ThinkingBlock UI.
+ * 
+ * Detection is multi-layered:
+ *  1. Known reasoning families (deepseek-r1, qwq)
+ *  2. Model name heuristics (contains "thinking", "reason", "r1", "cot")
+ *  3. Ollama template inspection (contains "<think>" tag)
+ */
+export function isThinkingModel(family, modelName, template) {
+  // Layer 1: Known reasoning families
+  const thinkingFamilies = ['deepseek-r1', 'qwq'];
+  if (family && thinkingFamilies.includes(family.toLowerCase())) {
+    return true;
+  }
+  
+  // Layer 2: Name heuristics
+  if (modelName) {
+    const name = modelName.toLowerCase();
+    if (
+      name.includes('deepseek-r1') || name.includes('deepseek_r1') ||
+      name.includes('qwq') ||
+      name.includes('-thinking') || name.includes('_thinking') ||
+      name.includes('-reason') || name.includes('_reason') ||
+      name.includes('-cot') || name.includes('_cot') ||
+      name.includes(':thinking')
+    ) {
+      return true;
+    }
+  }
+  
+  // Layer 3: Ollama template inspection
+  // If the model's chat template includes <think>, it's a thinking model
+  if (template && typeof template === 'string') {
+    if (template.includes('<think>') || template.includes('{{- if .Think }}')) {
+      return true;
+    }
+  }
+  
+  return false;
+}
+
 export default {
   parseModelName,
   getOptimalSettings,
@@ -955,6 +1010,7 @@ export default {
   describeSettings,
   buildOptimizedOllamaOptions,
   buildOptimizedOllamaOptionsWithInfo,
+  isThinkingModel,
   MODEL_FAMILIES,
   QUANTIZATION_PROFILES,
   SIZE_PROFILES,

@@ -28,6 +28,7 @@ const CompareMode = lazy(() => import('./CompareMode').then(m => ({ default: m.C
 const DebateArena = lazy(() => import('./DebateArena').then(m => ({ default: m.DebateArena })));
 const CharacterStudio = lazy(() => import('../Characters/CharacterStudio').then(m => ({ default: m.CharacterStudio })));
 const AgentDashboard = lazy(() => import('../Agents/AgentDashboard').then(m => ({ default: m.AgentDashboard })));
+const ResearchWorkspace = lazy(() => import('../Research/ResearchWorkspace').then(m => ({ default: m.ResearchWorkspace })));
 const CodeWorkbench = lazy(() => import('../Code/CodeWorkbench').then(m => ({ default: m.CodeWorkbench })));
 const CasualWorkspace = lazy(() => import('./CasualWorkspace').then(m => ({ default: m.CasualWorkspace })));
 
@@ -317,7 +318,7 @@ export function ChatArea() {
         <Suspense fallback={null}>
           {showAgents && <AgentDashboard isOpen={showAgents} onClose={() => setShowAgents(false)} />}
         </Suspense>
-        <div className="flex-1 min-h-0 px-4 py-4">
+        <div className="flex-1 min-h-0 px-4 pt-2 pb-4">
           <Suspense fallback={<div className="h-full flex items-center justify-center text-text-muted">Loading...</div>}>
             <CodeWorkbench />
           </Suspense>
@@ -347,6 +348,17 @@ export function ChatArea() {
         <Suspense fallback={null}>
           {showCompare && <CompareMode isOpen={showCompare} onClose={() => setShowCompare(false)} />}
           {showDebate && <DebateArena isOpen={showDebate} onClose={() => setShowDebate(false)} />}
+        </Suspense>
+      </div>
+    );
+  }
+
+  if (currentWorkspace === 'research') {
+    return (
+      <div className="flex-1 flex flex-col h-full">
+        {showModelSelector && <ModelSelector onClose={() => toggleModelSelector()} />}
+        <Suspense fallback={<div className="h-full flex items-center justify-center text-text-muted">Loading research workspace...</div>}>
+          <ResearchWorkspace workspace={currentWorkspace} />
         </Suspense>
       </div>
     );

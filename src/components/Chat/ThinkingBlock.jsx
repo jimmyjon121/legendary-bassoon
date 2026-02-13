@@ -193,17 +193,27 @@ export function isInThinkingBlock(content) {
 export function getPartialThinking(content) {
   if (!content) return null;
   
-  // Find the last <think> tag
-  const lastOpenIndex = content.toLowerCase().lastIndexOf('<think>');
+  // Find the last <think> tag (case insensitive)
+  // We must find the index in the ORIGINAL string, not a lowercased copy,
+  // because we need to use it for substring operations on the original.
+  const lowerContent = content.toLowerCase();
+  const lastOpenIndex = lowerContent.lastIndexOf('<think>');
   if (lastOpenIndex === -1) return null;
   
-  // Check if there's a closing tag after it
+  // Get everything after the opening <think> tag
   const afterOpen = content.substring(lastOpenIndex + 7);
-  const hasClose = afterOpen.toLowerCase().includes('</think>');
+  
+  // Check if there's a closing </think> tag after it (handle partial tags during streaming)
+  const lowerAfterOpen = afterOpen.toLowerCase();
+  const hasClose = lowerAfterOpen.includes('</think>');
   
   if (hasClose) return null;
   
-  return afterOpen.trim();
+  // Also handle edge case: partial closing tag at the end during streaming
+  // e.g. "</thin" or "</thi" — don't include these in the thinking content
+  const trimmed = afterOpen.replace(/<\/thin[k]?$/i, '').trim();
+  
+  return trimmed || null;
 }
 
 export default ThinkingBlock;

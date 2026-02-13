@@ -32,43 +32,40 @@ export function TerminalPane() {
   };
 
   return (
-    <div className="h-40 flex flex-col border border-forge-border rounded-lg bg-forge-bg overflow-hidden">
-      <div className="flex items-center justify-between px-3 py-1.5 border-b border-forge-border text-[11px]">
-        <div className="flex items-center gap-2">
-          <Terminal size={12} className="text-text-muted" />
-          <span className="text-text-primary">Terminal</span>
-          {rootPath && (
-            <span className="text-[10px] text-text-muted truncate max-w-[180px]">
-              {rootPath}
-            </span>
-          )}
-        </div>
-        <div className="flex items-center gap-1">
-          <input
-            type="text"
-            value={command}
-            onChange={(e) => setCommand(e.target.value)}
-            placeholder="npm test, node script.js, etc."
-            className="input text-[11px] h-7 w-52"
-            onKeyDown={(e) => {
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                handleRun();
-              }
-            }}
-          />
-          <button
-            type="button"
-            onClick={handleRun}
-            disabled={isRunning || !command.trim()}
-            className="p-1.5 rounded bg-workspace-code/20 text-workspace-code hover:bg-workspace-code/30 disabled:opacity-60 transition-colors"
-          >
-            <Play size={12} />
-          </button>
-        </div>
+    <div className="h-full flex flex-col bg-[#000000] overflow-hidden">
+      {/* Command input bar */}
+      <div className="flex items-center gap-2 px-3 py-1.5 border-b border-[#121218] bg-[#0b0b10]">
+        {rootPath && (
+          <span className="text-[10px] text-[#608b4e] font-mono truncate max-w-[180px]">
+            {rootPath.split(/[/\\]/).pop()}
+          </span>
+        )}
+        <span className="text-[11px] text-[#808080]">$</span>
+        <input
+          type="text"
+          value={command}
+          onChange={(e) => setCommand(e.target.value)}
+          placeholder="npm test, node script.js, etc."
+          className="flex-1 bg-transparent text-[12px] font-mono text-[#cccccc] placeholder-[#555555] outline-none"
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') {
+              e.preventDefault();
+              handleRun();
+            }
+          }}
+        />
+        <button
+          type="button"
+          onClick={handleRun}
+          disabled={isRunning || !command.trim()}
+          className="px-2 py-0.5 rounded text-[10px] font-medium bg-[#007acc]/20 text-[#3daee9] hover:bg-[#007acc]/30 disabled:opacity-40 transition-colors"
+        >
+          {isRunning ? '...' : 'Run'}
+        </button>
       </div>
-      <div className="flex-1 overflow-auto font-mono text-[11px] text-text-muted px-3 py-2 whitespace-pre-wrap">
-        {output || 'Output will appear here.'}
+      {/* Output area */}
+      <div className="flex-1 overflow-auto font-mono text-[12px] text-[#cccccc] px-3 py-2 whitespace-pre-wrap leading-[1.5]">
+        {output || <span className="text-[#555555]">Terminal output will appear here.</span>}
       </div>
     </div>
   );

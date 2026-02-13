@@ -35,6 +35,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   warmupModel: (modelName) => ipcRenderer.invoke('llm:warmup', modelName),
   getModelInfo: (modelName) => ipcRenderer.invoke('llm:modelInfo', modelName),
   getRunningModels: () => ipcRenderer.invoke('llm:running'),
+  getLlmRuntimeState: () => ipcRenderer.invoke('llm:getRuntimeState'),
+  runLlmBenchmark: (payload) => ipcRenderer.invoke('llm:benchmark', payload),
+  embedTexts: (payload) => ipcRenderer.invoke('llm:embed', payload),
   
   // Image Generation (raw ComfyUI passthrough - prefer imageAuto:* or generateImage for full service)
   imageRawGenerate: (payload) => ipcRenderer.invoke('image:generate', payload),
@@ -338,6 +341,59 @@ contextBridge.exposeInMainWorld('electronAPI', {
   createAgentTask: (payload) => ipcRenderer.invoke('createAgentTask', payload),
   getAgentTask: (id) => ipcRenderer.invoke('getAgentTask', id),
   cancelAgentTask: (id) => ipcRenderer.invoke('cancelAgentTask', id),
+  agentUpdateRunProgress: (payload) => ipcRenderer.invoke('agent:updateRunProgress', payload),
+  agentGetRunProgress: () => ipcRenderer.invoke('agent:getRunProgress'),
+  onAgentRunProgress: (callback) => {
+    const handler = (_, payload) => callback(payload);
+    ipcRenderer.on('agent:runProgress', handler);
+    return () => ipcRenderer.removeListener('agent:runProgress', handler);
+  },
+
+  // ============================================
+  // Research System - Project-based multi-agent research
+  // ============================================
+  research: {
+    // Projects
+    listProjects: (workspace) => ipcRenderer.invoke('research:project:list', { workspace }),
+    getProject: (id) => ipcRenderer.invoke('research:project:get', { id }),
+    createProject: (payload) => ipcRenderer.invoke('research:project:create', payload),
+    updateProject: (payload) => ipcRenderer.invoke('research:project:update', payload),
+    deleteProject: (id) => ipcRenderer.invoke('research:project:delete', { id }),
+
+    // Project links (chats + docs)
+    linkConversation: (projectId, conversationId) =>
+      ipcRenderer.invoke('research:project:linkConversation', { projectId, conversationId }),
+    unlinkConversation: (projectId, conversationId) =>
+      ipcRenderer.invoke('research:project:unlinkConversation', { projectId, conversationId }),
+    listConversations: (projectId, workspace) =>
+      ipcRenderer.invoke('research:project:listConversations', { projectId, workspace }),
+    linkDocument: (projectId, documentId) =>
+      ipcRenderer.invoke('research:project:linkDocument', { projectId, documentId }),
+    unlinkDocument: (projectId, documentId) =>
+      ipcRenderer.invoke('research:project:unlinkDocument', { projectId, documentId }),
+    listDocuments: (projectId, workspace) =>
+      ipcRenderer.invoke('research:project:listDocuments', { projectId, workspace }),
+
+    // Runs
+    startRun: (payload) => ipcRenderer.invoke('research:run:start', payload),
+    pauseRun: (runId) => ipcRenderer.invoke('research:run:pause', { runId }),
+    resumeRun: (runId) => ipcRenderer.invoke('research:run:resume', { runId }),
+    cancelRun: (runId) => ipcRenderer.invoke('research:run:cancel', { runId }),
+    steerRun: (runId, instruction) => ipcRenderer.invoke('research:run:steer', { runId, instruction }),
+    getRun: (runId) => ipcRenderer.invoke('research:run:get', { runId }),
+    listRuns: (projectId, limit) => ipcRenderer.invoke('research:run:list', { projectId, limit }),
+    onRunProgress: (callback) => {
+      const handler = (_, payload) => callback(payload);
+      ipcRenderer.on('research:runProgress', handler);
+      return () => ipcRenderer.removeListener('research:runProgress', handler);
+    },
+
+    // Records / Evidence
+    listRecords: (projectId, runId, limit) =>
+      ipcRenderer.invoke('research:records:list', { projectId, runId, limit }),
+    getRecord: (recordId) => ipcRenderer.invoke('research:records:get', { recordId }),
+    exportRecords: (payload) => ipcRenderer.invoke('research:records:export', payload),
+  },
 
   // ============================================
   // Terminal Commands
@@ -388,6 +444,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   toolIsCommandAllowed: (command) => 
     ipcRenderer.invoke('tool:isCommandAllowed', { command }),
 
+  // Tooling health / registration status
+  toolHealth: () =>
+    ipcRenderer.invoke('tool:health'),
+
   // ============================================
   // Model Inspection & Auto-tuning
   // ============================================
@@ -406,6 +466,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // Analyze model and get full experience profile
   analyzeModelExperience: (modelPath) => ipcRenderer.invoke('model:analyzeExperience', modelPath),
+
+  // Back-compat alias used by older frontend hooks
+  getModelExperience: (modelPath) => ipcRenderer.invoke('model:getExperience', modelPath),
   
   // Load model with experience profile applied
   loadModelWithProfile: (modelPath) => ipcRenderer.invoke('model:loadWithProfile', modelPath),

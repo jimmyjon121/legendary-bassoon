@@ -10,6 +10,8 @@ echo.
 
 :: Kill any stuck electron processes
 taskkill /f /im electron.exe >nul 2>&1
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr :5173 ^| findstr LISTENING') do taskkill /f /pid %%a >nul 2>&1
+set ELECTRON_RUN_AS_NODE=
 
 :: Open project in Cursor (or VS Code as fallback)
 echo [*] Opening project in editor...
@@ -44,8 +46,6 @@ call npm run dev
 echo.
 echo [*] DevForge closed.
 pause
-
-
 
 
 

@@ -5,7 +5,7 @@
 import { v4 as uuidv4 } from 'uuid';
 import { isElectron, safeCall } from '../../utils/electronAPI';
 import { useAdaptiveGeneration } from '../../services/adaptiveGeneration';
-import { buildOptimizedOllamaOptions, buildOptimizedOllamaOptionsWithInfo, parseModelName, MODEL_FAMILIES } from '../../services/modelOptimizer';
+import { buildOptimizedOllamaOptionsWithInfo, parseModelName, MODEL_FAMILIES } from '../../services/modelOptimizer';
 import { useEditorStore } from '../editorStore';
 import { buildFullContext } from '../../services/fullContextBuilder';
 import { WEB_SEARCH_TOOL_PROMPT, isWebSearchAvailable, processSearchCalls, hasSearchCalls } from '../../services/webSearchTool';
@@ -28,9 +28,11 @@ function cleanupResponse(text) {
     /\n{1,3}human:.*$/s,
     /\n{1,3}user:.*$/s,
     /\n{1,3}Assistant:$/,
+    /<\|return\|>.*$/s,
     /<\|im_end\|>.*$/s,
     /<\|eot_id\|>.*$/s,
     /<\|end\|>.*$/s,
+    /<\|start\|>user.*$/s,
   ];
   for (const pattern of turnPatterns) {
     cleaned = cleaned.replace(pattern, '');
@@ -211,6 +213,35 @@ function detectPromptLeak(text) {
   return quickPatterns.some(p => check.includes(p));
 }
 
+function detectDegenerateLoopText(text) {
+  if (!text || text.length < 260) return false;
+
+  const sample = text.slice(-700).toLowerCase();
+  const words = sample.match(/[a-z']+/g) || [];
+  if (words.length < 70) return false;
+
+  const uniqueRatio = new Set(words).size / words.length;
+  if (uniqueRatio < 0.26) return true;
+
+  const lines = sample
+    .split('\n')
+    .map((line) => line.replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim())
+    .filter((line) => line.length > 24);
+
+  if (lines.length < 4) return false;
+
+  const counts = new Map();
+  for (const line of lines) {
+    const key = line.slice(0, 90);
+    counts.set(key, (counts.get(key) || 0) + 1);
+    if ((counts.get(key) || 0) >= 3) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 // Get the actual context window size for a model (not the conservative default)
 function getActualContextSize(modelName) {
   try {
@@ -220,6 +251,255 @@ function getActualContextSize(modelName) {
     }
   } catch (e) {}
   return 16384; // Reasonable default for unknown models
+}
+
+// Some imported GGUF models ship with a raw Ollama template ("{{ .Prompt }}"),
+// which means /api/chat won't apply role-aware turn formatting reliably.
+function isRawPromptTemplate(template) {
+  if (!template || typeof template !== 'string') return false;
+  const normalized = template.replace(/\s+/g, ' ').trim();
+  if (!normalized) return false;
+  return (
+    normalized === '{{ .Prompt }}' ||
+    normalized === '{{.Prompt}}' ||
+    (normalized.includes('{{ .Prompt') && !normalized.includes('.Messages'))
+  );
+}
+
+function buildGenerateFallbackPrompt(systemPrompt, chatMessages = []) {
+  const parts = [];
+  const sys = (systemPrompt || '').trim();
+  if (sys) {
+    parts.push(`System: ${sys}`);
+  }
+
+  for (const msg of chatMessages) {
+    const role = msg.role === 'assistant' ? 'Assistant' : 'User';
+    const content = (msg.content || '').trim();
+    if (!content) continue;
+    parts.push(`${role}: ${content}`);
+  }
+
+  parts.push('Assistant:');
+  return parts.join('\n\n');
+}
+
+// GPT-OSS models expect Harmony-style turn tokens.
+// Using plain "User:/Assistant:" prompt text produces broken continuations.
+function buildGptOssHarmonyPrompt(systemPrompt, chatMessages = []) {
+  const parts = [];
+  const sys = (systemPrompt || '').trim() || 'You are a helpful assistant.';
+
+  parts.push(`<|start|>system<|message|>${sys}<|end|>`);
+
+  for (const msg of chatMessages) {
+    const content = (msg.content || '').trim();
+    if (!content) continue;
+
+    if (msg.role === 'assistant') {
+      parts.push(`<|start|>assistant<|channel|>final<|message|>${content}<|end|>`);
+    } else {
+      parts.push(`<|start|>user<|message|>${content}<|end|>`);
+    }
+  }
+
+  parts.push('<|start|>assistant<|channel|>final<|message|>');
+  return parts.join('');
+}
+
+function isLikelyCodeRequest(text) {
+  if (!text || typeof text !== 'string') return false;
+  const raw = text.trim();
+  if (!raw) return false;
+
+  const lower = raw.toLowerCase();
+  const isGreetingOnly = /^(hi|hello|hey|yo|sup|how are you|good morning|good afternoon|good evening)[!.? ]*$/i.test(raw);
+  if (isGreetingOnly) return false;
+
+  const codeSignals = [
+    /```/,
+    /`[^`]+`/,
+    /\b(error|exception|stack trace|traceback|bug|debug|refactor|compile|build|test|lint|runtime|syntax)\b/i,
+    /\b(function|class|method|variable|array|object|sql|regex|api|endpoint|npm|yarn|pnpm|typescript|javascript|python|java|c\+\+|c#|rust|go|docker|kubernetes)\b/i,
+    /\b(file|folder|module|import|export|component|hook|state|props|schema|migration)\b/i,
+    /[{}()[\];]/,
+  ];
+  return codeSignals.some((pattern) => pattern.test(lower) || pattern.test(raw));
+}
+
+function isWorkspaceAwarenessQuery(text) {
+  if (!text || typeof text !== 'string') return false;
+  const lower = text.toLowerCase();
+  const signals = [
+    'see the workspace',
+    'see my workspace',
+    'see the project',
+    'see my project',
+    'see my files',
+    'access my files',
+    'access the files',
+    'working on',
+    'what file',
+    'current file',
+    'open file',
+    'open tab',
+    'project structure',
+    'do you see',
+    'can you see',
+    'do you have access',
+    'can you access',
+  ];
+  return signals.some((s) => lower.includes(s));
+}
+
+function buildCodeWorkspaceContractPrompt(basePrompt, editorState, codeContextHints, projectContextMode) {
+  const rootPath = codeContextHints?.rootPath || editorState?.rootPath || '';
+  const activeFilePath = codeContextHints?.currentFile || editorState?.activeFilePath || '';
+  const openFilesList = Array.isArray(codeContextHints?.openFilesList) && codeContextHints.openFilesList.length > 0
+    ? codeContextHints.openFilesList
+    : Object.keys(editorState?.openFiles || {});
+
+  const activeFileName = activeFilePath ? activeFilePath.split(/[/\\]/).pop() : null;
+  const projectName = rootPath ? rootPath.split(/[/\\]/).pop() : null;
+
+  const contextModeLabel = projectContextMode === 'light'
+    ? 'lightweight workspace context (paths/tree/open-tabs)'
+    : 'full workspace context (including active file contents)';
+
+  const contract = [
+    '## IDE Context Contract',
+    'You are operating inside DevForge Code workspace with IDE context attached.',
+    `Context mode: ${contextModeLabel}.`,
+    rootPath ? `Project root: ${rootPath}` : 'Project root: (not loaded yet)',
+    activeFilePath ? `Active file path: ${activeFilePath}` : 'Active file path: (none)',
+    activeFileName ? `Active file name: ${activeFileName}` : null,
+    projectName ? `Project name: ${projectName}` : null,
+    openFilesList.length > 0
+      ? `Open files (${openFilesList.length}): ${openFilesList.map((p) => p.split(/[/\\]/).pop()).slice(0, 12).join(', ')}`
+      : 'Open files: (none)',
+    'Never claim you cannot access files/workspace when this context is present. Use this context directly.',
+  ].filter(Boolean).join('\n');
+
+  return `${basePrompt}\n\n${contract}`;
+}
+
+function isWorkspaceContextDenialResponse(text) {
+  if (!text || typeof text !== 'string') return false;
+  const lower = text.toLowerCase();
+  const denialPatterns = [
+    'i do not have physical presence',
+    "i don't have physical presence",
+    'i do not have access to your files',
+    "i don't have access to your files",
+    'i cannot access your files',
+    "i can't access your files",
+    'i cannot see your files',
+    "i can't see your files",
+    'please paste your code',
+    'as an ai model developed by',
+    'i do not have direct access to your workspace',
+    "i don't have direct access to your workspace",
+  ];
+  return denialPatterns.some((pattern) => lower.includes(pattern));
+}
+
+function buildWorkspaceContextRecovery(editorState, codeContextHints) {
+  const rootPath = codeContextHints?.rootPath || editorState?.rootPath || '';
+  const activeFilePath = codeContextHints?.currentFile || editorState?.activeFilePath || '';
+  const openFilesList = Array.isArray(codeContextHints?.openFilesList) && codeContextHints.openFilesList.length > 0
+    ? codeContextHints.openFilesList
+    : Object.keys(editorState?.openFiles || {});
+
+  const projectName = rootPath ? rootPath.split(/[/\\]/).pop() : 'your project';
+  const activeFileName = activeFilePath ? activeFilePath.split(/[/\\]/).pop() : null;
+
+  const lines = [
+    `I can see your DevForge workspace context for ${projectName}.`,
+    activeFileName ? `Current active file: \`${activeFileName}\`.` : null,
+    openFilesList.length > 0 ? `Open files visible: ${openFilesList.length}.` : null,
+    'Ask me to inspect, refactor, debug, or explain this code and I will use the workspace context directly.',
+  ].filter(Boolean);
+
+  return lines.join(' ');
+}
+
+function normalizeChatMessages(messages = [], fallbackUserMessage = '') {
+  const normalized = [];
+
+  for (const msg of messages) {
+    const role = msg?.role === 'assistant' ? 'assistant' : (msg?.role === 'user' ? 'user' : null);
+    const content = typeof msg?.content === 'string' ? msg.content.trim() : '';
+    if (!role || !content) continue;
+
+    const prev = normalized[normalized.length - 1];
+    if (prev && prev.role === role) {
+      prev.content = `${prev.content}\n\n${content}`;
+    } else {
+      normalized.push({ role, content });
+    }
+  }
+
+  while (normalized.length > 0 && normalized[0].role === 'assistant') {
+    normalized.shift();
+  }
+
+  const fallback = typeof fallbackUserMessage === 'string' ? fallbackUserMessage.trim() : '';
+  if (fallback && (normalized.length === 0 || normalized[normalized.length - 1].role !== 'user')) {
+    normalized.push({ role: 'user', content: fallback });
+  }
+
+  // If we have only user turns (common after cancelled generations), keep
+  // just the latest user prompt to avoid confusing raw-template models.
+  const hasAssistantTurn = normalized.some((msg) => msg.role === 'assistant');
+  if (!hasAssistantTurn && normalized.length > 1) {
+    const latestUser = [...normalized].reverse().find((msg) => msg.role === 'user');
+    return latestUser ? [latestUser] : normalized;
+  }
+
+  return normalized;
+}
+
+function isSimpleGreeting(text) {
+  if (!text || typeof text !== 'string') return false;
+  return /^(hi|hello|hey|yo|sup|how are you|good morning|good afternoon|good evening|what's up|whats up)[!.? ]*$/i
+    .test(text.trim());
+}
+
+function buildRawModelHistory(messages = [], latestUserMessage = '') {
+  const normalized = normalizeChatMessages(messages, latestUserMessage);
+  if (normalized.length === 0) return [];
+
+  const lastUserIndex = (() => {
+    for (let i = normalized.length - 1; i >= 0; i--) {
+      if (normalized[i].role === 'user') return i;
+    }
+    return -1;
+  })();
+
+  if (lastUserIndex < 0) return normalized.slice(-1);
+
+  const latestUserText = normalized[lastUserIndex]?.content || latestUserMessage || '';
+  // For short greetings/small talk, ignore previous assistant turns.
+  // This prevents one bad generation from poisoning follow-up hellos.
+  if (isSimpleGreeting(latestUserText)) {
+    return [normalized[lastUserIndex]];
+  }
+
+  const result = [];
+  const previous = normalized[lastUserIndex - 1];
+  if (previous && previous.role === 'assistant') {
+    const previousText = previous.content || '';
+    const previousLooksNoisy =
+      previousText.length > 1200 ||
+      detectPromptLeak(previousText) ||
+      /<\|start\|>|<\|message\|>|assistant:|user:/i.test(previousText);
+
+    if (!previousLooksNoisy) {
+      result.push(previous);
+    }
+  }
+  result.push(normalized[lastUserIndex]);
+  return result;
 }
 
 export const createMessageSlice = (set, get) => ({
@@ -249,9 +529,164 @@ export const createMessageSlice = (set, get) => ({
     lastUpdated: null,
   },
 
+  // Runtime visibility + stabilization state (per model)
+  lastGenerationProfile: null,
+  modelHealthByModel: {},
+  stabilityModeByModel: {},
+  runtimeNotice: null,
+  recalibration: {
+    running: false,
+    model: null,
+    startedAt: null,
+    result: null,
+    error: null,
+  },
+
+  dismissRuntimeNotice: () => set({ runtimeNotice: null }),
+
   setImageGenSettings: (settings) => set(state => ({
     imageGenSettings: { ...state.imageGenSettings, ...settings }
   })),
+
+  recalibrateCurrentModel: async () => {
+    const { currentModel } = get();
+    if (!currentModel) {
+      return { success: false, error: 'No model selected' };
+    }
+    if (!isElectron() || !window.electronAPI?.sendToLLM) {
+      return { success: false, error: 'Recalibration requires Electron runtime' };
+    }
+
+    const startedAt = Date.now();
+    set({
+      recalibration: {
+        running: true,
+        model: currentModel,
+        startedAt,
+        result: null,
+        error: null,
+      },
+      runtimeNotice: null,
+    });
+
+    const tests = [
+      { id: 'greeting', prompt: 'hello' },
+      { id: 'general', prompt: 'In one short sentence, what is binary search?' },
+      { id: 'code', prompt: 'Write a tiny JavaScript function add(a, b) that returns the sum.' },
+    ];
+
+    const probeOptions = {
+      temperature: 0.2,
+      top_p: 0.9,
+      top_k: 40,
+      repeat_penalty: 1.1,
+      num_ctx: 4096,
+      num_predict: 180,
+    };
+
+    try {
+      let failures = 0;
+      const details = [];
+
+      for (const test of tests) {
+        const response = await window.electronAPI.sendToLLM({
+          model: currentModel,
+          messages: [{ role: 'user', content: test.prompt }],
+          options: probeOptions,
+        });
+
+        const text = String(response?.response || response?.message?.content || '').trim();
+        const isLeak = detectPromptLeak(text);
+        const isLoop = detectDegenerateLoopText(text);
+        const tooLong = text.length > 2200;
+        const empty = text.length < 2;
+        const failed = isLeak || isLoop || tooLong || empty;
+
+        if (failed) failures += 1;
+        details.push({
+          id: test.id,
+          chars: text.length,
+          failed,
+          reasons: [isLeak && 'leak', isLoop && 'loop', tooLong && 'too_long', empty && 'empty'].filter(Boolean),
+        });
+      }
+
+      const status = failures === 0 ? 'stable' : (failures === 1 ? 'warning' : 'unstable');
+      const enableStability = failures > 0;
+      const nowIso = new Date().toISOString();
+
+      set((state) => ({
+        modelHealthByModel: {
+          ...state.modelHealthByModel,
+          [currentModel]: {
+            status,
+            failures,
+            total: tests.length,
+            checkedAt: nowIso,
+            source: 'recalibration',
+            details,
+          },
+        },
+        stabilityModeByModel: {
+          ...state.stabilityModeByModel,
+          [currentModel]: {
+            enabled: enableStability,
+            reason: enableStability ? 'recalibration_failed' : 'recalibration_passed',
+            updatedAt: nowIso,
+          },
+        },
+        runtimeNotice: enableStability
+          ? {
+              id: `runtime-${Date.now()}`,
+              type: 'warning',
+              model: currentModel,
+              title: 'Stability mode enabled',
+              message: `${currentModel.split(':')[0]} failed ${failures}/${tests.length} probe checks. Safer runtime settings are now active.`,
+              createdAt: nowIso,
+            }
+          : {
+              id: `runtime-${Date.now()}`,
+              type: 'success',
+              model: currentModel,
+              title: 'Model recalibrated',
+              message: `${currentModel.split(':')[0]} passed probe checks. Running in normal auto mode.`,
+              createdAt: nowIso,
+            },
+        recalibration: {
+          running: false,
+          model: currentModel,
+          startedAt: null,
+          result: {
+            status,
+            failures,
+            total: tests.length,
+          },
+          error: null,
+        },
+      }));
+
+      return { success: true, status, failures, total: tests.length };
+    } catch (error) {
+      set({
+        recalibration: {
+          running: false,
+          model: currentModel,
+          startedAt: null,
+          result: null,
+          error: error.message,
+        },
+        runtimeNotice: {
+          id: `runtime-${Date.now()}`,
+          type: 'warning',
+          model: currentModel,
+          title: 'Recalibration failed',
+          message: error.message || 'Failed to probe model stability',
+          createdAt: new Date().toISOString(),
+        },
+      });
+      return { success: false, error: error.message };
+    }
+  },
 
   /**
    * Regenerate the last assistant message.
@@ -511,7 +946,10 @@ export const createMessageSlice = (set, get) => ({
     }
     
     // Proceed to generate
-    await get()._generateResponse(content, conversationId, { webSearchEnabled: !!extra.webSearchEnabled });
+    await get()._generateResponse(content, conversationId, {
+      webSearchEnabled: !!extra.webSearchEnabled,
+      codeContext: extra.codeContext || null,
+    });
   },
 
   /**
@@ -522,6 +960,9 @@ export const createMessageSlice = (set, get) => ({
     const { currentModel, currentWorkspace, workspaceSettings } = get();
     const isNsfw = currentWorkspace === 'nsfw';
     const nsfwPassword = get().nsfwPassword;
+    
+    // Real model metadata from /api/show (populated on model switch in modelSlice)
+    const currentModelInfo = get().currentModelInfo || null;
 
     // Ensure we're in generating state
     if (!get().isGenerating) {
@@ -541,6 +982,26 @@ export const createMessageSlice = (set, get) => ({
     const messages = get().messages;
 
     let systemPrompt = workspaceSettings[currentWorkspace]?.systemPrompt || '';
+    const userAskedForCode = isLikelyCodeRequest(userContent);
+    const userAskedForWorkspaceContext = isWorkspaceAwarenessQuery(userContent);
+    const codeContextHints = genOptions.codeContext || null;
+    const editorStateSnapshot = currentWorkspace === 'code' ? useEditorStore.getState() : null;
+    const hasLoadedProject = currentWorkspace === 'code'
+      ? Boolean(editorStateSnapshot?.rootPath || codeContextHints?.rootPath)
+      : false;
+    const shouldInjectProjectContext = currentWorkspace === 'code' ? hasLoadedProject : false;
+    const projectContextMode = currentWorkspace === 'code'
+      ? (userAskedForCode || userAskedForWorkspaceContext ? 'full' : 'light')
+      : 'off';
+
+    if (currentWorkspace === 'code') {
+      systemPrompt = buildCodeWorkspaceContractPrompt(
+        systemPrompt,
+        editorStateSnapshot,
+        codeContextHints,
+        projectContextMode
+      );
+    }
     // NOTE: Soul personalization overlay intentionally disabled.
     // We want a "raw model" conversation (plus useful context like memory/RAG/project),
     // without any personality injection.
@@ -550,31 +1011,58 @@ export const createMessageSlice = (set, get) => ({
       systemPrompt = systemPrompt + '\n\n' + WEB_SEARCH_TOOL_PROMPT;
     }
 
+    // Raw-template models need conservative context and prompt shaping.
+    const modelTemplate = currentModelInfo?.template || null;
+    const modelNameLower = (currentModel || '').toLowerCase();
+    const likelyRawTemplateModel =
+      modelNameLower.includes('gpt-oss') ||
+      modelNameLower.includes('gpt_oss') ||
+      modelNameLower.includes('rawprompt');
+    const useGptOssHarmony = modelNameLower.includes('gpt-oss') || modelNameLower.includes('gpt_oss');
+    const useGenerateCompatibility = isRawPromptTemplate(modelTemplate) || likelyRawTemplateModel;
+    const rawContextCap = useGenerateCompatibility
+      ? (useGptOssHarmony ? 8192 : 16384)
+      : Number.POSITIVE_INFINITY;
+
     // === FULL CONTEXT BUILDING ===
     // Use the model's ACTUAL context window, not a conservative default
-    const actualContextSize = getActualContextSize(currentModel);
+    // Prefer real metadata from /api/show when available
+    const actualContextSize = Math.min(
+      currentModelInfo?.contextLength || getActualContextSize(currentModel),
+      rawContextCap
+    );
     let chatMessages = []; // Structured messages for /api/chat
     let messagesIncluded = 0;
     
     // Try full context builder first (includes memories, soul, project, RAG, etc.)
     if (isElectron()) {
       try {
-        const editorState = currentWorkspace === 'code' ? useEditorStore.getState() : null;
-        
+        const editorState = currentWorkspace === 'code' && shouldInjectProjectContext
+          ? (editorStateSnapshot || useEditorStore.getState())
+          : null;
+
+        const mergedProjectContext = editorState ? {
+          rootPath: codeContextHints?.rootPath || editorState.rootPath,
+          activeFilePath: codeContextHints?.currentFile || editorState.activeFilePath,
+          openFiles: editorState.openFiles,
+          files: editorState.files,
+          projectAnalysis: editorState.projectContext,
+          openFilesList: Array.isArray(codeContextHints?.openFilesList)
+            ? codeContextHints.openFilesList
+            : Object.keys(editorState.openFiles || {}),
+        } : null;
+
         const fullContext = await buildFullContext({
           modelName: currentModel,
           workspace: currentWorkspace,
           conversationId,
           messages,
           systemPromptBase: systemPrompt,
-          projectContext: editorState ? {
-            rootPath: editorState.rootPath,
-            activeFilePath: editorState.activeFilePath,
-            openFiles: editorState.openFiles,
-            files: editorState.files,
-            projectAnalysis: editorState.projectContext,
-          } : null,
+          projectContext: mergedProjectContext,
+          projectContextMode,
           ragQuery: userContent,
+          // Pass real context length from /api/show so we don't have to guess
+          modelContextLength: currentModelInfo?.contextLength || null,
         });
         
         if (fullContext) {
@@ -638,20 +1126,38 @@ export const createMessageSlice = (set, get) => ({
       messagesIncluded = recentMessages.length;
 
       // Fallback: inject minimal code context even if fullContextBuilder failed
-      if (currentWorkspace === 'code') {
+      if (currentWorkspace === 'code' && shouldInjectProjectContext) {
         try {
-          const editorState = useEditorStore.getState();
-          if (editorState.activeFilePath && editorState.openFiles[editorState.activeFilePath]) {
-            const fileContent = editorState.openFiles[editorState.activeFilePath].content || '';
+          const editorState = editorStateSnapshot || useEditorStore.getState();
+          const rootPath = codeContextHints?.rootPath || editorState?.rootPath || '';
+          const activeFilePath = codeContextHints?.currentFile || editorState?.activeFilePath || '';
+          const openFilesList = Array.isArray(codeContextHints?.openFilesList)
+            ? codeContextHints.openFilesList
+            : Object.keys(editorState?.openFiles || {});
+
+          if (projectContextMode === 'full' && activeFilePath && editorState.openFiles[activeFilePath]) {
+            const fileContent = editorState.openFiles[activeFilePath].content || '';
             const lines = fileContent.split('\n');
-            const truncated = lines.length > 300 
+            const truncated = lines.length > 300
               ? lines.slice(0, 200).join('\n') + `\n// ... ${lines.length - 200} more lines ...`
               : fileContent;
-            systemPrompt += `\n\n## Active File: ${editorState.activeFilePath}\n\`\`\`\n${truncated}\n\`\`\``;
+            systemPrompt += `\n\n## Active File: ${activeFilePath}\n\`\`\`\n${truncated}\n\`\`\``;
+          } else {
+            const lightSummary = [
+              '## Workspace Snapshot',
+              rootPath ? `Project root: ${rootPath}` : 'Project root: (not loaded)',
+              activeFilePath ? `Active file: ${activeFilePath}` : 'Active file: (none)',
+              openFilesList.length > 0 ? `Open files (${openFilesList.length}): ${openFilesList.slice(0, 12).join(', ')}` : 'Open files: (none)',
+            ].join('\n');
+            systemPrompt += `\n\n${lightSummary}`;
           }
         } catch (_) { /* ignore */ }
       }
     }
+
+    // Normalize role alternation and trim malformed turns (common after cancelled streams).
+    chatMessages = normalizeChatMessages(chatMessages, userContent);
+    messagesIncluded = chatMessages.length;
     
     // Periodically update conversation summary and extract memories
     if (isElectron() && messages.length > 0 && messages.length % 15 === 0) {
@@ -667,7 +1173,6 @@ export const createMessageSlice = (set, get) => ({
     
     // Layer 1: Model optimizer with real metadata from /api/show
     // If we have real model info from Ollama, use it; otherwise name-parsing fallback
-    const currentModelInfo = get().currentModelInfo || null;
     let options = buildOptimizedOllamaOptionsWithInfo(currentModel, workspaceType, currentModelInfo);
     
     // Use the actual model context size, but don't exceed what the optimizer determined
@@ -691,9 +1196,16 @@ export const createMessageSlice = (set, get) => ({
         options.num_batch = autoTuneResult.batchSize;
       }
       
-      // GPU layers: auto-tuner determines if we can fit the full model
+      // GPU layers: accept both numeric and semantic tuner outputs.
       if (typeof autoTuneResult.gpuLayers === 'number') {
         options.num_gpu = autoTuneResult.gpuLayers;
+      } else if (typeof autoTuneResult.gpuLayers === 'string') {
+        const gpuMode = autoTuneResult.gpuLayers.toLowerCase();
+        if (gpuMode === 'all' || gpuMode === 'most') {
+          options.num_gpu = -1;
+        } else if (gpuMode === 'partial') {
+          options.num_gpu = Math.max(8, Math.round((options.num_ctx || 4096) / 1024));
+        }
       }
       
       // KV cache precision: q8_0 or q4_0 to fit larger contexts in VRAM
@@ -800,6 +1312,21 @@ export const createMessageSlice = (set, get) => ({
       }
     }
 
+    // === THINKING MODEL DETECTION ===
+    // Thinking models (DeepSeek-R1, QwQ, etc.) emit reasoning in <think> tags.
+    // We must NOT apply prompt-leak detection to their output, because their
+    // chain-of-thought looks exactly like "meta-reasoning" to our detectors.
+    const _isThinkingModel = options._isThinkingModel || false;
+    if (_isThinkingModel) {
+      console.log(`[LLM] Thinking model detected — disabling prompt-leak detection, enabling <think> tag parsing`);
+    }
+    
+    // Compatibility mode: raw-template models (template "{{ .Prompt }}")
+    // should use /api/generate with an explicit role-formatted prompt.
+    if (useGenerateCompatibility) {
+      console.log('[LLM] Raw template model detected — using /api/generate compatibility mode');
+    }
+
     // === STREAM RESPONSE ===
     let fullResponse = '';
     const channel = `llm:stream:${Date.now()}`;
@@ -819,7 +1346,6 @@ export const createMessageSlice = (set, get) => ({
     
     // === REPETITION LOOP DETECTION ===
     // Track recent output to detect when the model gets stuck in a loop
-    let repetitionCheckBuffer = '';
     const REPETITION_WINDOW = 200; // chars to check
     const REPETITION_THRESHOLD = 0.7; // 70% similarity = loop detected
     let loopDetected = false;
@@ -836,10 +1362,22 @@ export const createMessageSlice = (set, get) => ({
       }
       return (matches / recent.length) > REPETITION_THRESHOLD;
     };
+
+    const detectDegenerateLoop = (text) => detectDegenerateLoopText(text);
     
     // Also detect if model starts generating conversation turns
     const detectLeakedTurns = (text) => {
-      const turnPatterns = ['\nHuman:', '\nUser:', '\n\nHuman:', '\n\nUser:', '\n### User\n', '\n### User'];
+      const turnPatterns = [
+        '\nHuman:',
+        '\nUser:',
+        '\n\nHuman:',
+        '\n\nUser:',
+        '\n### User\n',
+        '\n### User',
+        '<|start|>user',
+        '<|start|>assistant',
+        '<|return|>',
+      ];
       for (const pattern of turnPatterns) {
         const idx = text.indexOf(pattern);
         if (idx > 0) return idx;
@@ -849,10 +1387,46 @@ export const createMessageSlice = (set, get) => ({
     
     // Track whether we've already checked for prompt leak (only need to check early on)
     let promptLeakChecked = false;
+    let stabilityTriggered = false;
+
+    const enableStabilityMode = (reason) => {
+      if (stabilityTriggered) return;
+      stabilityTriggered = true;
+      const nowIso = new Date().toISOString();
+      const shortModel = (currentModel || 'model').split(':')[0];
+
+      set((state) => ({
+        stabilityModeByModel: {
+          ...state.stabilityModeByModel,
+          [currentModel]: {
+            enabled: true,
+            reason,
+            updatedAt: nowIso,
+            source: 'auto-fallback',
+          },
+        },
+        modelHealthByModel: {
+          ...state.modelHealthByModel,
+          [currentModel]: {
+            status: 'unstable',
+            reason,
+            checkedAt: nowIso,
+            source: 'generation',
+          },
+        },
+        runtimeNotice: {
+          id: `runtime-${Date.now()}`,
+          type: 'warning',
+          model: currentModel,
+          title: 'Stability mode enabled',
+          message: `${shortModel} produced unstable output (${reason}). DevForge switched to safer settings automatically.`,
+          createdAt: nowIso,
+        },
+      }));
+    };
     
     // Attach vision images to the last user message (for /api/chat)
-    if (visionImages && chatMessages.length > 0) {
-      const lastUserIdx = chatMessages.length - 1;
+    if (!useGenerateCompatibility && visionImages && chatMessages.length > 0) {
       // Find the last user message to attach images
       for (let i = chatMessages.length - 1; i >= 0; i--) {
         if (chatMessages[i].role === 'user') {
@@ -870,10 +1444,64 @@ export const createMessageSlice = (set, get) => ({
         cleanOptions[key] = value;
       }
     }
+
+    // Raw-template compatibility safety caps:
+    // keep context and prediction lengths conservative to avoid runaway
+    // continuations on untemplated GGUF imports (especially GPT-OSS).
+    if (useGenerateCompatibility) {
+      const greetingLike = isSimpleGreeting(userContent);
+      const cappedCtx = useGptOssHarmony ? 8192 : 16384;
+      const cappedPredict = greetingLike ? 96 : (useGptOssHarmony ? 384 : 768);
+
+      if (!Number.isFinite(cleanOptions.num_ctx) || cleanOptions.num_ctx > cappedCtx) {
+        cleanOptions.num_ctx = cappedCtx;
+      }
+      if (!Number.isFinite(cleanOptions.num_predict) || cleanOptions.num_predict > cappedPredict) {
+        cleanOptions.num_predict = cappedPredict;
+      }
+
+      cleanOptions.repeat_penalty = Math.max(1.1, cleanOptions.repeat_penalty || 1.05);
+      if (greetingLike) {
+        cleanOptions.temperature = Math.min(Math.max(cleanOptions.temperature ?? 0.2, 0.2), 0.35);
+      }
+
+      console.warn(
+        `[LLM Compat] ${currentModel} ctx=${cleanOptions.num_ctx} predict=${cleanOptions.num_predict} greeting=${greetingLike}`
+      );
+    }
+
+    const stabilityModeActive = !!get().stabilityModeByModel?.[currentModel]?.enabled;
+    if (stabilityModeActive) {
+      cleanOptions.temperature = Math.min(cleanOptions.temperature ?? 0.7, 0.35);
+      cleanOptions.repeat_penalty = Math.max(cleanOptions.repeat_penalty || 1.05, 1.12);
+      cleanOptions.top_p = Math.min(cleanOptions.top_p ?? 0.9, 0.92);
+      cleanOptions.num_predict = Math.min(
+        cleanOptions.num_predict ?? 4096,
+        userAskedForCode ? 512 : 320
+      );
+      if (isSimpleGreeting(userContent)) {
+        cleanOptions.num_predict = Math.min(cleanOptions.num_predict, 96);
+      }
+    }
+
+    const runtimeProfile = {
+      model: currentModel,
+      mode: useGenerateCompatibility ? 'compat-generate' : 'chat',
+      num_ctx: cleanOptions.num_ctx ?? null,
+      num_predict: cleanOptions.num_predict ?? null,
+      temperature: cleanOptions.temperature ?? null,
+      repeat_penalty: cleanOptions.repeat_penalty ?? null,
+      num_gpu: typeof cleanOptions.num_gpu === 'number' ? cleanOptions.num_gpu : null,
+      flash_attn: !!cleanOptions.flash_attn,
+      kv_cache_type: cleanOptions.kv_cache_type || null,
+      stabilityMode: stabilityModeActive,
+      updatedAt: new Date().toISOString(),
+    };
     
-    console.log(`[LLM] Sending to Ollama (${modelSource}):`, {
+    console.log(`[LLM] Sending to Ollama (${modelSource}${useGenerateCompatibility ? '+compat:generate' : '+chat'}):`, {
       model: currentModel,
       num_ctx: cleanOptions.num_ctx,
+      num_predict: cleanOptions.num_predict,
       num_batch: cleanOptions.num_batch,
       num_gpu: cleanOptions.num_gpu,
       temperature: cleanOptions.temperature,
@@ -881,15 +1509,71 @@ export const createMessageSlice = (set, get) => ({
       flash_attn: cleanOptions.flash_attn,
       kv_cache_type: cleanOptions.kv_cache_type,
       messagesCount: chatMessages.length,
+      isThinkingModel: _isThinkingModel,
+      stabilityMode: stabilityModeActive,
     });
     
+    // Store thinking model flag in generation metadata for UI components
+    set(state => ({
+      lastGenerationProfile: runtimeProfile,
+      generationMetadata: {
+        ...state.generationMetadata,
+        isThinkingModel: _isThinkingModel,
+        stabilityMode: stabilityModeActive,
+      }
+    }));
+    
+    const streamPayload = useGenerateCompatibility
+      ? (() => {
+          const compatSystemPrompt = useGptOssHarmony
+            ? (
+              userAskedForCode
+                ? 'You are a precise coding assistant. Give direct, practical answers with runnable code when asked.'
+                : 'You are a helpful assistant. Reply naturally and directly in a concise way.'
+            )
+            : systemPrompt;
+
+          const compatOptions = useGptOssHarmony
+            ? {
+                ...cleanOptions,
+                stop: Array.from(new Set([
+                  ...(Array.isArray(cleanOptions.stop) ? cleanOptions.stop : []),
+                  '<|return|>',
+                  '<|end|>',
+                  '<|start|>',
+                ])),
+              }
+            : cleanOptions;
+          const compatMessages = useGptOssHarmony
+            ? buildRawModelHistory(chatMessages, userContent)
+            : chatMessages;
+
+          return {
+            model: currentModel,
+            prompt: useGptOssHarmony
+              ? buildGptOssHarmonyPrompt(compatSystemPrompt, compatMessages)
+              : buildGenerateFallbackPrompt(systemPrompt, chatMessages),
+            options: compatOptions,
+            lane: 'lane_interactive',
+            workloadType: 'chat',
+            allowFallback: true,
+            priority: -20,
+            ...(visionImages ? { images: visionImages } : {}),
+          };
+        })()
+      : {
+          model: currentModel,
+          messages: chatMessages,
+          system: systemPrompt,
+          options: cleanOptions,
+          lane: 'lane_interactive',
+          workloadType: 'chat',
+          allowFallback: true,
+          priority: -20,
+        };
+
     const cleanup = window.electronAPI.streamFromLLM(
-      {
-        model: currentModel,
-        messages: chatMessages,
-        system: systemPrompt,
-        options: cleanOptions,
-      },
+      streamPayload,
       (chunk) => {
         if (chunk.done) {
           if (!get().isGenerating) return;
@@ -908,11 +1592,20 @@ export const createMessageSlice = (set, get) => ({
             // Ignore
           }
 
-          set({
+          set((state) => ({
             isGenerating: false,
             currentStreamChannel: null,
             generationMetadata: { stage: 'idle', startedAt: null, chars: 0, tokensEstimated: 0, tokensPerSecond: 0 },
-          });
+            modelHealthByModel: {
+              ...state.modelHealthByModel,
+              [currentModel]: {
+                status: stabilityModeActive ? 'warning' : 'stable',
+                reason: stabilityModeActive ? 'stability_mode_active' : 'last_generation_ok',
+                checkedAt: new Date().toISOString(),
+                source: 'generation',
+              },
+            },
+          }));
 
           // === WEB SEARCH EXECUTION ===
           // Check if the AI output contains [SEARCH: ...] calls and process them
@@ -933,12 +1626,38 @@ export const createMessageSlice = (set, get) => ({
           }
 
           // === RESPONSE CLEANUP: Strip any leaked prompt artifacts ===
-          fullResponse = cleanupResponse(fullResponse);
+          // For thinking models, only do lightweight cleanup (turn markers, echo)
+          // but skip the aggressive prompt-leak stripping which would destroy <think> content.
+          if (_isThinkingModel) {
+            // Just trim turn markers and echo, preserve <think> blocks
+            const turnPatterns = [
+              /\n{1,3}Human:.*$/s,
+              /\n{1,3}User:.*$/s,
+              /\n{1,3}human:.*$/s,
+              /\n{1,3}user:.*$/s,
+              /\n{1,3}Assistant:$/,
+            ];
+            for (const pattern of turnPatterns) {
+              fullResponse = fullResponse.replace(pattern, '');
+            }
+            fullResponse = fullResponse.replace(/^Assistant:\s*/i, '').trim();
+          } else {
+            fullResponse = cleanupResponse(fullResponse);
+          }
           
           // If cleanup stripped everything (entire response was leaked reasoning), 
           // provide a fallback so the user doesn't see an empty bubble
           if (!fullResponse || fullResponse.length < 5) {
             fullResponse = 'Hello! How can I help you today?';
+          }
+
+          // If a coding model denies workspace access despite IDE context, recover with
+          // a deterministic workspace-aware response instead of surfacing the denial.
+          if (currentWorkspace === 'code' && shouldInjectProjectContext && isWorkspaceContextDenialResponse(fullResponse)) {
+            fullResponse = buildWorkspaceContextRecovery(
+              editorStateSnapshot || useEditorStore.getState(),
+              codeContextHints
+            );
           }
 
           finalizeAssistantMessage();
@@ -1059,9 +1778,9 @@ export const createMessageSlice = (set, get) => ({
           let shouldAbort = false;
           
           // 0) Check for prompt leak / meta-reasoning
-          // Check aggressively: start at 40 chars, keep checking up to 800 chars.
-          // Abort as soon as leak is detected and we have enough to strip.
-          if (!promptLeakChecked && fullResponse.length >= 40) {
+          // SKIP for thinking models: their reasoning output looks like meta-reasoning
+          // to our detectors, but it's legitimate chain-of-thought content.
+          if (!_isThinkingModel && !promptLeakChecked && fullResponse.length >= 40) {
             if (detectPromptLeak(fullResponse)) {
               console.warn('[LLM] Detected prompt leak / meta-reasoning at', fullResponse.length, 'chars');
               
@@ -1069,6 +1788,7 @@ export const createMessageSlice = (set, get) => ({
               if (fullResponse.length > 150) {
                 promptLeakChecked = true;
                 fullResponse = stripPromptLeak(fullResponse);
+                enableStabilityMode('prompt_leak');
                 shouldAbort = true;
               }
               // Under 150 chars -- wait a bit more to see if there's a valid first line
@@ -1085,6 +1805,7 @@ export const createMessageSlice = (set, get) => ({
             if (leakPos > 0) {
               fullResponse = fullResponse.slice(0, leakPos).trimEnd();
               console.warn('[LLM] Detected leaked conversation turn, truncating response');
+              enableStabilityMode('turn_leak');
               shouldAbort = true;
             }
           }
@@ -1095,8 +1816,16 @@ export const createMessageSlice = (set, get) => ({
               console.warn('[LLM] Detected repetition loop, aborting generation');
               const halfWindow = Math.floor(REPETITION_WINDOW / 2);
               fullResponse = fullResponse.slice(0, -halfWindow).trimEnd();
+              enableStabilityMode('repetition_loop');
               shouldAbort = true;
             }
+          }
+          // 3) Detect softer semantic loops with tiny vocabulary and repeated lines
+          if (!shouldAbort && detectDegenerateLoop(fullResponse)) {
+            console.warn('[LLM] Detected degenerate loop pattern, aborting generation');
+            fullResponse = fullResponse.trimEnd();
+            enableStabilityMode('degenerate_loop');
+            shouldAbort = true;
           }
           
           if (shouldAbort) {

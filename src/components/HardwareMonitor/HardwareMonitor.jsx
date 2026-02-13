@@ -323,9 +323,9 @@ export function HardwareMonitorCompact({ className = '' }) {
                   <p className="text-[9px] text-white/25 uppercase">Status</p>
                   <p className={`text-[10px] font-medium ${
                     stats.npu.modelLoaded ? 'text-cyan-400' :
-                    stats.npu.serverRunning ? 'text-amber-400' : 'text-white/35'
+                    stats.npu.serverRunning ? 'text-emerald-400' : 'text-white/35'
                   }`}>
-                    {stats.npu.modelLoaded ? 'Active' : stats.npu.serverRunning ? 'Starting' : 'Standby'}
+                    {stats.npu.modelLoaded ? 'Active' : stats.npu.serverRunning ? 'Ready' : 'Standby'}
                   </p>
                 </div>
                 <div className="p-2 rounded-md bg-white/[0.015]">

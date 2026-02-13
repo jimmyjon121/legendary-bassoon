@@ -19,6 +19,15 @@ export default defineConfig(({ mode }) => ({
     target: 'esnext', // Modern browsers only
     rollupOptions: {
       output: {
+        // Electron loads from file://, so stable names avoid stale hashed-chunk lookups
+        // when a background session survives a rebuild.
+        entryFileNames: 'assets/[name].js',
+        chunkFileNames: 'assets/[name].js',
+        assetFileNames: (assetInfo) => {
+          const ext = path.extname(assetInfo.name || '');
+          const name = path.basename(assetInfo.name || 'asset', ext);
+          return `assets/${name}${ext}`;
+        },
         manualChunks: {
           // Vendor chunks - loaded once, cached
           'vendor-react': ['react', 'react-dom'],

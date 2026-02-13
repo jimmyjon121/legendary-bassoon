@@ -1,105 +1,166 @@
 /**
- * Auto-build script for DevForge
- * 
- * This script checks if the app needs to be built and builds it if necessary.
- * It runs before `npm start` to ensure the app is always ready to run.
- * 
- * Build conditions:
- * 1. dist/ folder doesn't exist → build
- * 2. dist/ is older than src/ → build
- * 3. package.json changed → build
+ * Auto-build gate for app mode.
+ *
+ * Why this exists:
+ * - `npm run app` loads `dist/` in Electron.
+ * - Timestamp-only checks can fail when clocks/files have skewed mtimes.
+ *
+ * Strategy:
+ * - Build a deterministic source signature from watched inputs.
+ * - Compare against `dist/.build-meta.json`.
+ * - Rebuild only when signature changes (or dist is missing).
  */
 
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { execSync } = require('child_process');
 
 const projectRoot = path.resolve(__dirname, '..');
 const distPath = path.join(projectRoot, 'dist');
 const distIndexPath = path.join(distPath, 'index.html');
-const srcPath = path.join(projectRoot, 'src');
-const packageJsonPath = path.join(projectRoot, 'package.json');
+const buildMetaPath = path.join(distPath, '.build-meta.json');
 
-console.log('🔍 Checking if build is needed...');
+const WATCH_TARGETS = [
+  'src',
+  'public',
+  'index.html',
+  'vite.config.mjs',
+  'package.json',
+  'package-lock.json',
+];
 
-// Check if dist exists
-if (!fs.existsSync(distIndexPath)) {
-  console.log('📦 dist/ not found - building app...');
-  runBuild();
-  process.exit(0);
+const IGNORE_DIRS = new Set(['node_modules', '.git', 'dist']);
+
+console.log('Checking if build is needed...');
+
+function safeExists(relOrAbsPath) {
+  const full = path.isAbsolute(relOrAbsPath)
+    ? relOrAbsPath
+    : path.join(projectRoot, relOrAbsPath);
+  return fs.existsSync(full) ? full : null;
 }
 
-// Get the newest file modification time in src/
-function getNewestMtime(dir, newest = 0) {
-  try {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      const fullPath = path.join(dir, entry.name);
-      if (entry.isDirectory()) {
-        // Skip node_modules and hidden dirs
-        if (!entry.name.startsWith('.') && entry.name !== 'node_modules') {
-          newest = getNewestMtime(fullPath, newest);
-        }
-      } else {
-        const stat = fs.statSync(fullPath);
-        if (stat.mtimeMs > newest) {
-          newest = stat.mtimeMs;
-        }
-      }
+function listFilesRecursive(absPath, bucket = []) {
+  const entries = fs.readdirSync(absPath, { withFileTypes: true });
+  for (const entry of entries) {
+    const full = path.join(absPath, entry.name);
+    if (entry.isDirectory()) {
+      if (IGNORE_DIRS.has(entry.name)) continue;
+      listFilesRecursive(full, bucket);
+    } else if (entry.isFile()) {
+      bucket.push(full);
     }
-  } catch (e) {
-    // Ignore errors
   }
-  return newest;
+  return bucket;
 }
 
-// Get dist build time
-const distStat = fs.statSync(distIndexPath);
-const distMtime = distStat.mtimeMs;
-
-// Get newest source file time
-const srcMtime = getNewestMtime(srcPath);
-
-// Get package.json time
-const packageStat = fs.statSync(packageJsonPath);
-const packageMtime = packageStat.mtimeMs;
-
-// Check if rebuild needed
-const newestSource = Math.max(srcMtime, packageMtime);
-
-if (newestSource > distMtime) {
-  const ageMinutes = Math.round((newestSource - distMtime) / 60000);
-  console.log(`📦 Source files are newer than build (${ageMinutes}min) - rebuilding...`);
-  runBuild();
-} else {
-  console.log('✅ Build is up-to-date - launching app...');
+function toRel(absPath) {
+  return path.relative(projectRoot, absPath).replace(/\\/g, '/');
 }
 
-function runBuild() {
-  console.log('🔨 Running vite build...');
+function computeSourceSignature() {
+  const files = [];
+
+  for (const target of WATCH_TARGETS) {
+    const resolved = safeExists(target);
+    if (!resolved) continue;
+
+    const stat = fs.statSync(resolved);
+    if (stat.isDirectory()) {
+      listFilesRecursive(resolved, files);
+    } else if (stat.isFile()) {
+      files.push(resolved);
+    }
+  }
+
+  const normalized = files
+    .map((fullPath) => {
+      const stat = fs.statSync(fullPath);
+      return `${toRel(fullPath)}|${stat.size}|${Math.floor(stat.mtimeMs)}`;
+    })
+    .sort();
+
+  const hash = crypto
+    .createHash('sha256')
+    .update(normalized.join('\n'))
+    .digest('hex');
+
+  return {
+    hash,
+    fileCount: normalized.length,
+  };
+}
+
+function readBuildMeta() {
   try {
-    execSync('npm run build:app', { 
-      cwd: projectRoot, 
+    if (!fs.existsSync(buildMetaPath)) return null;
+    const raw = fs.readFileSync(buildMetaPath, 'utf8');
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
+}
+
+function writeBuildMeta(meta) {
+  fs.mkdirSync(distPath, { recursive: true });
+  fs.writeFileSync(buildMetaPath, JSON.stringify(meta, null, 2), 'utf8');
+}
+
+function shouldRebuild() {
+  if (!fs.existsSync(distIndexPath)) {
+    return { needed: true, reason: 'dist_missing' };
+  }
+
+  const current = computeSourceSignature();
+  const previous = readBuildMeta();
+
+  if (!previous || !previous.hash) {
+    return { needed: true, reason: 'meta_missing', current };
+  }
+
+  if (previous.hash !== current.hash) {
+    return { needed: true, reason: 'source_changed', current, previous };
+  }
+
+  return { needed: false, reason: 'up_to_date', current, previous };
+}
+
+function runBuild(currentSignature) {
+  console.log('Running vite build...');
+  try {
+    execSync('npm run build:app', {
+      cwd: projectRoot,
       stdio: 'inherit',
-      env: { ...process.env, NODE_ENV: 'production' }
+      env: { ...process.env, NODE_ENV: 'production' },
     });
-    console.log('✅ Build complete!');
+
+    const signature = currentSignature || computeSourceSignature();
+    writeBuildMeta({
+      hash: signature.hash,
+      fileCount: signature.fileCount,
+      builtAt: new Date().toISOString(),
+      tool: 'build-if-needed',
+      version: 2,
+    });
+    console.log('Build complete!');
   } catch (error) {
-    console.error('❌ Build failed:', error.message);
+    console.error(`Build failed: ${error.message}`);
     console.log('');
-    console.log('💡 Tip: You can still run in dev mode with: npm run dev');
+    console.log('Tip: You can still run in dev mode with: npm run dev');
     process.exit(1);
   }
 }
 
-
-
-
-
-
-
-
-
-
-
-
+const decision = shouldRebuild();
+if (decision.needed) {
+  const reasonMap = {
+    dist_missing: 'dist output missing',
+    meta_missing: 'build metadata missing',
+    source_changed: 'source signature changed',
+  };
+  console.log(`Rebuilding app (${reasonMap[decision.reason] || decision.reason})...`);
+  runBuild(decision.current);
+} else {
+  console.log('Build is up-to-date - launching app...');
+}

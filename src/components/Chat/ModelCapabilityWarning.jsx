@@ -17,6 +17,7 @@ const WORKSPACE_CAPABILITIES = {
   casual: ['generalChat', 'creative', 'reasoning'],
   work: ['generalChat', 'reasoning', 'codeExplanation'],
   code: ['codeGeneration', 'codeFix', 'codeExplanation'],
+  research: ['generalChat', 'reasoning'],
   nsfw: ['creative', 'roleplay'],
 };
 
@@ -80,6 +81,8 @@ export function ModelCapabilityWarning() {
         recommendedWorkspace = 'code';
       } else if (primaryStrength === 'roleplay' || primaryStrength === 'creative') {
         recommendedWorkspace = capabilities.roleplay > 0.8 ? 'nsfw' : 'casual';
+      } else if (primaryStrength === 'reasoning') {
+        recommendedWorkspace = 'research';
       } else {
         recommendedWorkspace = 'casual';
       }

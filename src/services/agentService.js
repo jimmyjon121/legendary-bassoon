@@ -165,34 +165,56 @@ export async function generateAgentReply(prompt, context) {
 
 export function generateAutonomousPlan(request, context) {
   const now = Date.now();
+  const task = String(request || '').toLowerCase();
+  const broadBuild =
+    (/build|create|make|develop|ship/.test(task) && /app|studio|platform|tool|assistant/.test(task)) ||
+    /like .* but better|vibe coding|clone/.test(task);
+
+  const steps = [
+    {
+      id: safeId('step'),
+      title: 'Understand current state',
+      owner: 'architect',
+      description: `Map ${context?.filePath || 'project root'} and identify constraints.`,
+      status: 'pending',
+    },
+  ];
+
+  if (broadBuild) {
+    steps.push({
+      id: safeId('step'),
+      title: 'Clarify defaults (if needed)',
+      owner: 'architect',
+      description: 'Ask only blocking questions, otherwise continue with smart defaults.',
+      status: 'pending',
+    });
+  }
+
+  steps.push(
+    {
+      id: safeId('step'),
+      title: 'Implement changes',
+      owner: 'coder',
+      description: broadBuild
+        ? 'Run continuous multi-pass build loop (foundation -> core -> polish) until baseline is complete.'
+        : 'Modify code with guardrails + capture diff preview.',
+      status: 'pending',
+    },
+    {
+      id: safeId('step'),
+      title: 'Self review',
+      owner: 'review',
+      description: 'Run lint/test, summarize impacts, propose follow-ups.',
+      status: 'pending',
+    }
+  );
+
   return {
     id: safeId('plan'),
     createdAt: now,
     request,
     context,
-    steps: [
-      {
-        id: safeId('step'),
-        title: 'Understand current state',
-        owner: 'architect',
-        description: `Map ${context?.filePath || 'target file'} and identify constraints.`,
-        status: 'ready',
-      },
-      {
-        id: safeId('step'),
-        title: 'Implement changes',
-        owner: 'coder',
-        description: 'Modify code with guardrails + capture diff preview.',
-        status: 'blocked',
-      },
-      {
-        id: safeId('step'),
-        title: 'Self review',
-        owner: 'review',
-        description: 'Run lint/test, summarize impacts, propose follow-ups.',
-        status: 'blocked',
-      },
-    ],
+    steps,
   };
 }
 
@@ -243,4 +265,3 @@ export const agentService = {
 };
 
 export default agentService;
-

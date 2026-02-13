@@ -1,4 +1,4 @@
-import React, { useState, useEffect, Suspense, lazy, memo } from 'react';
+﻿import React, { useState, useEffect, Suspense, lazy, memo } from 'react';
 import { X, Settings, Server, Image, Shield, Keyboard, FolderOpen, Loader, Cpu, Zap, Bug } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { api } from '../../utils/electronAPI';
@@ -620,7 +620,7 @@ function LLMSettings({ settings, setSettings, onSelectFolder }) {
           <div>
             <h4 className="text-sm font-medium text-text-primary">Ollama Service</h4>
             <p className="text-xs text-text-muted">
-              Installed: {ollamaStatus?.installed ? 'Yes' : 'No'} • Running:{' '}
+              Installed: {ollamaStatus?.installed ? 'Yes' : 'No'} â€¢ Running:{' '}
               {ollamaStatus?.running ? 'Yes' : 'No'}
             </p>
           </div>
@@ -778,7 +778,7 @@ function LMStudioScanner() {
       <div className="flex items-center justify-between">
         <div>
           <h4 className="text-sm font-medium text-text-primary flex items-center gap-2">
-            <span className="text-lg">🗂️</span> LM Studio Models
+            <span className="text-lg">ðŸ—‚ï¸</span> LM Studio Models
           </h4>
           <p className="text-xs text-text-muted">
             Scan and import models from your LM Studio installation
@@ -870,19 +870,19 @@ function LMStudioScanner() {
                     </div>
                     <div className="text-[10px] text-text-muted flex items-center gap-2">
                       <span>{model.sizeFormatted}</span>
-                      <span className="opacity-50">•</span>
+                      <span className="opacity-50">â€¢</span>
                       <span className="truncate">{model.parentFolder}</span>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
                     {result?.success ? (
                       <span className="text-status-success text-xs flex items-center gap-1">
-                        <span className="w-4 h-4 rounded-full bg-status-success/20 flex items-center justify-center">✓</span>
+                        <span className="w-4 h-4 rounded-full bg-status-success/20 flex items-center justify-center">âœ“</span>
                         Imported
                       </span>
                     ) : result ? (
                       <span className="text-status-error text-xs flex items-center gap-1" title={result.error}>
-                        <span className="w-4 h-4 rounded-full bg-status-error/20 flex items-center justify-center">✗</span>
+                        <span className="w-4 h-4 rounded-full bg-status-error/20 flex items-center justify-center">âœ—</span>
                         Failed
                       </span>
                     ) : isCurrentlyImporting ? (
@@ -1022,7 +1022,7 @@ function NPUModelConverter() {
                   i === step ? 'bg-amber-500 text-black animate-pulse' :
                   i < step ? 'bg-status-success text-white' : 'bg-forge-elevated'
                 }`}>
-                  {i < step ? '✓' : i + 1}
+                  {i < step ? 'âœ“' : i + 1}
                 </span>
                 <span className="font-medium">{s.label}</span>
                 <span className="text-[10px] text-text-muted">{s.desc}</span>
@@ -1124,7 +1124,7 @@ function NPUModelConverter() {
           }`}>
             {conversionResult.success ? (
               <div>
-                <div className="font-medium text-status-success mb-1">✓ Conversion Successful!</div>
+                <div className="font-medium text-status-success mb-1">âœ“ Conversion Successful!</div>
                 <div className="text-text-muted">
                   Output saved to: <code className="bg-forge-bg px-1 rounded">{conversionResult.outputPath}</code>
                 </div>
@@ -1134,7 +1134,7 @@ function NPUModelConverter() {
               </div>
             ) : conversionResult.needsSetup ? (
               <div>
-                <div className="font-medium text-amber-400 mb-1">⚠️ OpenVINO Setup Required</div>
+                <div className="font-medium text-amber-400 mb-1">âš ï¸ OpenVINO Setup Required</div>
                 <div className="text-text-muted mb-2">
                   {conversionResult.error}
                 </div>
@@ -1153,7 +1153,7 @@ function NPUModelConverter() {
               </div>
             ) : (
               <div>
-                <div className="font-medium text-status-error mb-1">✗ Conversion Failed</div>
+                <div className="font-medium text-status-error mb-1">âœ— Conversion Failed</div>
                 <div className="text-text-muted whitespace-pre-wrap">{conversionResult.error}</div>
                 {conversionResult.stderr && (
                   <details className="mt-2">
@@ -1381,15 +1381,15 @@ function ImageSettings({ settings, setSettings }) {
         <div className="grid grid-cols-3 gap-3">
           <div className="p-2 rounded bg-forge-surface border border-forge-border">
             <div className="text-xs font-medium text-text-primary">ComfyUI</div>
-            <div className="text-[10px] text-text-muted">Port 8188 • Recommended</div>
+            <div className="text-[10px] text-text-muted">Port 8188 â€¢ Recommended</div>
           </div>
           <div className="p-2 rounded bg-forge-surface border border-forge-border">
             <div className="text-xs font-medium text-text-primary">A1111 WebUI</div>
-            <div className="text-[10px] text-text-muted">Port 7860 • Use --api flag</div>
+            <div className="text-[10px] text-text-muted">Port 7860 â€¢ Use --api flag</div>
           </div>
           <div className="p-2 rounded bg-forge-surface border border-forge-border">
             <div className="text-xs font-medium text-text-primary">Fooocus</div>
-            <div className="text-[10px] text-text-muted">Port 7865 • Simple UI</div>
+            <div className="text-[10px] text-text-muted">Port 7865 â€¢ Simple UI</div>
           </div>
         </div>
       </div>
@@ -1400,19 +1400,19 @@ function ImageSettings({ settings, setSettings }) {
         <div className="text-xs text-text-muted space-y-2">
           <div className="flex justify-between items-center p-2 bg-forge-surface rounded">
             <span className="font-medium text-text-secondary">SD 1.5</span>
-            <span>512×512 • 20 steps • CFG 7</span>
+            <span>512Ã—512 â€¢ 20 steps â€¢ CFG 7</span>
           </div>
           <div className="flex justify-between items-center p-2 bg-forge-surface rounded">
             <span className="font-medium text-text-secondary">SDXL</span>
-            <span>1024×1024 • 25 steps • CFG 7</span>
+            <span>1024Ã—1024 â€¢ 25 steps â€¢ CFG 7</span>
           </div>
           <div className="flex justify-between items-center p-2 bg-forge-surface rounded">
             <span className="font-medium text-text-secondary">Flux</span>
-            <span>1024×1024 • 20 steps • CFG 1</span>
+            <span>1024Ã—1024 â€¢ 20 steps â€¢ CFG 1</span>
           </div>
           <div className="flex justify-between items-center p-2 bg-forge-surface rounded">
             <span className="font-medium text-text-secondary">SD 3</span>
-            <span>1024×1024 • 28 steps • CFG 4.5</span>
+            <span>1024Ã—1024 â€¢ 28 steps â€¢ CFG 4.5</span>
           </div>
         </div>
         <p className="text-[10px] text-text-muted mt-2">
@@ -1513,9 +1513,9 @@ function PrivacySettings({ settings, setSettings, onClose }) {
           <div className="p-4 rounded-lg bg-forge-bg border border-forge-border">
             <div className="flex items-center justify-between gap-3">
               <div>
-                <p className="text-sm text-text-primary">Local‑only mode</p>
+                <p className="text-sm text-text-primary">Localâ€‘only mode</p>
                 <p className="text-xs text-text-muted mt-1">
-                  When enabled, DevForge will block all non‑localhost network requests.
+                  When enabled, DevForge will block all nonâ€‘localhost network requests.
                 </p>
               </div>
               <button
@@ -1528,7 +1528,7 @@ function PrivacySettings({ settings, setSettings, onClose }) {
                     : 'bg-forge-bg border-forge-border text-text-secondary'
                 }`}
               >
-                {updatingLocalOnly ? 'Updating…' : localOnly ? 'Enabled' : 'Disabled'}
+                {updatingLocalOnly ? 'Updatingâ€¦' : localOnly ? 'Enabled' : 'Disabled'}
               </button>
             </div>
           </div>
@@ -1557,7 +1557,7 @@ function PrivacySettings({ settings, setSettings, onClose }) {
                 ) : (
                   <span>
                     {externalCount} external request{externalCount !== 1 && 's'};{' '}
-                    {blockedExternal} blocked by local‑only mode.
+                    {blockedExternal} blocked by localâ€‘only mode.
                   </span>
                 )}
               </div>
@@ -1576,7 +1576,7 @@ function PrivacySettings({ settings, setSettings, onClose }) {
             onClick={() => setShowVaultAccess(true)}
             className="w-full text-center py-3 text-[11px] text-text-muted/50 hover:text-text-muted transition-colors"
           >
-            ···
+            Â·Â·Â·
           </button>
         ) : (
           <div className="space-y-3">
@@ -1820,7 +1820,7 @@ function DebugSettings() {
           {running ? (
             <>
               <Loader size={14} className="animate-spin" />
-              Running diagnostics…
+              Running diagnosticsâ€¦
             </>
           ) : (
             <>
@@ -1872,8 +1872,35 @@ function HardwareSettings() {
   const [runningModels, setRunningModels] = React.useState([]);
   const [warmingUp, setWarmingUp] = React.useState(false);
   const [warmupModel, setWarmupModel] = React.useState('');
+  const [warmupReport, setWarmupReport] = React.useState(null);
+  const [runtimeState, setRuntimeState] = React.useState(null);
+  const [benchmarkRunning, setBenchmarkRunning] = React.useState(false);
+  const [benchmarkResult, setBenchmarkResult] = React.useState(null);
   const currentModel = useAppStore((state) => state.currentModel);
   const availableModels = useAppStore((state) => state.availableModels);
+
+  const formatBytes = React.useCallback((bytes) => {
+    const value = Number(bytes || 0);
+    if (!Number.isFinite(value) || value <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let size = value;
+    let unitIdx = 0;
+    while (size >= 1024 && unitIdx < units.length - 1) {
+      size /= 1024;
+      unitIdx += 1;
+    }
+    return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[unitIdx]}`;
+  }, []);
+
+  const refreshRuntimeState = React.useCallback(async () => {
+    if (!window.electronAPI?.getLlmRuntimeState) return;
+    try {
+      const state = await window.electronAPI.getLlmRuntimeState();
+      setRuntimeState(state || null);
+    } catch (error) {
+      console.warn('Failed to refresh runtime state:', error);
+    }
+  }, []);
 
   React.useEffect(() => {
     // Load current settings
@@ -1918,35 +1945,54 @@ function HardwareSettings() {
           const running = await window.electronAPI.getRunningModels();
           setRunningModels(running || []);
         }
+        await refreshRuntimeState();
       } catch (error) {
         console.error('Failed to load hardware settings:', error);
       }
     };
     loadSettings();
-  }, []);
+
+    const interval = setInterval(() => {
+      loadSettings();
+    }, 8000);
+
+    return () => clearInterval(interval);
+  }, [refreshRuntimeState]);
   
   // Warmup/preload model onto GPU
   const handleWarmupModel = async (modelName) => {
     if (!modelName || warmingUp) return;
     setWarmingUp(true);
+    setWarmupModel(modelName);
     try {
       const result = await window.electronAPI?.warmupModel(modelName);
+      setWarmupReport(result || null);
       if (result?.success) {
         // Refresh running models
         const running = await window.electronAPI?.getRunningModels();
         setRunningModels(running || []);
+        await refreshRuntimeState();
+        const vram = result?.offloadEvidence?.sizeVram || 0;
+        const backendLabel = result?.backend || 'backend';
+        const evidenceLabel = result?.offloadEvidence?.verified
+          ? `Verified GPU offload (${formatBytes(vram)} in VRAM)`
+          : `Warmup finished on ${backendLabel}`;
         // eslint-disable-next-line no-alert
-        alert(`Model "${modelName}" loaded to GPU successfully!`);
+        alert(`Model "${modelName}" warmup completed.\n${evidenceLabel}`);
       } else {
+        await refreshRuntimeState();
+        const reason = result?.fallbackReason || result?.error || 'Unknown error';
         // eslint-disable-next-line no-alert
-        alert(`Failed to warmup model: ${result?.error || 'Unknown error'}`);
+        alert(`Warmup did not verify GPU offload.\nReason: ${reason}`);
       }
     } catch (error) {
       console.error('Warmup failed:', error);
+      await refreshRuntimeState();
       // eslint-disable-next-line no-alert
       alert(`Warmup failed: ${error.message}`);
     } finally {
       setWarmingUp(false);
+      setWarmupModel('');
     }
   };
 
@@ -1977,8 +2023,32 @@ function HardwareSettings() {
     setProfile(value);
     try {
       await window.electronAPI?.setPerformanceProfile?.(value);
+      await refreshRuntimeState();
     } catch (error) {
       console.error('Failed to change performance profile:', error);
+    }
+  };
+
+  const handleRunBenchmark = async () => {
+    if (!currentModel || benchmarkRunning) return;
+    if (!window.electronAPI?.runLlmBenchmark) return;
+    setBenchmarkRunning(true);
+    setBenchmarkResult(null);
+    try {
+      const result = await window.electronAPI.runLlmBenchmark({
+        model: currentModel,
+        samples: 3,
+        lane: 'lane_maintenance',
+        numPredict: 96,
+        numCtx: 4096,
+        prompt: 'Write one concise sentence about local AI coding assistants.',
+      });
+      setBenchmarkResult(result || null);
+      await refreshRuntimeState();
+    } catch (error) {
+      setBenchmarkResult({ ok: false, error: error.message || 'Benchmark failed' });
+    } finally {
+      setBenchmarkRunning(false);
     }
   };
 
@@ -2000,9 +2070,9 @@ function HardwareSettings() {
         // eslint-disable-next-line no-alert
         const ok = window.confirm(
           'DevForge will now set up Intel NPU acceleration. This includes:\n\n' +
-            '• Installing OpenVINO runtime\n' +
-            '• Configuring the NPU inference server\n' +
-            '• Auto-selecting an optimized model\n\n' +
+            'â€¢ Installing OpenVINO runtime\n' +
+            'â€¢ Configuring the NPU inference server\n' +
+            'â€¢ Auto-selecting an optimized model\n\n' +
             'This may take a few minutes. Continue?',
         );
         if (!ok) {
@@ -2070,9 +2140,9 @@ function HardwareSettings() {
         // eslint-disable-next-line no-alert
         alert(
           'NPU optimization complete!\n\n' +
-          '✓ OpenVINO installed\n' +
-          '✓ NPU server running\n' +
-          '✓ Backend switched to NPU\n\n' +
+          'âœ“ OpenVINO installed\n' +
+          'âœ“ NPU server running\n' +
+          'âœ“ Backend switched to NPU\n\n' +
           'Your AI inference will now use the Intel NPU for efficient processing.'
         );
       } else if (status.npuAvailable) {
@@ -2090,6 +2160,16 @@ function HardwareSettings() {
       setNpuBusy(false);
     }
   };
+
+  const queueState = runtimeState?.queue || {};
+  const lanes = queueState?.lanes || {};
+  const evidenceRows = Array.isArray(runtimeState?.offloadEvidence) ? runtimeState.offloadEvidence : [];
+  const recentEvidence = evidenceRows.slice(-4).reverse();
+  const verifiedEvidenceCount = evidenceRows.filter((row) => row?.verified).length;
+  const runtimeBackend = runtimeState?.currentBackend?.id || backend || 'auto';
+  const activeLaneLabels = Object.entries(lanes)
+    .filter(([, laneInfo]) => Number(laneInfo?.active || 0) > 0 || Number(laneInfo?.queued || 0) > 0)
+    .map(([laneName, laneInfo]) => `${laneName.replace('lane_', '')}: ${laneInfo.active || 0}/${laneInfo.queued || 0}`);
 
   return (
     <div className="space-y-6">
@@ -2117,7 +2197,7 @@ function HardwareSettings() {
         </div>
       </div>
 
-      {/* GPU Preload Section */}
+            {/* GPU Preload Section */}
       <div className="p-4 bg-gradient-to-br from-purple-500/5 to-blue-500/5 border border-purple-500/20 rounded-lg">
         <div className="flex items-center justify-between gap-3">
           <div className="flex-1">
@@ -2126,14 +2206,22 @@ function HardwareSettings() {
               GPU Model Preload
             </h3>
             <p className="text-xs text-text-muted mt-1">
-              {currentModel 
+              {currentModel
                 ? `Load "${currentModel}" into GPU memory for faster first response`
-                : 'Select a model first to preload it to GPU'
-              }
+                : 'Select a model first to preload it to GPU'}
             </p>
             {runningModels.length > 0 && (
               <div className="mt-2 text-[11px] text-status-success">
-                ✓ {runningModels.length} model(s) currently loaded in GPU
+                {verifiedEvidenceCount > 0
+                  ? `Verified offload records: ${verifiedEvidenceCount}`
+                  : `${runningModels.length} model(s) currently resident in runtime`}
+              </div>
+            )}
+            {warmupReport && (
+              <div className={`mt-2 text-[11px] ${warmupReport.success ? 'text-status-success' : 'text-status-warning'}`}>
+                {warmupReport.success
+                  ? `Last warmup: ${warmupReport.model || warmupModel || 'model'} on ${warmupReport.backend || runtimeBackend}`
+                  : `Last warmup reason: ${warmupReport.fallbackReason || warmupReport.error || 'not verified'}`}
               </div>
             )}
           </div>
@@ -2156,6 +2244,20 @@ function HardwareSettings() {
             )}
           </button>
         </div>
+        {warmupReport?.offloadEvidence && (
+          <div className="mt-3 pt-3 border-t border-purple-500/20 text-[11px] text-text-muted">
+            <div className="flex items-center justify-between">
+              <span>Offload evidence method</span>
+              <span className="text-text-primary">{warmupReport.offloadEvidence.method || 'n/a'}</span>
+            </div>
+            <div className="flex items-center justify-between mt-1">
+              <span>VRAM committed</span>
+              <span className={warmupReport.offloadEvidence.verified ? 'text-status-success' : 'text-status-warning'}>
+                {formatBytes(warmupReport.offloadEvidence.sizeVram || 0)}
+              </span>
+            </div>
+          </div>
+        )}
         {availableModels.length > 0 && !currentModel && (
           <div className="mt-3 pt-3 border-t border-purple-500/20">
             <p className="text-xs text-text-muted mb-2">Quick preload:</p>
@@ -2173,6 +2275,116 @@ function HardwareSettings() {
             </div>
           </div>
         )}
+      </div>
+
+      {/* Acceleration Evidence */}
+      <div className="p-4 border border-forge-border rounded-lg bg-forge-bg/40 space-y-3">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h3 className="text-sm font-medium text-text-primary">Acceleration Evidence</h3>
+            <p className="text-xs text-text-muted mt-1">
+              Runtime truth for backend routing, lane activity, and verified offload.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={refreshRuntimeState}
+            className="text-xs px-2 py-1 rounded border border-forge-border hover:border-workspace-code/50"
+          >
+            Refresh
+          </button>
+        </div>
+
+        <div className="grid gap-2 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-text-muted">Active backend</span>
+            <span className="text-text-primary">{runtimeBackend}</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-text-muted">Queue (active / queued)</span>
+            <span className="text-text-primary">{queueState.active || 0} / {queueState.queued || 0}</span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-text-muted">Lanes in use</span>
+            <span className="text-text-primary text-right max-w-[60%] truncate" title={activeLaneLabels.join(', ')}>
+              {activeLaneLabels.length > 0 ? activeLaneLabels.join(', ') : 'idle'}
+            </span>
+          </div>
+          {runtimeState?.deviceUtilization?.cpu && (
+            <div className="flex items-center justify-between">
+              <span className="text-text-muted">CPU load</span>
+              <span className="text-text-primary">{Math.round(runtimeState.deviceUtilization.cpu.usage || 0)}%</span>
+            </div>
+          )}
+          {runtimeState?.deviceUtilization?.memory && (
+            <div className="flex items-center justify-between">
+              <span className="text-text-muted">RAM usage</span>
+              <span className="text-text-primary">{Math.round(runtimeState.deviceUtilization.memory.usagePercent || 0)}%</span>
+            </div>
+          )}
+          {Array.isArray(runtimeState?.deviceUtilization?.gpus) && runtimeState.deviceUtilization.gpus.length > 0 && (
+            <div className="flex items-center justify-between">
+              <span className="text-text-muted">GPU load (top)</span>
+              <span className="text-text-primary">
+                {Math.round(runtimeState.deviceUtilization.gpus[0]?.utilizationGpu || 0)}%
+                {' '}
+                / VRAM {Math.round(runtimeState.deviceUtilization.gpus[0]?.vramPercent || 0)}%
+              </span>
+            </div>
+          )}
+          {runtimeState?.deviceUtilization?.npu && (
+            <div className="flex items-center justify-between">
+              <span className="text-text-muted">NPU state</span>
+              <span className={runtimeState.deviceUtilization.npu.serverRunning ? 'text-status-success' : 'text-status-warning'}>
+                {runtimeState.deviceUtilization.npu.serverRunning
+                  ? (runtimeState.deviceUtilization.npu.modelLoaded ? 'online (model loaded)' : 'online (idle)')
+                  : 'offline'}
+              </span>
+            </div>
+          )}
+        </div>
+
+        {recentEvidence.length > 0 && (
+          <div className="space-y-2">
+            {recentEvidence.map((row) => (
+              <div key={row.key || `${row.model}-${row.checkedAt}`} className="p-2 rounded border border-forge-border/50 bg-forge-bg/50 text-xs">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="text-text-primary truncate">{row.model || 'unknown model'} @ {row.backend || 'backend'}</span>
+                  <span className={row.verified ? 'text-status-success' : 'text-status-warning'}>
+                    {row.verified ? 'verified' : 'unverified'}
+                  </span>
+                </div>
+                <div className="text-text-muted mt-1">
+                  method: {row.method || 'n/a'}
+                  {Number(row.sizeVram || 0) > 0 ? ` | VRAM: ${formatBytes(row.sizeVram)}` : ''}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        <div className="pt-2 border-t border-forge-border/50">
+          <div className="flex items-center justify-between gap-2">
+            <button
+              type="button"
+              onClick={handleRunBenchmark}
+              disabled={!currentModel || benchmarkRunning || !ollamaStatus?.running}
+              className="btn btn-secondary text-xs"
+            >
+              {benchmarkRunning ? 'Benchmarking...' : 'Run Benchmark'}
+            </button>
+            {benchmarkResult?.ok && (
+              <span className="text-xs text-status-success">
+                avg {benchmarkResult.avgLatencyMs || '?'} ms | {benchmarkResult.avgTokensPerSecond || '?'} tok/s
+              </span>
+            )}
+            {benchmarkResult && !benchmarkResult.ok && (
+              <span className="text-xs text-status-warning">
+                {benchmarkResult.error || 'Benchmark failed'}
+              </span>
+            )}
+          </div>
+        </div>
       </div>
 
       {/* Power Mode Toggle */}
@@ -2249,7 +2461,7 @@ function HardwareSettings() {
         </p>
       </div>
 
-      {/* NPU One‑Click Setup */}
+      {/* NPU Oneâ€‘Click Setup */}
       <div className="p-4 bg-forge-bg border border-forge-border rounded-lg">
         <div className="flex items-center justify-between gap-3">
           <div className="flex-1">
@@ -2292,7 +2504,7 @@ function HardwareSettings() {
               disabled={npuBusy}
               className="btn btn-primary whitespace-nowrap text-xs"
             >
-              {npuBusy ? 'Optimizing…' : npuStatus?.serverRunning ? 'Restart NPU' : 'Start NPU Server'}
+              {npuBusy ? 'Optimizingâ€¦' : npuStatus?.serverRunning ? 'Restart NPU' : 'Start NPU Server'}
             </button>
             {npuStatus?.serverRunning && (
               <button
@@ -2363,7 +2575,7 @@ function ImageBackendControl({ imageStatus, setImageStatus }) {
         setProgress(null);
         setBusy(false);
       } else if (event === 'install:download' || event === 'model:download') {
-        // File download — show fine-grained progress
+        // File download â€” show fine-grained progress
         const label = event === 'install:download' ? 'Downloading ComfyUI' : 'Downloading model';
         setProgress({ step: event, message: message || `${label}...`, percent: percent || 0 });
       } else if (event === 'install:extract') {
@@ -2464,7 +2676,7 @@ function ImageBackendControl({ imageStatus, setImageStatus }) {
                 <span className={`w-2 h-2 rounded-full ${imageStatus.models?.length > 0 ? 'bg-emerald-400' : 'bg-amber-400'}`} />
                 <span className="text-text-muted">
                   Models: {imageStatus.models?.length || 0} installed
-                  {showModelNeeded && !busy && ' — download a starter model below'}
+                  {showModelNeeded && !busy && ' â€” download a starter model below'}
                 </span>
               </div>
               {imageStatus.comfyDir && (
@@ -2627,7 +2839,7 @@ function MemoryTab() {
       {soulStats && (
         <div className="bg-gradient-to-r from-purple-500/10 to-pink-500/10 border border-purple-500/20 rounded-lg p-4">
           <h3 className="text-sm font-medium text-purple-300 mb-3 flex items-center gap-2">
-            <span>✨</span> Our Relationship
+            <span>âœ¨</span> Our Relationship
           </h3>
           <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
             <div className="text-center">
@@ -2639,7 +2851,7 @@ function MemoryTab() {
               <div className="text-[10px] text-text-muted">Days Together</div>
             </div>
             <div className="text-center">
-              <div className="text-xl font-bold text-amber-400">{soulStats.currentStreak} 🔥</div>
+              <div className="text-xl font-bold text-amber-400">{soulStats.currentStreak} ðŸ”¥</div>
               <div className="text-[10px] text-text-muted">Day Streak</div>
             </div>
             <div className="text-center">
@@ -2722,12 +2934,12 @@ function MemoryTab() {
 
       {/* How it works */}
       <div className="bg-blue-500/10 border border-blue-500/20 rounded-lg p-4">
-        <h3 className="text-sm font-medium text-blue-400 mb-2">💡 How Memory Works</h3>
+        <h3 className="text-sm font-medium text-blue-400 mb-2">ðŸ’¡ How Memory Works</h3>
         <ul className="text-xs text-text-secondary space-y-1">
-          <li>• <strong>Auto-Summary:</strong> Long conversations are summarized to preserve context</li>
-          <li>• <strong>Fact Extraction:</strong> Important facts about you are remembered</li>
-          <li>• <strong>Pinned Messages:</strong> Click 📌 on any message to ensure it's always included</li>
-          <li>• <strong>Smart Context:</strong> Instead of just last 10 messages, AI sees relevant history</li>
+          <li>â€¢ <strong>Auto-Summary:</strong> Long conversations are summarized to preserve context</li>
+          <li>â€¢ <strong>Fact Extraction:</strong> Important facts about you are remembered</li>
+          <li>â€¢ <strong>Pinned Messages:</strong> Click ðŸ“Œ on any message to ensure it's always included</li>
+          <li>â€¢ <strong>Smart Context:</strong> Instead of just last 10 messages, AI sees relevant history</li>
         </ul>
       </div>
 
@@ -2794,3 +3006,4 @@ function MemoryTab() {
     </div>
   );
 }
+

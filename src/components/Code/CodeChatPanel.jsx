@@ -376,6 +376,16 @@ export function CodeChatPanel({
   
   const sessionStats = getAISessionStats();
 
+  const sendWithCodeContext = useCallback((promptText, extra = {}) => {
+    const codeContext = {
+      rootPath: rootPath || null,
+      currentFile: currentFile || null,
+      openFilesList: Array.isArray(openFilesList) ? openFilesList : [],
+      projectFileCount: Array.isArray(projectFiles) ? projectFiles.length : 0,
+    };
+    return sendMessage(promptText, { ...extra, codeContext });
+  }, [sendMessage, rootPath, currentFile, openFilesList, projectFiles]);
+
   // Scroll management
   const scrollToBottom = useCallback(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -452,11 +462,6 @@ export function CodeChatPanel({
     // Resolve @file mentions - read referenced files and inject contents
     prompt = await resolveMentions(prompt);
     
-    // Annotate with file context (the full content is in the system prompt via fullContextBuilder)
-    if (currentFile) {
-      prompt = `[Context: Working on file "${currentFile.split(/[/\\]/).pop()}"]\n\n${prompt}`;
-    }
-    
     // Include selected code directly in the user message
     if (selectedCode) {
       const lineInfo = selectionStartLine ? ` (starting at line ${selectionStartLine})` : '';
@@ -472,7 +477,7 @@ export function CodeChatPanel({
     if (agentMode && rootPath && currentModel && isElectron()) {
       await handleAgentSend(prompt);
     } else {
-      await sendMessage(prompt);
+      await sendWithCodeContext(prompt);
     }
   };
 
@@ -640,7 +645,7 @@ export function CodeChatPanel({
   }, [currentFile, selectedCode]);
 
   const handleQuickAction = (prompt) => {
-    sendMessage(prompt);
+    sendWithCodeContext(prompt);
   };
 
   const extractCodeBlocks = useCallback((content) => {
@@ -938,7 +943,7 @@ export function CodeChatPanel({
       )}
 
       {/* Input Area */}
-      <div className="p-2 border-t border-forge-border/30 bg-forge-surface/40">
+      <div className="p-3 border-t border-forge-border/30 bg-forge-surface/40">
         <div className="flex items-end gap-2">
           <FileMentionInput
             inputRef={inputRef}
@@ -956,7 +961,7 @@ export function CodeChatPanel({
             }
             disabled={isGenerating || !currentModel}
             projectFiles={projectFiles}
-            className="w-full px-3 py-2 text-sm bg-forge-bg/60 border border-forge-border/30 rounded-lg resize-none focus:outline-none focus:border-workspace-code/50 text-text-primary placeholder-text-muted disabled:opacity-50 min-h-[38px] max-h-[120px]"
+            className="w-full px-3 py-3 text-sm bg-forge-bg/60 border border-forge-border/30 rounded-lg resize-none focus:outline-none focus:border-workspace-code/50 text-text-primary placeholder-text-muted disabled:opacity-50 min-h-[52px] max-h-[180px]"
           />
           <button
             onClick={handleSend}

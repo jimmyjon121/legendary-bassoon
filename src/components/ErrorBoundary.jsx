@@ -17,6 +17,29 @@ class ErrorBoundary extends React.Component {
     };
   }
 
+  isDynamicImportError = (error) => {
+    const message = error?.message || '';
+    return (
+      message.includes('Failed to fetch dynamically imported module') ||
+      message.includes('Importing a module script failed') ||
+      message.includes('ChunkLoadError')
+    );
+  };
+
+  tryRecoverChunkError = () => {
+    try {
+      const reloadKey = 'devforge:chunk-reload-once';
+      if (!sessionStorage.getItem(reloadKey)) {
+        sessionStorage.setItem(reloadKey, '1');
+        window.location.reload();
+        return true;
+      }
+    } catch (e) {
+      // Ignore storage access failures and continue with normal fallback UI.
+    }
+    return false;
+  };
+
   static getDerivedStateFromError(error) {
     return { hasError: true, error };
   }
@@ -39,6 +62,10 @@ class ErrorBoundary extends React.Component {
         timestamp: new Date().toISOString()
       });
     }
+
+    if (this.isDynamicImportError(error)) {
+      this.tryRecoverChunkError();
+    }
   }
 
   handleReload = () => {
@@ -46,6 +73,10 @@ class ErrorBoundary extends React.Component {
   };
 
   handleReset = () => {
+    if (this.isDynamicImportError(this.state.error)) {
+      window.location.reload();
+      return;
+    }
     this.setState({ hasError: false, error: null, errorInfo: null });
   };
 
@@ -60,6 +91,7 @@ class ErrorBoundary extends React.Component {
   render() {
     if (this.state.hasError) {
       const { level = 'page', scope } = this.props;
+      const isChunkError = this.isDynamicImportError(this.state.error);
       
       // Compact error display for component-level errors
       if (level === 'component') {
@@ -70,13 +102,15 @@ class ErrorBoundary extends React.Component {
               <span className="font-medium">{scope || 'Component'} Error</span>
             </div>
             <p className="text-sm text-text-muted mb-3">
-              {this.state.error?.message || 'Something went wrong'}
+              {isChunkError
+                ? 'A UI module changed while the app was running. Reload to sync with the latest build.'
+                : (this.state.error?.message || 'Something went wrong')}
             </p>
             <button
               onClick={this.handleReset}
               className="text-sm text-workspace-casual hover:underline"
             >
-              Try again
+              {isChunkError ? 'Reload app' : 'Try again'}
             </button>
           </div>
         );

@@ -238,10 +238,10 @@ export function FileMentionInput({
         disabled={disabled}
         rows={1}
         className={className}
-        style={{ height: 'auto', minHeight: '38px' }}
+        style={{ height: 'auto', minHeight: '52px' }}
         onInput={(e) => {
           e.target.style.height = 'auto';
-          e.target.style.height = Math.min(e.target.scrollHeight, 120) + 'px';
+          e.target.style.height = Math.min(e.target.scrollHeight, 180) + 'px';
         }}
       />
       

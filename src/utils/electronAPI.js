@@ -95,6 +95,23 @@ export function getAPI() {
   return isElectron() ? window.electronAPI : null;
 }
 
+async function safeResearchCall(method, args = [], defaultValue = null) {
+  if (!isElectron()) return defaultValue;
+  const raw = getAPI();
+  const fn = raw?.research?.[method];
+  if (typeof fn !== 'function') {
+    console.warn(`[ElectronAPI] Research method not available: ${method}`);
+    return defaultValue;
+  }
+  try {
+    const result = await fn(...args);
+    return result ?? defaultValue;
+  } catch (error) {
+    console.error(`[ElectronAPI] Error calling research.${method}:`, error);
+    return defaultValue;
+  }
+}
+
 // Pre-bound safe callers for common operations
 export const api = {
   // Settings
@@ -189,6 +206,21 @@ export const api = {
   createAgentTask: (payload) => safeCall('createAgentTask', [payload], null),
   getAgentTask: (id) => safeCall('getAgentTask', [id], null),
   cancelAgentTask: (id) => safeCall('cancelAgentTask', [id], { success: false }),
+  agentUpdateRunProgress: (payload) => safeCall('agentUpdateRunProgress', [payload], { success: false }),
+  agentGetRunProgress: () => safeCall('agentGetRunProgress', [], { status: 'idle', progressPct: 0 }),
+  onAgentRunProgress: (callback) => {
+    const raw = getAPI();
+    if (!raw?.onAgentRunProgress || typeof callback !== 'function') {
+      return () => {};
+    }
+    try {
+      const unsubscribe = raw.onAgentRunProgress(callback);
+      return typeof unsubscribe === 'function' ? unsubscribe : () => {};
+    } catch (error) {
+      console.error('[ElectronAPI] Failed to subscribe to agent run progress:', error);
+      return () => {};
+    }
+  },
 
   // Vibe IDE: Project scanner & terminal
   scanProject: (rootPath, options) => safeCall('scanProject', [rootPath, options], { root: '', tree: [] }),
@@ -228,6 +260,19 @@ export const api = {
   autoTuneModel: (filePath) =>
     safeCall('autoTuneModel', [filePath], { error: 'Auto-tuner not available' }),
 
+  // Tooling runtime
+  toolHealth: () =>
+    safeCall('toolHealth', [], { ok: false, handlersReady: false, error: 'Tooling health unavailable' }),
+
+  getLlmRuntimeState: () =>
+    safeCall('getLlmRuntimeState', [], { queue: { queued: 0, active: 0 }, fallbackCounters: {}, recentDecisions: [] }),
+
+  runLlmBenchmark: (payload) =>
+    safeCall('runLlmBenchmark', [payload], { ok: false, error: 'Benchmark unavailable' }),
+
+  embedTexts: (payload) =>
+    safeCall('embedTexts', [payload], { ok: false, vectors: [], error: 'Embedding unavailable' }),
+
   // Web Search - Real-time web search for AI
   webSearch: (query, options) =>
     safeCall('webSearch', [query, options], { results: [], query, took: 0, error: 'Not available' }),
@@ -235,7 +280,56 @@ export const api = {
     safeCall('webFetchPage', [url, options], { content: '', title: '', url, error: 'Not available' }),
   webSearchAndFormat: (query, options) =>
     safeCall('webSearchAndFormat', [query, options], { results: [], formatted: '', query, took: 0, error: 'Not available' }),
+
+  // Research system
+  research: {
+    listProjects: (workspace) => safeResearchCall('listProjects', [workspace], []),
+    getProject: (id) => safeResearchCall('getProject', [id], null),
+    createProject: (payload) => safeResearchCall('createProject', [payload], { success: false }),
+    updateProject: (payload) => safeResearchCall('updateProject', [payload], { success: false }),
+    deleteProject: (id) => safeResearchCall('deleteProject', [id], { success: false }),
+
+    linkConversation: (projectId, conversationId) =>
+      safeResearchCall('linkConversation', [projectId, conversationId], { success: false }),
+    unlinkConversation: (projectId, conversationId) =>
+      safeResearchCall('unlinkConversation', [projectId, conversationId], { success: false }),
+    listConversations: (projectId, workspace) =>
+      safeResearchCall('listConversations', [projectId, workspace], { linked: [], available: [] }),
+
+    linkDocument: (projectId, documentId) =>
+      safeResearchCall('linkDocument', [projectId, documentId], { success: false }),
+    unlinkDocument: (projectId, documentId) =>
+      safeResearchCall('unlinkDocument', [projectId, documentId], { success: false }),
+    listDocuments: (projectId, workspace) =>
+      safeResearchCall('listDocuments', [projectId, workspace], { linked: [], available: [] }),
+
+    startRun: (payload) => safeResearchCall('startRun', [payload], { success: false }),
+    pauseRun: (runId) => safeResearchCall('pauseRun', [runId], { success: false }),
+    resumeRun: (runId) => safeResearchCall('resumeRun', [runId], { success: false }),
+    cancelRun: (runId) => safeResearchCall('cancelRun', [runId], { success: false }),
+    steerRun: (runId, instruction) => safeResearchCall('steerRun', [runId, instruction], { success: false }),
+    getRun: (runId) => safeResearchCall('getRun', [runId], null),
+    listRuns: (projectId, limit) => safeResearchCall('listRuns', [projectId, limit], []),
+
+    listRecords: (projectId, runId, limit) =>
+      safeResearchCall('listRecords', [projectId, runId, limit], []),
+    getRecord: (recordId) =>
+      safeResearchCall('getRecord', [recordId], null),
+    exportRecords: (payload) =>
+      safeResearchCall('exportRecords', [payload], { success: false }),
+
+    onRunProgress: (callback) => {
+      const raw = getAPI();
+      if (!raw?.research?.onRunProgress || typeof callback !== 'function') return () => {};
+      try {
+        const unsubscribe = raw.research.onRunProgress(callback);
+        return typeof unsubscribe === 'function' ? unsubscribe : () => {};
+      } catch (error) {
+        console.error('[ElectronAPI] Failed to subscribe to research run progress:', error);
+        return () => {};
+      }
+    },
+  },
 };
 
 export default api;
-

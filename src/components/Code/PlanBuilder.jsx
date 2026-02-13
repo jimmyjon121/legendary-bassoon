@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { 
   Sparkles, 
   Play, 
@@ -33,6 +33,17 @@ const STEP_STATUS = {
   FAILED: 'failed'
 };
 
+const STEP_TYPES = new Set(['create', 'modify', 'delete', 'refactor', 'test']);
+
+function resolveModelName(modelValue) {
+  if (!modelValue) return '';
+  if (typeof modelValue === 'string') return modelValue;
+  if (typeof modelValue?.name === 'string') return modelValue.name;
+  if (typeof modelValue?.id === 'string') return modelValue.id;
+  if (typeof modelValue?.model === 'string') return modelValue.model;
+  return String(modelValue || '').trim();
+}
+
 export function PlanBuilder({ onExecutePlan, currentFile, initialPlan, onPlanConsumed }) {
   const [plan, setPlan] = useState({
     id: null,
@@ -50,10 +61,48 @@ export function PlanBuilder({ onExecutePlan, currentFile, initialPlan, onPlanCon
   // Handle incoming plan from Chat conversation
   React.useEffect(() => {
     if (initialPlan && initialPlan.steps?.length > 0) {
-      setPlan(initialPlan);
+      const inferredTask =
+        initialPlan?.context?.requirements ||
+        initialPlan?.description ||
+        initialPlan?.title ||
+        '';
+
+      const enhanced = normalizeAndEnhancePlan(
+        {
+          title: initialPlan.title || 'Implementation Plan',
+          description: initialPlan.description || inferredTask,
+          steps: initialPlan.steps || [],
+        },
+        inferredTask || 'Implement requested changes'
+      );
+
+      const hydratedSteps = (enhanced.steps || []).map((step, index) => ({
+        ...step,
+        id: step.id || index + 1,
+        status: ['pending', 'in_progress', 'completed', 'failed'].includes(step.status)
+          ? step.status
+          : STEP_STATUS.PENDING,
+        targetFiles: Array.isArray(step.targetFiles) ? step.targetFiles : [],
+        dependencies: Array.isArray(step.dependencies) ? step.dependencies : [],
+      }));
+
+      setPlan({
+        ...initialPlan,
+        title: enhanced.title,
+        description: enhanced.description,
+        steps: hydratedSteps,
+        status: initialPlan.status || 'draft',
+        context: {
+          files: Array.isArray(initialPlan?.context?.files)
+            ? initialPlan.context.files
+            : [],
+          requirements: inferredTask || '',
+        },
+      });
+      setPlanPrompt((prev) => prev || inferredTask);
       setShowPlanInput(false);
       // Auto-expand first step
-      setExpandedSteps(new Set([initialPlan.steps[0]?.id || 1]));
+      setExpandedSteps(new Set([hydratedSteps[0]?.id || 1]));
       
       if (onPlanConsumed) {
         onPlanConsumed();
@@ -66,16 +115,280 @@ export function PlanBuilder({ onExecutePlan, currentFile, initialPlan, onPlanCon
   const [editingStep, setEditingStep] = useState(null);
   const [planPrompt, setPlanPrompt] = useState('');
   const [showPlanInput, setShowPlanInput] = useState(true);
+  const [generationError, setGenerationError] = useState('');
+  const [generationProgress, setGenerationProgress] = useState(0);
+  const generationAbortRef = useRef(null);
+  const generationSeqRef = useRef(0);
+  const generationTickerRef = useRef(null);
   
-  const { currentModel, sendMessage } = useAppStore();
+  const { currentModel } = useAppStore();
+  const currentModelName = resolveModelName(currentModel);
   const { openFiles, activeFilePath } = useEditorStore();
+
+  useEffect(() => {
+    return () => {
+      if (generationAbortRef.current) {
+        generationAbortRef.current.abort();
+      }
+      if (generationTickerRef.current) {
+        clearInterval(generationTickerRef.current);
+        generationTickerRef.current = null;
+      }
+      generationSeqRef.current += 1;
+    };
+  }, []);
+
+  const stopProgressTicker = () => {
+    if (generationTickerRef.current) {
+      clearInterval(generationTickerRef.current);
+      generationTickerRef.current = null;
+    }
+  };
+
+  const startProgressTicker = () => {
+    stopProgressTicker();
+    setGenerationProgress(6);
+    generationTickerRef.current = setInterval(() => {
+      setGenerationProgress((prev) => {
+        if (prev >= 94) return prev;
+        const delta = prev < 30 ? 4.2 : prev < 65 ? 2.6 : 1.3;
+        return Math.min(94, prev + delta);
+      });
+    }, 420);
+  };
+
+  const completeProgressTicker = () => {
+    stopProgressTicker();
+    setGenerationProgress(100);
+  };
+
+  const getProgressLabel = (progress) => {
+    if (progress < 18) return 'Analyzing request';
+    if (progress < 40) return 'Collecting workspace context';
+    if (progress < 68) return 'Drafting implementation steps';
+    if (progress < 90) return 'Validating plan structure';
+    return 'Finalizing plan';
+  };
+
+  const withTimeout = async (promise, ms, onTimeout) => {
+    let timeoutId;
+    const timeoutPromise = new Promise((_, reject) => {
+      timeoutId = setTimeout(() => {
+        if (typeof onTimeout === 'function') onTimeout();
+        reject(new Error(`Plan generation timed out after ${Math.round(ms / 1000)}s`));
+      }, ms);
+    });
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  };
+
+  const extractLikelyJsonObject = (text) => {
+    const source = String(text || '').trim();
+    if (!source) return null;
+
+    if (source.startsWith('{') && source.endsWith('}')) {
+      return source;
+    }
+
+    const start = source.indexOf('{');
+    if (start === -1) return null;
+
+    let depth = 0;
+    for (let i = start; i < source.length; i += 1) {
+      const char = source[i];
+      if (char === '{') depth += 1;
+      if (char === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          return source.slice(start, i + 1);
+        }
+      }
+    }
+    return null;
+  };
+
+  const parsePlanFromText = (responseText) => {
+    if (!responseText || !responseText.trim()) {
+      throw new Error('Model returned an empty response');
+    }
+
+    try {
+      return JSON.parse(responseText);
+    } catch {
+      const extracted = extractLikelyJsonObject(responseText);
+      if (!extracted) {
+        throw new Error('Model did not return valid JSON');
+      }
+      try {
+        return JSON.parse(extracted);
+      } catch {
+        throw new Error('Failed to parse JSON plan');
+      }
+    }
+  };
+
+  const normalizeStepType = (type) => {
+    const value = String(type || '').toLowerCase();
+    return STEP_TYPES.has(value) ? value : 'modify';
+  };
+
+  const pickTargetFiles = () => {
+    const selected = [];
+    if (currentFile) selected.push(currentFile);
+    for (const path of Object.keys(openFiles || {})) {
+      if (!selected.includes(path)) selected.push(path);
+      if (selected.length >= 3) break;
+    }
+    if (selected.length === 0) {
+      return ['src/components/Code/CodeWorkbench.jsx', 'src/components/Code/PlanBuilder.jsx'];
+    }
+    return selected.map((p) => String(p).replace(/\\/g, '/'));
+  };
+
+  const buildDeterministicPlan = (promptText) => {
+    const targets = pickTargetFiles();
+    return {
+      title: 'Implementation Plan',
+      description: `Build plan for: ${promptText}`,
+      steps: [
+        {
+          id: 1,
+          title: 'Define requirements and acceptance criteria',
+          description: 'Clarify scope, constraints, and measurable success outcomes.',
+          type: 'refactor',
+          targetFiles: [],
+          changes: promptText,
+          dependencies: [],
+          estimatedLines: 25
+        },
+        {
+          id: 2,
+          title: 'Design architecture and task breakdown',
+          description: 'Map components/services, data flow, and implementation order.',
+          type: 'refactor',
+          targetFiles: [targets[0]].filter(Boolean),
+          changes: 'Document modules, interfaces, and dependencies.',
+          dependencies: [1],
+          estimatedLines: 60
+        },
+        {
+          id: 3,
+          title: 'Implement core functionality',
+          description: 'Build the primary logic and backend integration path.',
+          type: 'modify',
+          targetFiles: [targets[0], targets[1]].filter(Boolean),
+          changes: 'Implement feature behavior and error handling for the main flow.',
+          dependencies: [2],
+          estimatedLines: 140
+        },
+        {
+          id: 4,
+          title: 'Implement UI and interaction flow',
+          description: 'Create or update UI states, loading/errors, and user actions.',
+          type: 'modify',
+          targetFiles: [targets[1], targets[2]].filter(Boolean),
+          changes: 'Wire UI to core logic and ensure responsive interaction.',
+          dependencies: [3],
+          estimatedLines: 110
+        },
+        {
+          id: 5,
+          title: 'Integrate settings, persistence, and guardrails',
+          description: 'Persist key settings/state and add validation/safety checks.',
+          type: 'modify',
+          targetFiles: targets,
+          changes: 'Add robust defaults, failure handling, and compatibility checks.',
+          dependencies: [3, 4],
+          estimatedLines: 85
+        },
+        {
+          id: 6,
+          title: 'Test, verify, and polish',
+          description: 'Run validation, fix defects, and finalize user-facing behavior.',
+          type: 'test',
+          targetFiles: targets,
+          changes: 'Add test coverage and perform end-to-end validation.',
+          dependencies: [5],
+          estimatedLines: 80
+        }
+      ]
+    };
+  };
+
+  const normalizeAndEnhancePlan = (planData, promptText) => {
+    const rawSteps = Array.isArray(planData?.steps) ? planData.steps : [];
+
+    const cleanedSteps = rawSteps
+      .map((step, index) => {
+        const targetFiles = Array.isArray(step?.targetFiles)
+          ? step.targetFiles
+          : typeof step?.targetFiles === 'string'
+            ? [step.targetFiles]
+            : [];
+
+        const dependencies = Array.isArray(step?.dependencies)
+          ? step.dependencies
+              .map((dep) => Number(dep))
+              .filter((dep) => Number.isFinite(dep) && dep > 0)
+          : [];
+
+        const estimated = Number(step?.estimatedLines);
+
+        return {
+          id: index + 1,
+          title: String(step?.title || '').trim() || `Step ${index + 1}`,
+          description:
+            String(step?.description || '').trim() ||
+            'Implement this step with clear deliverables and acceptance criteria.',
+          type: normalizeStepType(step?.type),
+          targetFiles: targetFiles.map((f) => String(f).trim()).filter(Boolean).slice(0, 4),
+          changes: String(step?.changes || step?.description || '').trim(),
+          dependencies,
+          estimatedLines: Number.isFinite(estimated) ? Math.max(0, estimated) : 0
+        };
+      })
+      .filter((step) => step.title && step.description);
+
+    const genericTitles = cleanedSteps.filter((step) =>
+      /(analyze requirements|step \d+|todo|tbd)/i.test(step.title)
+    ).length;
+
+    const needsEnhancement =
+      cleanedSteps.length < 4 ||
+      (cleanedSteps.length <= 5 && genericTitles >= Math.ceil(cleanedSteps.length / 2));
+
+    if (needsEnhancement) {
+      return buildDeterministicPlan(promptText);
+    }
+
+    return {
+      title: String(planData?.title || '').trim() || 'Implementation Plan',
+      description: String(planData?.description || '').trim() || promptText,
+      steps: cleanedSteps
+    };
+  };
+
+  const fallbackPlan = (promptText) => buildDeterministicPlan(promptText);
   
   // Generate plan from AI
   const generatePlan = async () => {
-    if (!planPrompt.trim() || !currentModel) return;
-    
+    if (!planPrompt.trim() || !currentModelName) return;
+
+    // Cancel any previous in-flight request
+    if (generationAbortRef.current) {
+      generationAbortRef.current.abort();
+      generationAbortRef.current = null;
+    }
+
+    const generationId = generationSeqRef.current + 1;
+    generationSeqRef.current = generationId;
+
+    setGenerationError('');
     setIsGenerating(true);
-    setShowPlanInput(false);
+    startProgressTicker();
     
     try {
       // Get context from open files
@@ -88,7 +401,7 @@ export function PlanBuilder({ onExecutePlan, currentFile, initialPlan, onPlanCon
         })
         .join('\n\n');
       
-      const systemPrompt = `You are a software architect creating an implementation plan. 
+      const systemPrompt = `You are a senior software architect creating implementation plans.
 Respond ONLY with a valid JSON object in this exact format (no markdown, no explanation):
 {
   "title": "Brief plan title",
@@ -103,11 +416,16 @@ Respond ONLY with a valid JSON object in this exact format (no markdown, no expl
       "changes": "Specific changes to make",
       "dependencies": [],
       "estimatedLines": 50
-    }
-  ]
+      }
+    ]
 }
 
-Keep steps atomic and specific. Include file paths. Be thorough but practical.`;
+Rules:
+- Return 5 to 8 concrete steps.
+- Each step must be actionable and implementation-oriented.
+- Include realistic target file paths when possible.
+- Use dependencies to show order.
+- Never return a single-step plan.`;
 
       const userPrompt = `Create a detailed implementation plan for:
 
@@ -118,53 +436,56 @@ ${currentFile ? `\nCurrently viewing: ${currentFile}` : ''}
 
 Respond with ONLY the JSON plan, no other text.`;
 
-      // Use Ollama directly for plan generation
-      const response = await fetch('http://localhost:11434/api/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: currentModel,
-          prompt: `${systemPrompt}\n\nUser: ${userPrompt}`,
-          stream: false,
-          options: {
-            temperature: 0.3, // Lower temp for structured output
-            num_predict: 2000
-          }
-        })
-      });
-      
-      const data = await response.json();
-      const responseText = data.response || '';
-      
-      // Try to parse JSON from response
+      const llmPayload = {
+        model: currentModelName,
+        prompt: `${systemPrompt}\n\nUser: ${userPrompt}`,
+        format: 'json',
+        stream: false,
+        timeout: 240000,
+        options: {
+          temperature: 0.2,
+          top_p: 0.9,
+          num_predict: 1800
+        }
+      };
+
+      let responseText = '';
+      if (window.electronAPI?.sendToLLM) {
+        const data = await withTimeout(
+          window.electronAPI.sendToLLM(llmPayload),
+          45000
+        );
+        responseText = data?.response || data?.message?.content || '';
+      } else {
+        const controller = new AbortController();
+        generationAbortRef.current = controller;
+        const response = await withTimeout(
+          fetch('http://localhost:11434/api/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(llmPayload),
+            signal: controller.signal
+          }),
+          45000,
+          () => controller.abort()
+        );
+
+        if (!response.ok) {
+          throw new Error(`Ollama returned ${response.status}`);
+        }
+        const data = await response.json();
+        responseText = data?.response || '';
+      }
+
+      if (generationId !== generationSeqRef.current) return;
+
       let planData;
       try {
-        // Try to extract JSON from response
-        const jsonMatch = responseText.match(/\{[\s\S]*\}/);
-        if (jsonMatch) {
-          planData = JSON.parse(jsonMatch[0]);
-        } else {
-          throw new Error('No JSON found');
-        }
-      } catch (e) {
-        console.error('Failed to parse plan:', e);
-        // Create a fallback plan structure
-        planData = {
-          title: 'Implementation Plan',
-          description: planPrompt,
-          steps: [
-            {
-              id: 1,
-              title: 'Analyze requirements',
-              description: 'Review the request and identify needed changes',
-              type: 'refactor',
-              targetFiles: currentFile ? [currentFile] : [],
-              changes: planPrompt,
-              dependencies: [],
-              estimatedLines: 0
-            }
-          ]
-        };
+        const parsed = parsePlanFromText(responseText);
+        planData = normalizeAndEnhancePlan(parsed, planPrompt);
+      } catch (parseError) {
+        console.warn('Plan parse failed, using fallback:', parseError.message);
+        planData = fallbackPlan(planPrompt);
       }
       
       // Set the plan with generated data
@@ -189,12 +510,54 @@ Respond with ONLY the JSON plan, no other text.`;
       
       // Auto-expand first step
       setExpandedSteps(new Set([1]));
+      setShowPlanInput(false);
+      completeProgressTicker();
       
     } catch (error) {
       console.error('Plan generation failed:', error);
+      if (generationId !== generationSeqRef.current) return;
+      const errMessage = String(error?.message || 'Unknown error');
+      setGenerationError(errMessage);
+      // Still provide a usable plan so the user isn't blocked.
+      const planData = fallbackPlan(planPrompt);
+      setPlan({
+        id: Date.now().toString(),
+        title: planData.title,
+        description: planData.description,
+        steps: planData.steps.map((step) => ({
+          ...step,
+          status: STEP_STATUS.PENDING
+        })),
+        status: 'draft',
+        createdAt: new Date().toISOString(),
+        context: {
+          files: Object.keys(openFiles),
+          requirements: planPrompt
+        }
+      });
+      setExpandedSteps(new Set([1]));
+      setShowPlanInput(false);
+      completeProgressTicker();
     } finally {
-      setIsGenerating(false);
+      if (generationId === generationSeqRef.current) {
+        stopProgressTicker();
+        setIsGenerating(false);
+        generationAbortRef.current = null;
+      }
     }
+  };
+
+  const cancelGeneration = () => {
+    if (generationAbortRef.current) {
+      generationAbortRef.current.abort();
+      generationAbortRef.current = null;
+    }
+    generationSeqRef.current += 1;
+    setIsGenerating(false);
+    stopProgressTicker();
+    setGenerationProgress(0);
+    setGenerationError('Generation canceled.');
+    setShowPlanInput(true);
   };
   
   // Add a new step manually
@@ -277,6 +640,15 @@ Respond with ONLY the JSON plan, no other text.`;
     setPlanPrompt('');
     setShowPlanInput(true);
     setExpandedSteps(new Set());
+    setGenerationError('');
+    if (generationAbortRef.current) {
+      generationAbortRef.current.abort();
+      generationAbortRef.current = null;
+    }
+    generationSeqRef.current += 1;
+    setIsGenerating(false);
+    stopProgressTicker();
+    setGenerationProgress(0);
   };
   
   // Copy plan as markdown
@@ -377,7 +749,7 @@ ${step.description}
             />
             <button
               onClick={generatePlan}
-              disabled={!planPrompt.trim() || isGenerating || !currentModel}
+              disabled={!planPrompt.trim() || isGenerating || !currentModelName}
               className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg bg-purple-500/20 text-purple-400 hover:bg-purple-500/30 disabled:opacity-50 disabled:cursor-not-allowed transition-colors text-sm font-medium"
             >
               {isGenerating ? (
@@ -392,6 +764,34 @@ ${step.description}
                 </>
               )}
             </button>
+            {isGenerating && (
+              <>
+                <div className="rounded-lg border border-purple-500/25 bg-purple-500/10 px-3 py-2">
+                  <div className="flex items-center justify-between text-[11px] text-purple-200">
+                    <span>{getProgressLabel(generationProgress)}</span>
+                    <span>{Math.max(6, Math.round(generationProgress))}%</span>
+                  </div>
+                  <div className="mt-2 h-1.5 rounded-full bg-forge-bg/60 overflow-hidden">
+                    <div
+                      className="h-full bg-gradient-to-r from-purple-500 via-fuchsia-500 to-blue-400 transition-all duration-300 ease-out"
+                      style={{ width: `${Math.max(6, generationProgress)}%` }}
+                    />
+                  </div>
+                </div>
+                <button
+                  onClick={cancelGeneration}
+                  className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-red-500/30 text-red-300 hover:bg-red-500/10 transition-colors text-xs"
+                >
+                  <X size={12} />
+                  Cancel
+                </button>
+              </>
+            )}
+            {generationError && (
+              <div className="px-2 py-1.5 rounded border border-amber-500/30 bg-amber-500/10 text-[11px] text-amber-300">
+                Plan generator issue: {generationError}
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -405,7 +805,7 @@ ${step.description}
             <p className="text-xs text-text-muted">{plan.description}</p>
             <div className="flex items-center gap-2 mt-2 text-[10px] text-text-muted">
               <span>{plan.steps.length} steps</span>
-              <span>•</span>
+              <span>|</span>
               <span>~{plan.steps.reduce((acc, s) => acc + (s.estimatedLines || 0), 0)} lines</span>
             </div>
           </div>
@@ -586,7 +986,11 @@ ${step.description}
           )}
           
           <button
-            onClick={() => setShowPlanInput(true)}
+            onClick={() => {
+              setShowPlanInput(true);
+              setGenerationError('');
+              setPlanPrompt((prev) => prev || plan.context?.requirements || plan.description || '');
+            }}
             className="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg border border-forge-border/30 text-text-muted hover:text-purple-400 hover:border-purple-500/30 transition-colors text-xs"
           >
             <Wand2 size={12} />

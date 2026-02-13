@@ -103,8 +103,34 @@ function App() {
   const { isOpen: showKeyboardShortcuts, close: closeKeyboardShortcuts } = useKeyboardShortcutsModal();
 
   useEffect(() => {
+    const isDynamicImportFailure = (err) => {
+      const message = err?.message || String(err || '');
+      return (
+        message.includes('Failed to fetch dynamically imported module') ||
+        message.includes('Importing a module script failed') ||
+        message.includes('ChunkLoadError')
+      );
+    };
+
+    const recoverDynamicImportFailure = () => {
+      try {
+        const reloadKey = 'devforge:chunk-reload-once';
+        if (!sessionStorage.getItem(reloadKey)) {
+          sessionStorage.setItem(reloadKey, '1');
+          window.location.reload();
+          return true;
+        }
+      } catch (e) {
+        // Ignore storage errors and fall through to normal handling.
+      }
+      return false;
+    };
+
     // Global error handler - catches uncaught errors
     const handleGlobalError = (event) => {
+      if (isDynamicImportFailure(event.error)) {
+        recoverDynamicImportFailure();
+      }
       console.error('DevForge Global Error:', {
         message: event.message,
         source: event.filename,
@@ -118,6 +144,9 @@ function App() {
 
     // Unhandled promise rejection handler
     const handleUnhandledRejection = (event) => {
+      if (isDynamicImportFailure(event.reason)) {
+        recoverDynamicImportFailure();
+      }
       console.error('DevForge Unhandled Promise Rejection:', event.reason);
       // Prevent default browser handling
       event.preventDefault();

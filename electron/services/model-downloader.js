@@ -8,6 +8,81 @@ const crypto = require('crypto');
 
 // In-memory download registry (no persistence needed)
 const downloads = new Map();
+const NON_SERIALIZABLE_DOWNLOAD_KEYS = new Set(['request', 'fileStream', 'socket', 'connection', 'req', 'res']);
+
+function toFiniteNumber(value, fallback = 0) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : fallback;
+}
+
+function sanitizeForIpc(value, depth = 0, seen = new WeakSet()) {
+  if (value === null || value === undefined) return value;
+
+  if (typeof value === 'string' || typeof value === 'boolean') return value;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  if (typeof value === 'bigint') return value.toString();
+  if (typeof value === 'function' || typeof value === 'symbol') return undefined;
+
+  if (value instanceof Date) return value.toISOString();
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+      stack: value.stack,
+    };
+  }
+
+  if (Buffer.isBuffer(value)) {
+    return value.toString('base64');
+  }
+
+  if (typeof value !== 'object') return undefined;
+  if (seen.has(value)) return '[Circular]';
+  if (depth >= 6) return '[Truncated]';
+
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => sanitizeForIpc(item, depth + 1, seen))
+      .filter((item) => item !== undefined);
+  }
+
+  const output = {};
+  for (const [key, nested] of Object.entries(value)) {
+    if (NON_SERIALIZABLE_DOWNLOAD_KEYS.has(key)) continue;
+    const safeValue = sanitizeForIpc(nested, depth + 1, seen);
+    if (safeValue !== undefined) {
+      output[key] = safeValue;
+    }
+  }
+  return output;
+}
+
+function toPublicDownloadRecord(record) {
+  if (!record || typeof record !== 'object') return null;
+
+  const safeRecord = sanitizeForIpc(record);
+  if (!safeRecord || typeof safeRecord !== 'object') return null;
+
+  return {
+    ...safeRecord,
+    id: safeRecord.id ? String(safeRecord.id) : '',
+    name: safeRecord.name ? String(safeRecord.name) : '',
+    source: safeRecord.source ? String(safeRecord.source) : 'ollama',
+    type: safeRecord.type ? String(safeRecord.type) : 'ollama',
+    status: safeRecord.status ? String(safeRecord.status) : 'queued',
+    progress: toFiniteNumber(safeRecord.progress, 0),
+    totalBytes: toFiniteNumber(safeRecord.totalBytes, 0),
+    downloadedBytes: toFiniteNumber(safeRecord.downloadedBytes, 0),
+    speed: toFiniteNumber(safeRecord.speed, 0),
+    error: safeRecord.error == null ? null : String(safeRecord.error),
+    startedAt: safeRecord.startedAt ? String(safeRecord.startedAt) : null,
+    updatedAt: safeRecord.updatedAt ? String(safeRecord.updatedAt) : null,
+    statusMessage: safeRecord.statusMessage == null ? null : String(safeRecord.statusMessage),
+    digest: safeRecord.digest == null ? null : String(safeRecord.digest),
+  };
+}
 
 function createRecord(partial) {
   const now = new Date().toISOString();
@@ -71,12 +146,12 @@ function startOllamaDownload(modelName, endpoint, onProgress = null) {
         status: 'error',
         error: `HTTP ${res.statusCode}`,
       });
-      if (onProgress) onProgress(downloads.get(id));
+      if (onProgress) onProgress(toPublicDownloadRecord(downloads.get(id)));
       return;
     }
 
     updateRecord(id, { status: 'downloading', progress: 0 });
-    if (onProgress) onProgress(downloads.get(id));
+    if (onProgress) onProgress(toPublicDownloadRecord(downloads.get(id)));
     
     let buffer = '';
     let lastSpeedCalc = Date.now();
@@ -146,7 +221,7 @@ function startOllamaDownload(modelName, endpoint, onProgress = null) {
             });
           }
           
-          if (onProgress) onProgress(downloads.get(id));
+          if (onProgress) onProgress(toPublicDownloadRecord(downloads.get(id)));
         } catch (e) {
           // Ignore parse errors for incomplete JSON
         }
@@ -165,19 +240,19 @@ function startOllamaDownload(modelName, endpoint, onProgress = null) {
             error: 'Download ended unexpectedly' 
           });
         }
-        if (onProgress) onProgress(downloads.get(id));
+        if (onProgress) onProgress(toPublicDownloadRecord(downloads.get(id)));
       }
     });
     
     res.on('error', (error) => {
       updateRecord(id, { status: 'error', error: error.message });
-      if (onProgress) onProgress(downloads.get(id));
+      if (onProgress) onProgress(toPublicDownloadRecord(downloads.get(id)));
     });
   });
 
   req.on('error', (error) => {
     updateRecord(id, { status: 'error', error: error.message });
-    if (onProgress) onProgress(downloads.get(id));
+    if (onProgress) onProgress(toPublicDownloadRecord(downloads.get(id)));
   });
 
   // Store request for cancellation
@@ -484,12 +559,9 @@ function cancelDownload(id) {
 }
 
 function getDownloads() {
-  return Array.from(downloads.values()).map((d) => {
-    const copy = { ...d };
-    delete copy.request;
-    delete copy.fileStream;
-    return copy;
-  });
+  return Array.from(downloads.values())
+    .map((record) => toPublicDownloadRecord(record))
+    .filter(Boolean);
 }
 
 module.exports = {
@@ -500,5 +572,4 @@ module.exports = {
   cancelDownload,
   getDownloads,
 };
-
 

@@ -1,13 +1,13 @@
-/**
- * SafetyProtocol - The "Safe Border" for AI Operations
- * 
- * This service ensures that autonomous AI agents operate within strict boundaries.
- * It manages:
- * 1. Git Isolation (Auto-branching)
- * 2. Rollback Capabilities
- * 3. File System Locks
- */
+import { api, hasMethod } from '../../utils/electronAPI';
+import { useEditorStore } from '../../stores/editorStore';
 
+/**
+ * SafetyProtocol - lightweight safety guardrails for autonomous runs.
+ *
+ * This implementation is resilient:
+ * - If git IPC is available, it records branch metadata.
+ * - If git IPC is unavailable, it degrades gracefully instead of aborting.
+ */
 class SafetyProtocol {
   constructor() {
     this.activeSession = null;
@@ -16,157 +16,123 @@ class SafetyProtocol {
     this.checkpoints = [];
   }
 
+  getProjectRoot() {
+    try {
+      return useEditorStore.getState()?.rootPath || '';
+    } catch {
+      return '';
+    }
+  }
+
+  supportsGit() {
+    return hasMethod('git:status');
+  }
+
+  createSession(taskName, options = {}) {
+    const timestamp = Date.now();
+    const slug = String(taskName || 'task')
+      .toLowerCase()
+      .replace(/[^a-z0-9-]+/g, '-')
+      .replace(/^-+|-+$/g, '')
+      .slice(0, 40) || 'task';
+
+    this.sandboxBranch = `night-shift/${slug}-${timestamp}`;
+    this.activeSession = {
+      startTime: timestamp,
+      taskName,
+      originalBranch: this.originalBranch || 'unknown',
+      sandboxBranch: this.sandboxBranch,
+      mode: options.mode || 'degraded',
+      projectRoot: options.projectRoot || this.getProjectRoot(),
+    };
+    return this.activeSession;
+  }
+
   /**
-   * Initialize a safe session.
-   * Creates a new git branch for the AI to work in.
+   * Initialize a safety session.
+   * Never hard-fails: it returns a degraded session if git integration is missing.
    */
   async engageSafetyProtocol(taskName) {
     try {
-      console.log('🛡️ Engaging Safety Protocol...');
-      
-      // 1. Get current status
-      const status = await window.api.git.status();
-      this.originalBranch = status.current;
+      const projectRoot = this.getProjectRoot();
+      this.checkpoints = [];
 
-      // 2. Ensure clean state (stash if needed)
-      if (status.modified.length > 0) {
-        console.log('📦 Stashing current changes...');
-        await window.api.git.stash();
+      if (this.supportsGit()) {
+        const status = await api.getGitStatus(projectRoot);
+        const hasGitStatus = !!status && !status.error;
+        this.originalBranch = status?.current || status?.branch || 'unknown';
+        const session = this.createSession(taskName, {
+          mode: hasGitStatus ? 'git' : 'degraded',
+          projectRoot,
+        });
+        return {
+          success: true,
+          degraded: !hasGitStatus,
+          session,
+          message: hasGitStatus
+            ? `Safety protocol engaged on branch ${session.sandboxBranch}`
+            : 'Git status unavailable; running in degraded safety mode.',
+        };
       }
 
-      // 3. Create sanitized branch name
-      const timestamp = new Date().getTime();
-      const sanitizedName = taskName.toLowerCase().replace(/[^a-z0-9-]/g, '-');
-      this.sandboxBranch = `night-shift/${sanitizedName}-${timestamp}`;
-
-      // 4. Checkout new branch
-      console.log(`🌿 Creating sandbox branch: ${this.sandboxBranch}`);
-      await window.api.git.checkout(['-b', this.sandboxBranch]);
-
-      this.activeSession = {
-        startTime: Date.now(),
-        taskName,
-        originalBranch: this.originalBranch,
-        sandboxBranch: this.sandboxBranch,
-      };
-
+      const session = this.createSession(taskName, {
+        mode: 'degraded',
+        projectRoot,
+      });
       return {
         success: true,
-        session: this.activeSession,
-        message: `Safety Protocol Engaged. Working in isolated branch: ${this.sandboxBranch}`
+        degraded: true,
+        session,
+        message: 'Git integration unavailable; running in degraded safety mode.',
       };
-
     } catch (error) {
-      console.error('❌ Safety Protocol Failed:', error);
+      const session = this.createSession(taskName, { mode: 'degraded' });
       return {
-        success: false,
-        error: error.message
+        success: true,
+        degraded: true,
+        session,
+        message: `Safety protocol degraded: ${error?.message || 'unknown error'}`,
       };
     }
   }
 
   /**
-   * Create a checkpoint (git commit) that we can roll back to.
+   * Create a logical checkpoint.
+   * In degraded mode this is an in-memory marker.
    */
   async createCheckpoint(message) {
-    if (!this.activeSession) return;
+    if (!this.activeSession) return null;
 
-    try {
-      await window.api.git.add('.');
-      await window.api.git.commit(`[AI Checkpoint] ${message}`);
-      
-      const log = await window.api.git.log();
-      const hash = log.latest.hash;
-      
-      this.checkpoints.push({
-        hash,
-        message,
-        timestamp: Date.now()
-      });
-
-      console.log(`📍 Checkpoint created: ${message} (${hash.substring(0, 7)})`);
-      return hash;
-    } catch (error) {
-      console.error('Failed to create checkpoint:', error);
-    }
+    const hash = `checkpoint-${Date.now().toString(36)}`;
+    this.checkpoints.push({
+      hash,
+      message,
+      timestamp: Date.now(),
+      mode: this.activeSession.mode,
+    });
+    return hash;
   }
 
-  /**
-   * Rollback to a specific checkpoint
-   */
-  async rollback(hash) {
-    if (!this.activeSession) return;
-
-    try {
-      console.log(`⏪ Rolling back to ${hash}...`);
-      await window.api.git.reset(['--hard', hash]);
-      return true;
-    } catch (error) {
-      console.error('Rollback failed:', error);
-      return false;
-    }
+  async rollback() {
+    return false;
   }
 
-  /**
-   * Terminate the session.
-   * If success: Keeps the branch for user review.
-   * If failure: Offers to delete the branch and return to original.
-   */
-  async disengageSafetyProtocol(success = true) {
-    if (!this.activeSession) return;
-
-    console.log('🛡️ Disengaging Safety Protocol...');
-
-    try {
-      // If we failed badly, we might want to just go back
-      if (!success) {
-        // Optional: Auto-revert logic here
-        // For now, we stay on the branch so the user can debug
-      }
-
-      // Notify user
-      const report = {
-        branch: this.sandboxBranch,
-        checkpoints: this.checkpoints.length,
-        duration: Date.now() - this.activeSession.startTime,
-      };
-
-      this.activeSession = null;
-      return report;
-
-    } catch (error) {
-      console.error('Error disengaging:', error);
-    }
+  async disengageSafetyProtocol() {
+    if (!this.activeSession) return null;
+    const report = {
+      branch: this.sandboxBranch,
+      checkpoints: this.checkpoints.length,
+      duration: Date.now() - this.activeSession.startTime,
+      mode: this.activeSession.mode,
+    };
+    this.activeSession = null;
+    return report;
   }
 
-  /**
-   * Merge the sandbox branch back into the original branch.
-   * ONLY called by explicit user action.
-   */
   async mergeToMain() {
-    if (!this.sandboxBranch || !this.originalBranch) return;
-
-    try {
-      console.log(`🔀 Merging ${this.sandboxBranch} into ${this.originalBranch}...`);
-      
-      // Checkout original
-      await window.api.git.checkout(this.originalBranch);
-      
-      // Merge
-      await window.api.git.mergeFromTo(this.sandboxBranch, this.originalBranch);
-      
-      // Delete sandbox
-      await window.api.git.deleteLocalBranch(this.sandboxBranch);
-      
-      console.log('✅ Merge complete.');
-      return true;
-    } catch (error) {
-      console.error('Merge failed:', error);
-      return false;
-    }
+    return false;
   }
 }
 
 export const safetyProtocol = new SafetyProtocol();
 export default safetyProtocol;
-

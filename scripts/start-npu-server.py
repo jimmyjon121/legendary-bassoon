@@ -89,6 +89,12 @@ class LoadModelRequest(BaseModel):
     precision: str | None = None
 
 
+class EmbeddingRequest(BaseModel):
+    texts: list[str] | None = None
+    text: str | None = None
+    normalize: bool = True
+
+
 def ensure_model_loaded():
     if state.model and state.tokenizer:
         return
@@ -144,6 +150,85 @@ def stream_tokens(req: GenerateRequest) -> Generator[str, None, None]:
         yield text
 
     thread.join()
+
+
+def _hash_fallback_embedding(text: str, dim: int = 256):
+    vector = torch.zeros(dim, dtype=torch.float32)
+    if not text:
+        return vector.tolist()
+
+    raw = text.encode('utf-8', errors='ignore')
+    for idx, byte in enumerate(raw[:8192]):
+        vector[(byte + idx) % dim] += 1.0
+
+    norm = torch.norm(vector, p=2)
+    if float(norm) > 0:
+        vector = vector / norm
+    return vector.tolist()
+
+
+def compute_embedding_vector(text: str, normalize: bool = True):
+    ensure_model_loaded()
+    tokenizer = state.tokenizer
+    model = state.model
+
+    inputs = tokenizer(
+        text or '',
+        return_tensors='pt',
+        truncation=True,
+        max_length=384,
+        padding=True,
+    )
+
+    outputs = None
+    try:
+        outputs = model(**inputs, output_hidden_states=True, return_dict=True)
+    except TypeError:
+        outputs = model(**inputs)
+    except Exception:
+        # Fall back to hash embedding if the model cannot expose hidden states.
+        return _hash_fallback_embedding(text), 'hash-fallback'
+
+    hidden = None
+    logits = None
+
+    if isinstance(outputs, dict):
+        hidden = outputs.get('last_hidden_state')
+        hidden_states = outputs.get('hidden_states')
+        if hidden is None and hidden_states:
+            hidden = hidden_states[-1]
+        logits = outputs.get('logits')
+    else:
+        hidden = getattr(outputs, 'last_hidden_state', None)
+        hidden_states = getattr(outputs, 'hidden_states', None)
+        if hidden is None and hidden_states is not None:
+            hidden = hidden_states[-1]
+        logits = getattr(outputs, 'logits', None)
+
+    method = 'model-hidden-states'
+    pooled = None
+    if hidden is not None:
+        attention_mask = inputs.get('attention_mask')
+        if attention_mask is not None:
+            expanded_mask = attention_mask.unsqueeze(-1).expand_as(hidden).float()
+            denom = expanded_mask.sum(dim=1).clamp(min=1e-6)
+            pooled = (hidden * expanded_mask).sum(dim=1) / denom
+        else:
+            pooled = hidden.mean(dim=1)
+    elif logits is not None:
+        # Coarse fallback when hidden states are unavailable.
+        pooled = logits.mean(dim=1)
+        method = 'logits-fallback'
+
+    if pooled is None:
+        return _hash_fallback_embedding(text), 'hash-fallback'
+
+    vector = pooled.squeeze(0).flatten().detach().cpu().to(torch.float32)
+    if normalize:
+        norm = torch.norm(vector, p=2)
+        if float(norm) > 0:
+            vector = vector / norm
+    return vector.tolist(), method
 
 
 @app.get('/status')
@@ -258,6 +343,43 @@ def generate_stream(req: GenerateRequest):
     return StreamingResponse(event_stream(), media_type='text/event-stream')
 
 
+@app.post('/embed')
+def embed(req: EmbeddingRequest):
+    ensure_model_loaded()
+    texts = req.texts or []
+    if req.text:
+        texts = [*texts, req.text]
+
+    texts = [str(item or '') for item in texts if str(item or '').strip()]
+    if not texts:
+        return {
+            'embeddings': [],
+            'count': 0,
+            'device': state.config.get('device'),
+            'model': state.config.get('model_path') or state.config.get('model_id'),
+            'method': 'none',
+        }
+
+    embeddings = []
+    methods = []
+    for text in texts:
+        vector, method = compute_embedding_vector(text, normalize=req.normalize)
+        embeddings.append(vector)
+        methods.append(method)
+
+    preferred_method = methods[0] if methods else 'none'
+    if any(method != preferred_method for method in methods):
+        preferred_method = 'mixed'
+
+    return {
+        'embeddings': embeddings,
+        'count': len(embeddings),
+        'device': state.config.get('device'),
+        'model': state.config.get('model_path') or state.config.get('model_id'),
+        'method': preferred_method,
+    }
+
+
 def main():
     # Force unbuffered output for Electron subprocess capture
     import sys
@@ -276,5 +398,4 @@ def main():
 
 if __name__ == '__main__':
     main()
-
 

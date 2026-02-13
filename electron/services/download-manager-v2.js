@@ -42,6 +42,12 @@ const MAX_RETRIES = 5;
 const MAX_CONCURRENT = 3;
 const PROGRESS_THROTTLE_MS = 200;
 
+function toSqlBindableValue(value) {
+  if (value === undefined) return null;
+  if (typeof value === 'number' && !Number.isFinite(value)) return null;
+  return value;
+}
+
 class DownloadManagerV2 extends EventEmitter {
   constructor() {
     super();
@@ -201,15 +207,19 @@ class DownloadManagerV2 extends EventEmitter {
       url,
       name,
       destinationDir,
+      destDir,
       filename,
-      expectedHash,
+      fileName,
+      expectedHash = null,
       hashAlgorithm = 'sha256',
       priority = 0,
       scheduledAt,
       provider,
+      source,
       modelType,
+      modelId,
       metadata = {},
-    } = options;
+    } = options || {};
     
     if (!url || !name) {
       throw new Error('URL and name are required');
@@ -217,15 +227,19 @@ class DownloadManagerV2 extends EventEmitter {
     
     const now = new Date().toISOString();
     const id = `dl-${Date.now()}-${crypto.randomBytes(4).toString('hex')}`;
-    const destDir = destinationDir || path.join(app.getPath('userData'), 'models');
-    const fname = filename || this._extractFilename(url, name);
+    const resolvedDestDir = destinationDir || destDir || path.join(app.getPath('userData'), 'models');
+    const resolvedFilename = filename || fileName || this._extractFilename(url, name);
+    const mergedMetadata = {
+      ...(metadata || {}),
+      ...(modelId ? { modelId } : {}),
+    };
     
     const job = {
       id,
       name,
       url,
-      destinationDir: destDir,
-      filename: fname,
+      destinationDir: resolvedDestDir,
+      filename: resolvedFilename,
       status: scheduledAt ? JobStatus.SCHEDULED : JobStatus.QUEUED,
       priority,
       scheduledAt: scheduledAt || null,
@@ -239,9 +253,9 @@ class DownloadManagerV2 extends EventEmitter {
       retryCount: 0,
       lastError: null,
       nextRetryAt: null,
-      provider: provider || null,
+      provider: provider || source || null,
       modelType: modelType || null,
-      metadata: JSON.stringify(metadata),
+      metadata: JSON.stringify(mergedMetadata),
       createdAt: now,
       startedAt: null,
       completedAt: null,
@@ -265,12 +279,12 @@ class DownloadManagerV2 extends EventEmitter {
       job.retryCount, job.lastError, job.nextRetryAt,
       job.provider, job.modelType, job.metadata,
       job.createdAt, job.startedAt, job.completedAt, job.updatedAt,
-    ]);
+    ].map(toSqlBindableValue));
     
     await this._saveDb();
     
     // Add to memory queue
-    const jobWithParsedMeta = { ...job, metadata };
+    const jobWithParsedMeta = { ...job, metadata: mergedMetadata };
     this.queue.push(jobWithParsedMeta);
     this._sortQueue();
     
@@ -308,7 +322,7 @@ class DownloadManagerV2 extends EventEmitter {
       job.provider, job.modelType, metadataStr,
       job.startedAt, job.completedAt, job.updatedAt,
       job.id,
-    ]);
+    ].map(toSqlBindableValue));
     
     // Debounce DB saves
     if (!this._saveTimeout) {

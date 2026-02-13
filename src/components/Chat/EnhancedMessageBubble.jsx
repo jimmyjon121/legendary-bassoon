@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAppStore } from '../../stores/appStore';
-import { parseModelName, getOptimalSettings } from '../../services/modelOptimizer';
+import { parseModelName, getOptimalSettings, isThinkingModel } from '../../services/modelOptimizer';
 import { ThinkingBlock, parseThinkTags, isInThinkingBlock, getPartialThinking } from './ThinkingBlock';
 import { ArtifactButton } from './ArtifactPanel';
 import { hasArtifacts } from './ArtifactDetector';
@@ -77,10 +77,13 @@ export const EnhancedMessageBubble = memo(function EnhancedMessageBubble({
   const [isHovered, setIsHovered] = useState(false);
   const contentRef = useRef(null);
   
-  const { createBranchFromMessage, currentConversationId } = useAppStore();
+  const { createBranchFromMessage, currentConversationId, generationMetadata } = useAppStore();
   
   const isUser = message.role === 'user';
   const isAssistant = message.role === 'assistant';
+  
+  // Check if the currently-generating model is a thinking model
+  const isActiveThinkingModel = isStreaming && generationMetadata?.isThinkingModel;
   
   const streamingStartRef = useRef(null);
   if (isStreaming && !streamingStartRef.current) {
@@ -242,11 +245,11 @@ export const EnhancedMessageBubble = memo(function EnhancedMessageBubble({
 
           {/* Inner padding */}
           <div className="px-4 py-3">
-            {/* Thinking Block */}
-            {isAssistant && (thinkingContent || isCurrentlyThinking) && (
+            {/* Thinking Block — show proactively for thinking models even before <think> appears */}
+            {isAssistant && (thinkingContent || isCurrentlyThinking || (isActiveThinkingModel && !mainContent)) && (
               <ThinkingBlock
                 content={thinkingContent || partialThinking}
-                isStreaming={isCurrentlyThinking}
+                isStreaming={isCurrentlyThinking || (isActiveThinkingModel && !thinkingContent && !mainContent)}
                 startTime={streamingStartRef.current}
                 className="mb-3"
               />

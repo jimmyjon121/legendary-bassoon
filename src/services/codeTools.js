@@ -161,6 +161,48 @@ export const CODE_TOOLS = [
         required: ['command']
       }
     }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'web_search',
+      description: 'Search the web for up-to-date product/technical references. Use this for benchmark tasks like "build X like Y".',
+      parameters: {
+        type: 'object',
+        properties: {
+          query: {
+            type: 'string',
+            description: 'Search query'
+          },
+          maxResults: {
+            type: 'number',
+            description: 'Maximum results to return (default: 5)'
+          }
+        },
+        required: ['query']
+      }
+    }
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'web_fetch_page',
+      description: 'Fetch a specific web page and extract readable content for implementation context.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: {
+            type: 'string',
+            description: 'Absolute URL to fetch'
+          },
+          maxChars: {
+            type: 'number',
+            description: 'Maximum number of characters to keep (default: 5000)'
+          }
+        },
+        required: ['url']
+      }
+    }
   }
 ];
 

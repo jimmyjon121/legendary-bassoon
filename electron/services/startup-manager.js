@@ -15,6 +15,16 @@ const STARTUP_STEPS = {
   COMPLETE: { id: 'complete', name: 'COMPLETE', order: 7 },
 };
 
+function normalizeLogSymbols(input) {
+  return String(input || '')
+    .replace(/âœ“|✓|✅/g, '[OK]')
+    .replace(/âœ—|✗|❌/g, '[FAIL]')
+    .replace(/âš |⚠️?|⚠/g, '[WARN]')
+    .replace(/â„¹|ℹ️?|ℹ/g, '[INFO]')
+    .replace(/ðŸ”„|🔄/g, '[RETRY]')
+    .replace(/â€“|–/g, '-');
+}
+
 class StartupManager {
   constructor() {
     this.processes = new Map();
@@ -50,8 +60,9 @@ class StartupManager {
   }
 
   addLog(message) {
+    const normalized = normalizeLogSymbols(message);
     const timestamp = new Date().toISOString();
-    const entry = `[${timestamp}] ${message}`;
+    const entry = `[${timestamp}] ${normalized}`;
     this.log.push(entry);
     console.log(entry);
     // Also emit as a log message for the terminal view
@@ -247,7 +258,13 @@ class StartupManager {
 
     // Find and start Ollama
     try {
-      const ollamaHelper = require('./ollama-helper');
+      const ollamaModule = require('./ollama-helper');
+      const ollamaHelper = typeof ollamaModule.getOllamaHelper === 'function'
+        ? ollamaModule.getOllamaHelper({})
+        : ollamaModule;
+      if (!ollamaHelper || typeof ollamaHelper.detectBinary !== 'function') {
+        throw new Error('ollama helper unavailable');
+      }
       const binary = await ollamaHelper.detectBinary();
       
       if (!binary) {
@@ -369,4 +386,3 @@ class StartupManager {
 }
 
 module.exports = new StartupManager();
-

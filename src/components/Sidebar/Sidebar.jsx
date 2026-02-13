@@ -1,6 +1,6 @@
 import React, { useState, memo, useCallback, useEffect, useMemo } from 'react';
 import { 
-  MessageCircle, Briefcase, Code2, Lock, Settings, Image, 
+  MessageCircle, Briefcase, Code2, Beaker, Lock, Settings, Image, 
   Plus, ChevronLeft, ChevronRight, Search, 
   Cpu, Globe, Command, Download
 } from 'lucide-react';
@@ -12,13 +12,14 @@ import { FolderTree } from './FolderTree';
 import { QuickFilters, QuickFiltersCompact } from './QuickFilters';
 import { ConversationCard } from './ConversationCard';
 
-const ICONS = { MessageCircle, Briefcase, Code2, Lock };
+const ICONS = { MessageCircle, Briefcase, Code2, Beaker, Lock };
 
 // Static workspace colors - no recomputation
 const WS_COLORS = {
   casual: '#818cf8',
   work: '#10b981',
   code: '#f59e0b',
+  research: '#0ea5e9',
   nsfw: '#f472b6',
 };
 
@@ -107,6 +108,7 @@ export function Sidebar() {
   // Get lock function for private workspace exit
   const lockNsfw = useAppStore(s => s.lockNsfw);
   const isInPrivateWorkspace = currentWorkspace === 'nsfw';
+  const isResearchWorkspace = currentWorkspace === 'research';
 
   return (
     <aside className={`${sidebarCollapsed ? 'w-[68px]' : 'w-[280px]'} 
@@ -164,7 +166,7 @@ export function Sidebar() {
       )}
 
       {/* New Chat + Search */}
-      {!sidebarCollapsed && (
+      {!sidebarCollapsed && !isResearchWorkspace && (
         <div className="px-3 pb-2 space-y-2">
           <button
             onClick={handleNewChat}
@@ -192,14 +194,14 @@ export function Sidebar() {
       )}
 
       {/* Quick Filters */}
-      {!sidebarCollapsed && (
+      {!sidebarCollapsed && !isResearchWorkspace && (
         <div className="px-3 pb-2">
           <QuickFilters />
         </div>
       )}
 
       {/* Collapsed: New Chat + Filters */}
-      {sidebarCollapsed && (
+      {sidebarCollapsed && !isResearchWorkspace && (
         <div className="p-2 flex flex-col items-center gap-2">
           <button
             onClick={handleNewChat}
@@ -223,7 +225,7 @@ export function Sidebar() {
       )}
 
       {/* Folders (expanded only) */}
-      {!sidebarCollapsed && (
+      {!sidebarCollapsed && !isResearchWorkspace && (
         <div className="px-1 pb-2 border-b border-border-subtle">
           <FolderTree />
         </div>
@@ -231,7 +233,12 @@ export function Sidebar() {
 
       {/* Conversations List */}
       <div className="flex-1 overflow-hidden">
-        {!sidebarCollapsed && filteredConversations.length > 20 ? (
+        {isResearchWorkspace && !sidebarCollapsed ? (
+          <div className="h-full px-4 py-8 text-center">
+            <p className="text-sm text-text-secondary">Research mode</p>
+            <p className="text-xs text-text-muted mt-1">Projects and runs are managed in the main panel.</p>
+          </div>
+        ) : !sidebarCollapsed && filteredConversations.length > 20 ? (
           <VirtualizedConversationList
             conversations={filteredConversations}
             currentConversationId={currentConversationId}

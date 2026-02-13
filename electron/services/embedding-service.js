@@ -70,6 +70,86 @@ async function embedTextsWithOllama(endpoint, texts, modelName = 'nomic-embed-te
   return vectors;
 }
 
+async function embedTextsWithOpenVino(endpoint, texts, modelName = '') {
+  const base = String(endpoint || '').replace(/\/$/, '');
+  if (!base) return [];
+
+  const url = `${base}/embed`;
+  let response;
+  try {
+    response = await makeRequest(
+      url,
+      {
+        texts,
+        model: modelName || undefined,
+      },
+      45000,
+    );
+  } catch (error) {
+    console.warn(`[Embedding] OpenVINO request failed: ${error.message}`);
+    return [];
+  }
+
+  const embeddings = Array.isArray(response?.embeddings) ? response.embeddings : [];
+  if (embeddings.length !== texts.length) {
+    const count = Number(response?.count || 0);
+    console.warn(
+      `[Embedding] OpenVINO embed returned ${embeddings.length} vectors for ${texts.length} text(s) (reported count=${count}).`,
+    );
+    return [];
+  }
+
+  return embeddings;
+}
+
+async function embedTextsWithRouting({
+  texts = [],
+  ollamaEndpoint = 'http://127.0.0.1:11434',
+  openvinoEndpoint = 'http://127.0.0.1:8081',
+  modelName = 'nomic-embed-text',
+  preferNpu = true,
+} = {}) {
+  const safeTexts = Array.isArray(texts)
+    ? texts.map((item) => String(item || '')).filter(Boolean)
+    : [];
+
+  if (safeTexts.length === 0) {
+    return {
+      vectors: [],
+      route: null,
+      fallbackReason: 'no-texts',
+    };
+  }
+
+  if (preferNpu) {
+    const npuVectors = await embedTextsWithOpenVino(openvinoEndpoint, safeTexts, modelName);
+    if (npuVectors.length === safeTexts.length) {
+      return {
+        vectors: npuVectors,
+        route: 'openvino-npu',
+        fallbackReason: null,
+      };
+    }
+  }
+
+  const ollamaVectors = await embedTextsWithOllama(ollamaEndpoint, safeTexts, modelName);
+  if (ollamaVectors.length === safeTexts.length) {
+    return {
+      vectors: ollamaVectors,
+      route: 'ollama',
+      fallbackReason: preferNpu ? 'openvino-unavailable-or-invalid' : null,
+    };
+  }
+
+  return {
+    vectors: [],
+    route: null,
+    fallbackReason: preferNpu
+      ? 'openvino-and-ollama-failed'
+      : 'ollama-failed',
+  };
+}
+
 // Cosine similarity between two embedding vectors
 function cosineSimilarity(a, b) {
   if (!a || !b || a.length !== b.length) return 0;
@@ -89,7 +169,8 @@ function cosineSimilarity(a, b) {
 
 module.exports = {
   embedTextsWithOllama,
+  embedTextsWithOpenVino,
+  embedTextsWithRouting,
   cosineSimilarity,
 };
-
 

@@ -353,46 +353,291 @@ class OllamaLibraryProvider {
     ];
   }
 
+  getFromCache(key) {
+    const entry = this.cache.get(key);
+    if (!entry) return null;
+    if (Date.now() - entry.timestamp > this.cacheTTL) {
+      this.cache.delete(key);
+      return null;
+    }
+    return entry.data;
+  }
+
+  setCache(key, data) {
+    this.cache.set(key, { data, timestamp: Date.now() });
+  }
+
+  fetchText(url) {
+    return new Promise((resolve, reject) => {
+      const client = url.startsWith('https') ? https : http;
+      const req = client.get(url, {
+        headers: {
+          'User-Agent': 'DevForge/0.1 (Model Providers)',
+          'Accept': 'text/html,application/xhtml+xml',
+        },
+      }, (res) => {
+        if (res.statusCode && res.statusCode >= 400) {
+          reject(new Error(`HTTP ${res.statusCode}`));
+          return;
+        }
+        let body = '';
+        res.on('data', (chunk) => { body += chunk.toString(); });
+        res.on('end', () => resolve(body));
+      });
+      req.setTimeout(15000, () => req.destroy(new Error('Timeout')));
+      req.on('error', reject);
+    });
+  }
+
+  decodeHtml(value = '') {
+    return String(value)
+      .replace(/&amp;/g, '&')
+      .replace(/&quot;/g, '"')
+      .replace(/&#39;/g, '\'')
+      .replace(/&lt;/g, '<')
+      .replace(/&gt;/g, '>')
+      .replace(/&#x2F;/g, '/')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  parsePullCount(value) {
+    if (!value) return 0;
+    const raw = String(value).trim().toUpperCase();
+    const num = parseFloat(raw.replace(/[^0-9.]/g, ''));
+    if (!Number.isFinite(num)) return 0;
+    if (raw.endsWith('B')) return Math.round(num * 1_000_000_000);
+    if (raw.endsWith('M')) return Math.round(num * 1_000_000);
+    if (raw.endsWith('K')) return Math.round(num * 1_000);
+    return Math.round(num);
+  }
+
+  detectFamily(modelId = '') {
+    const lower = modelId.toLowerCase();
+    if (lower.includes('llama')) return 'Llama';
+    if (lower.includes('mixtral')) return 'Mixtral';
+    if (lower.includes('mistral')) return 'Mistral';
+    if (lower.includes('qwen')) return 'Qwen';
+    if (lower.includes('gemma')) return 'Gemma';
+    if (lower.includes('phi')) return 'Phi';
+    if (lower.includes('deepseek')) return 'DeepSeek';
+    if (lower.includes('starcoder')) return 'StarCoder';
+    if (lower.includes('coder') || lower.includes('code')) return 'Code';
+    if (lower.includes('llava') || lower.includes('minicpm') || lower.includes('vision')) return 'Vision';
+    return 'Ollama';
+  }
+
+  toDisplayName(modelId = '') {
+    return modelId
+      .split(/[-_]/g)
+      .map((token) => token.trim())
+      .filter(Boolean)
+      .map((token) => token.length <= 3 ? token.toUpperCase() : `${token[0].toUpperCase()}${token.slice(1)}`)
+      .join(' ');
+  }
+
+  inferCapability({ id = '', description = '', tags = [] }) {
+    const lower = `${id} ${description} ${tags.join(' ')}`.toLowerCase();
+    if (lower.includes('embed')) return 'embedding';
+    if (lower.includes('vision') || lower.includes('image') || lower.includes('multimodal') || lower.includes('vl')) return 'vision';
+    if (lower.includes('code') || lower.includes('coder') || lower.includes('programming')) return 'code';
+    return 'chat';
+  }
+
+  parseParamsFromTag(tag = '') {
+    const lower = String(tag).toLowerCase().trim();
+    const moe = lower.match(/(\d+)x(\d+(\.\d+)?)b/);
+    if (moe) {
+      const experts = parseFloat(moe[1]);
+      const each = parseFloat(moe[2]);
+      if (Number.isFinite(experts) && Number.isFinite(each)) {
+        return Number((experts * each).toFixed(1));
+      }
+    }
+    const match = lower.match(/(\d+(\.\d+)?)b/);
+    if (!match) return null;
+    return parseFloat(match[1]);
+  }
+
+  estimateVariant(tag) {
+    const paramsB = this.parseParamsFromTag(tag);
+    if (!paramsB) {
+      return {
+        tag,
+        params: String(tag).toUpperCase(),
+        size: null,
+        vram: null,
+      };
+    }
+    const size = Number((paramsB * 0.58 + 0.35).toFixed(1));
+    const vram = Math.max(1, Math.ceil(size * 1.25));
+    return {
+      tag,
+      params: `${paramsB}B`,
+      size,
+      vram,
+    };
+  }
+
+  mergeModels(...modelLists) {
+    const byId = new Map();
+    for (const list of modelLists) {
+      for (const model of (Array.isArray(list) ? list : [])) {
+        const id = (model.id || model.name || '').trim();
+        if (!id) continue;
+        if (!byId.has(id)) {
+          byId.set(id, {
+            ...model,
+            id,
+            name: model.name || this.toDisplayName(id),
+            tags: Array.from(new Set(model.tags || [])),
+            variants: Array.isArray(model.variants) ? model.variants : [],
+          });
+          continue;
+        }
+        const existing = byId.get(id);
+        const mergedTags = Array.from(new Set([...(existing.tags || []), ...(model.tags || [])]));
+        const mergedVariants = [...(existing.variants || [])];
+        for (const variant of (model.variants || [])) {
+          if (!mergedVariants.some(v => String(v.tag).toLowerCase() === String(variant.tag).toLowerCase())) {
+            mergedVariants.push(variant);
+          }
+        }
+        const merged = {
+          ...existing,
+          ...model,
+          id,
+          name: existing.name || model.name || this.toDisplayName(id),
+          description: (existing.description || '').length >= (model.description || '').length
+            ? existing.description
+            : model.description,
+          family: existing.family || model.family || this.detectFamily(id),
+          capability: existing.capability || model.capability || this.inferCapability({ id, description: model.description || existing.description || '', tags: mergedTags }),
+          pulls: Math.max(existing.pulls || 0, model.pulls || 0),
+          variants: mergedVariants.sort((a, b) => (a.vram || 999) - (b.vram || 999)),
+          tags: mergedTags,
+          updated: model.updated || existing.updated,
+        };
+        byId.set(id, merged);
+      }
+    }
+    return Array.from(byId.values());
+  }
+
+  async getRemoteLibraryModels(sort = 'popular') {
+    const cacheKey = `ollama:library:${sort}`;
+    const cached = this.getFromCache(cacheKey);
+    if (cached) return cached;
+
+    const html = await this.fetchText(`${this.baseUrl}/library?sort=${encodeURIComponent(sort)}`);
+    const cards = html.match(/<li x-test-model[\s\S]*?<\/li>/g) || [];
+    const parsed = cards.map((card) => {
+      const idMatch = card.match(/href="\/library\/([^"/?#]+)"/i);
+      const id = idMatch?.[1];
+      if (!id) return null;
+
+      const titleMatch = card.match(/x-test-model-title[^>]*title="([^"]+)"/i);
+      const descMatch = card.match(/<p class="max-w-lg[^"]*">([\s\S]*?)<\/p>/i);
+      const pullMatch = card.match(/x-test-pull-count[^>]*>([^<]+)</i);
+      const updatedTitleMatch = card.match(/<span class="flex items-center" title="([^"]+)"[\s\S]*?<span x-test-updated/i);
+      const updatedTextMatch = card.match(/x-test-updated[^>]*>([^<]+)</i);
+
+      const capabilityTags = Array.from(card.matchAll(/x-test-capability[^>]*>([^<]+)</gi))
+        .map((m) => this.decodeHtml(m[1]).toLowerCase())
+        .filter(Boolean);
+      const sizeTags = Array.from(card.matchAll(/x-test-size[^>]*>([^<]+)</gi))
+        .map((m) => this.decodeHtml(m[1]).toLowerCase())
+        .filter(Boolean);
+      const variants = sizeTags.map((tag) => this.estimateVariant(tag));
+      const description = this.decodeHtml(descMatch?.[1] || '');
+      const capability = this.inferCapability({ id, description, tags: [...capabilityTags, ...sizeTags] });
+
+      let updated = null;
+      if (updatedTitleMatch?.[1]) {
+        const parsed = new Date(updatedTitleMatch[1]);
+        if (!Number.isNaN(parsed.getTime())) {
+          updated = parsed.toISOString();
+        }
+      }
+      const model = {
+        id,
+        name: this.toDisplayName(titleMatch?.[1] || id),
+        description: description || `${id} from Ollama Library`,
+        author: 'Ollama',
+        family: this.detectFamily(id),
+        capability,
+        variants,
+        tags: Array.from(new Set([capability, ...capabilityTags, ...sizeTags, 'ollama-library'])),
+        pulls: this.parsePullCount(pullMatch?.[1]),
+        updated: updated || null,
+        updatedLabel: this.decodeHtml(updatedTextMatch?.[1] || ''),
+      };
+      return model;
+    }).filter(Boolean);
+
+    this.setCache(cacheKey, parsed);
+    return parsed;
+  }
+
+  async getCatalogModels(options = {}) {
+    const sort = options.sort || 'popular';
+    const remote = await this.getRemoteLibraryModels(sort).catch(() => []);
+    return this.mergeModels(this.officialModels, this.visionModels, remote);
+  }
+
   async searchModels(query, options = {}) {
     const { filter = 'all' } = options;
-    const lowerQuery = query.toLowerCase();
-    
-    let models = [...this.officialModels];
-    if (filter === 'vision' || filter === 'all') {
-      models = [...models, ...this.visionModels];
+    const lowerQuery = (query || '').toLowerCase();
+    let models = await this.getCatalogModels({ sort: options.sort || 'popular' });
+
+    if (filter && filter !== 'all') {
+      models = models.filter((m) => {
+        const capability = (m.capability || '').toLowerCase();
+        const tags = (m.tags || []).map((t) => String(t).toLowerCase());
+        if (filter === 'small') {
+          return (m.variants || []).some(v => (v.vram || 999) <= 4);
+        }
+        return capability === filter || tags.includes(filter);
+      });
     }
-    
-    if (!query) return models;
-    
-    return models.filter(m => 
-      m.name.toLowerCase().includes(lowerQuery) ||
-      m.description.toLowerCase().includes(lowerQuery) ||
-      m.family.toLowerCase().includes(lowerQuery) ||
-      m.tags.some(t => t.includes(lowerQuery))
+
+    if (!lowerQuery) return models;
+
+    return models.filter((m) =>
+      (m.id || '').toLowerCase().includes(lowerQuery) ||
+      (m.name || '').toLowerCase().includes(lowerQuery) ||
+      (m.description || '').toLowerCase().includes(lowerQuery) ||
+      (m.family || '').toLowerCase().includes(lowerQuery) ||
+      (m.author || '').toLowerCase().includes(lowerQuery) ||
+      (m.tags || []).some((t) => String(t).toLowerCase().includes(lowerQuery))
     );
   }
 
   async getModelDetails(modelId) {
-    const allModels = [...this.officialModels, ...this.visionModels];
-    return allModels.find(m => m.id === modelId);
+    const allModels = await this.getCatalogModels();
+    return allModels.find((m) => m.id === modelId || m.name === modelId) || null;
   }
 
   async getPopularModels(limit = 20) {
-    return [...this.officialModels]
-      .sort((a, b) => b.pulls - a.pulls)
+    const models = await this.getCatalogModels({ sort: 'popular' });
+    return [...models]
+      .sort((a, b) => (b.pulls || 0) - (a.pulls || 0))
       .slice(0, limit);
   }
 
   async getVisionModels() {
-    return this.visionModels;
+    const models = await this.getCatalogModels({ sort: 'popular' });
+    return models.filter((m) => (m.capability || '').toLowerCase() === 'vision');
   }
 
   async getCodeModels() {
-    return this.officialModels.filter(m => m.capability === 'code');
+    const models = await this.getCatalogModels({ sort: 'popular' });
+    return models.filter((m) => (m.capability || '').toLowerCase() === 'code');
   }
 
   async getChatModels() {
-    return this.officialModels.filter(m => m.capability === 'chat');
+    const models = await this.getCatalogModels({ sort: 'popular' });
+    return models.filter((m) => (m.capability || '').toLowerCase() === 'chat');
   }
 
   getCategories() {
@@ -1151,7 +1396,12 @@ class ModelProvidersService extends EventEmitter {
   async getOllamaModels(category = 'popular') {
     switch (category) {
       case 'popular':
-        return this.ollama.getPopularModels();
+        // Return a broader list so the hub exposes more than the original curated set.
+        return this.ollama.getPopularModels(120);
+      case 'all':
+        return this.ollama.getCatalogModels({ sort: 'popular' });
+      case 'newest':
+        return this.ollama.getCatalogModels({ sort: 'newest' });
       case 'vision':
         return this.ollama.getVisionModels();
       case 'code':
@@ -1159,7 +1409,7 @@ class ModelProvidersService extends EventEmitter {
       case 'chat':
         return this.ollama.getChatModels();
       default:
-        return this.ollama.searchModels('');
+        return this.ollama.searchModels('', { filter: category });
     }
   }
 
@@ -1652,4 +1902,3 @@ module.exports = {
   ModelProvidersService,
   getModelProviders,
 };
-

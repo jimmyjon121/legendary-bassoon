@@ -120,91 +120,9 @@ function setupAIHandlers(ipcMain, mainWindow, store, db) {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // LLM STREAMING
+  // LLM STREAMING (legacy stream-llm removed — use llm:stream in ipc-handlers.js)
   // ─────────────────────────────────────────────────────────────────────────
   
-  ipcMain.on('stream-llm', (event, { model, prompt, system, options = {} }) => {
-    const endpoint = store?.get('llmEndpoint') || 'http://127.0.0.1:11434';
-    const streamId = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    
-    const url = new URL(endpoint);
-    const postData = JSON.stringify({
-      model,
-      prompt,
-      system,
-      stream: true,
-      options: {
-        ...options,
-        num_gpu: options.num_gpu ?? -1, // Default to full GPU
-      },
-    });
-
-    const reqOptions = {
-      hostname: url.hostname,
-      port: url.port || 11434,
-      path: '/api/generate',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Content-Length': Buffer.byteLength(postData),
-      },
-    };
-
-    const req = http.request(reqOptions, (res) => {
-      let buffer = '';
-
-      res.on('data', (chunk) => {
-        buffer += chunk.toString();
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const parsed = JSON.parse(line);
-            if (parsed.done) {
-              event.reply('llm-stream', { done: true, streamId });
-              activeStreams.delete(streamId);
-            } else if (parsed.response) {
-              event.reply('llm-stream', { response: parsed.response, streamId });
-            }
-          } catch (e) {
-            // Ignore parse errors for partial chunks
-          }
-        }
-      });
-
-      res.on('end', () => {
-        if (buffer.trim()) {
-          try {
-            const parsed = JSON.parse(buffer);
-            if (parsed.response) {
-              event.reply('llm-stream', { response: parsed.response, streamId });
-            }
-          } catch (e) {
-            // Ignore
-          }
-        }
-        event.reply('llm-stream', { done: true, streamId });
-        activeStreams.delete(streamId);
-      });
-    });
-
-    req.on('error', (error) => {
-      event.reply('llm-stream', { error: error.message, streamId });
-      activeStreams.delete(streamId);
-    });
-
-    // Store for cancellation
-    activeStreams.set(streamId, req);
-    
-    req.write(postData);
-    req.end();
-    
-    // Return stream ID for cancellation
-    event.returnValue = streamId;
-  });
-
   ipcMain.handle('cancel-llm-stream', (_, streamId) => {
     const req = activeStreams.get(streamId);
     if (req) {

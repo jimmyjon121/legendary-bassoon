@@ -94,6 +94,16 @@ class OllamaBackend extends BaseBackend {
       };
 
       const req = protocol.request(reqOptions, (res) => {
+        if (res.statusCode !== 200) {
+          let errorBody = '';
+          res.on('data', (chunk) => { errorBody += chunk.toString(); });
+          res.on('end', () => {
+            this.activeRequests.delete(requestId);
+            reject(new Error(`HTTP ${res.statusCode}: ${errorBody.slice(0, 300)}`));
+          });
+          return;
+        }
+
         res.on('data', (chunk) => {
           const lines = chunk.toString().split('\n').filter(line => line.trim());
           for (const line of lines) {
@@ -191,20 +201,45 @@ class OllamaBackend extends BaseBackend {
   async generate(payload) {
     try {
       const options = this._buildOptions(payload.options);
-      
-      const response = await this._makeRequest('/api/generate', {
+
+      const hasMessages = Array.isArray(payload.messages) && payload.messages.length > 0;
+      const apiPath = hasMessages ? '/api/chat' : '/api/generate';
+
+      const requestBody = hasMessages
+        ? {
+            model: payload.model,
+            messages: payload.system
+              ? [{ role: 'system', content: payload.system }, ...payload.messages]
+              : payload.messages,
+            stream: false,
+            options,
+            ...(payload.format ? { format: payload.format } : {}),
+          }
+        : {
+            model: payload.model,
+            prompt: payload.prompt,
+            system: payload.system,
+            stream: false,
+            options,
+            ...(payload.format ? { format: payload.format } : {}),
+            ...(payload.images ? { images: payload.images } : {}),
+          };
+
+      const response = await this._makeRequest(apiPath, {
         method: 'POST',
-        body: {
-          model: payload.model,
-          prompt: payload.prompt,
-          system: payload.system,
-          stream: false,
-          options
-        },
+        body: requestBody,
         timeout: 300000 // 5 minutes for generation
       });
 
-      return response.data;
+      if (response.status !== 200) {
+        throw new Error(response.data?.error || `HTTP ${response.status}`);
+      }
+
+      if (hasMessages && response.data?.message?.content && !response.data?.response) {
+        response.data.response = response.data.message.content;
+      }
+
+      return response.data || {};
     } catch (error) {
       throw new Error(`Ollama generation failed: ${error.message}`);
     }
@@ -217,22 +252,49 @@ class OllamaBackend extends BaseBackend {
     const requestId = `ollama-${Date.now()}`;
     
     try {
-      await this._streamRequest(
-        '/api/generate',
-        {
-          model: payload.model,
-          prompt: payload.prompt,
-          system: payload.system,
-          stream: true,
-          options,
-          // Pass images for vision models if present
-          ...(payload.images ? { images: payload.images } : {}),
+      const options = this._buildOptions(payload.options);
+      const hasMessages = Array.isArray(payload.messages) && payload.messages.length > 0;
+      const apiPath = hasMessages ? '/api/chat' : '/api/generate';
+
+      const requestBody = hasMessages
+        ? {
+            model: payload.model,
+            messages: payload.system
+              ? [{ role: 'system', content: payload.system }, ...payload.messages]
+              : payload.messages,
+            stream: true,
+            options,
+            ...(payload.format ? { format: payload.format } : {}),
+          }
+        : {
+            model: payload.model,
+            prompt: payload.prompt,
+            system: payload.system,
+            stream: true,
+            options,
+            ...(payload.images ? { images: payload.images } : {}),
+          };
+
+      const streamTask = this._streamRequest(
+        apiPath,
+        requestBody,
+        (parsed) => {
+          if (hasMessages && parsed?.message?.content) {
+            onChunk({ response: parsed.message.content, done: !!parsed.done });
+            return;
+          }
+          onChunk(parsed);
         },
-        onChunk,
         requestId
-      );
+      ).catch((error) => {
+        onChunk({ error: error.message, done: true });
+        throw error;
+      });
+
+      this.activeRequests.set(`${requestId}:task`, streamTask);
+      streamTask.finally(() => this.activeRequests.delete(`${requestId}:task`));
       
-      return { requestId };
+      return { requestId, streamTask };
     } catch (error) {
       throw new Error(`Ollama streaming failed: ${error.message}`);
     }
@@ -290,7 +352,11 @@ class OllamaBackend extends BaseBackend {
         },
         timeout: 120000 // 2 minutes for initial load
       });
-      
+
+      if (response.status !== 200) {
+        throw new Error(response.data?.error || `HTTP ${response.status}`);
+      }
+
       console.log(`[OllamaBackend] Model ${modelName} warmed up successfully`);
       return { success: true, model: modelName };
     } catch (error) {
@@ -349,5 +415,3 @@ class OllamaBackend extends BaseBackend {
 }
 
 module.exports = OllamaBackend;
-
-

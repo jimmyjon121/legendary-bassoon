@@ -211,16 +211,27 @@ export const useDebateStore = create((set, get) => ({
       let fullResponse = '';
       const channel = `debate:stream:${Date.now()}`;
       
+      // Build structured messages array for /api/chat
+      const chatMessages = [
+        ...messages
+          .filter(m => m.role !== 'system' || m.speaker === 'Moderator' || m.speaker === 'Scene')
+          .map(m => ({
+            role: m.role === 'system' ? 'user' : (m.speaker === currentModel ? 'assistant' : 'user'),
+            content: m.role === 'system'
+              ? (isPrivate ? `[Scene: ${m.content}]` : `Moderator: ${m.content}`)
+              : `${m.speaker}: ${m.content}`,
+          })),
+        { role: 'user', content: `It is now your turn to respond as ${currentModel}. Continue the debate naturally.` }
+      ];
+      
       const cleanup = window.electronAPI.streamFromLLM(
         {
           model: currentModel,
-          prompt,
+          messages: chatMessages,
           system: systemPrompt,
           options: { 
             temperature: isPrivate ? 0.9 : 0.8, 
             top_p: 0.95,
-            // Stop sequences to prevent fake conversation turns
-            stop: ['Human:', '\nHuman:', '\n\nHuman:', 'User:', '\nUser:']
           }
         },
         (chunk) => {
