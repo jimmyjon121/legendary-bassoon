@@ -32,6 +32,8 @@ const ResearchWorkspace = lazy(() => import('../Research/ResearchWorkspace').the
 const CodeWorkbench = lazy(() => import('../Code/CodeWorkbench').then(m => ({ default: m.CodeWorkbench })));
 const CasualWorkspace = lazy(() => import('./CasualWorkspace').then(m => ({ default: m.CasualWorkspace })));
 
+const WEB_SEARCH_PREF_KEY = 'researchWebSearchEnabled';
+
 export function ChatArea() {
   // === SELECTIVE SUBSCRIPTIONS for optimal re-render performance ===
   const currentWorkspace = useAppStore(s => s.currentWorkspace);
@@ -68,7 +70,7 @@ export function ChatArea() {
   const [showModelExperience, setShowModelExperience] = useState(false);
   const [isLoadingConversation, setIsLoadingConversation] = useState(false);
   const [showScrollButton, setShowScrollButton] = useState(false);
-  const [webSearchEnabled, setWebSearchEnabled] = useState(() => localStorage.getItem('webSearchEnabled') === 'true');
+  const [webSearchEnabled, setWebSearchEnabled] = useState(() => localStorage.getItem(WEB_SEARCH_PREF_KEY) === 'true');
   
   // Artifact panel state - for live preview of HTML/SVG/Mermaid/React
   const [artifactPanelOpen, setArtifactPanelOpen] = useState(false);
@@ -84,6 +86,13 @@ export function ChatArea() {
   }, []);
   
   const workspace = WORKSPACES[currentWorkspace];
+  const canUseWebSearch = currentWorkspace === 'research';
+
+  useEffect(() => {
+    if (!canUseWebSearch && webSearchEnabled) {
+      setWebSearchEnabled(false);
+    }
+  }, [canUseWebSearch, webSearchEnabled]);
   
   // Typing analyzer for soul state inference
   const { handleKeyDown: handleTypingKeyDown } = useTypingAnalyzer(currentWorkspace);
@@ -295,7 +304,10 @@ export function ChatArea() {
       return [];
     });
     try {
-      await sendMessage(message, { attachments: payloadAttachments, webSearchEnabled });
+      await sendMessage(message, {
+        attachments: payloadAttachments,
+        webSearchEnabled: canUseWebSearch ? webSearchEnabled : false,
+      });
     } catch (error) {
       console.error('Failed to send message:', error);
     }
@@ -583,22 +595,24 @@ export function ChatArea() {
               {/* Action Buttons */}
               <div className="absolute right-2 bottom-2 flex items-center gap-1">
                 {/* Web Search Toggle */}
-                <button
-                  type="button"
-                  onClick={() => {
-                    const next = !webSearchEnabled;
-                    setWebSearchEnabled(next);
-                    localStorage.setItem('webSearchEnabled', next.toString());
-                  }}
-                  className={`flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                    webSearchEnabled 
-                      ? 'bg-blue-500/15 text-blue-400 border border-blue-500/25' 
-                      : 'text-text-muted hover:text-text-secondary hover:bg-forge-hover border border-transparent'
-                  }`}
-                  title={webSearchEnabled ? "Web search enabled" : "Enable web search"}
-                >
-                  <Globe size={14} />
-                </button>
+                {canUseWebSearch && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const next = !webSearchEnabled;
+                      setWebSearchEnabled(next);
+                      localStorage.setItem(WEB_SEARCH_PREF_KEY, next.toString());
+                    }}
+                    className={`flex items-center gap-1 px-2 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                      webSearchEnabled 
+                        ? 'bg-blue-500/15 text-blue-400 border border-blue-500/25' 
+                        : 'text-text-muted hover:text-text-secondary hover:bg-forge-hover border border-transparent'
+                    }`}
+                    title={webSearchEnabled ? "Web search enabled" : "Enable web search"}
+                  >
+                    <Globe size={14} />
+                  </button>
+                )}
                 {/* Templates */}
                 <TemplateSelector
                   onInsert={(text) =>

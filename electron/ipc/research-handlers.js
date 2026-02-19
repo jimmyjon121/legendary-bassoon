@@ -3,7 +3,7 @@ const path = require('path');
 const fs = require('fs');
 const { v4: uuidv4 } = require('uuid');
 const { getOrchestrator } = require('../services/inference-orchestrator');
-const { ResearchOrchestrator, buildStatsSkeleton, safeParseJson } = require('../services/research/research-orchestrator');
+const { ResearchOrchestrator, safeParseJson } = require('../services/research/research-orchestrator');
 const { DEFAULT_SOURCE_POLICY, mergeSourcePolicy } = require('../services/research/research-source-policy');
 const { DEFAULT_STARTER_SCHEMA, normalizeSchema } = require('../services/research/research-schema');
 
@@ -65,7 +65,7 @@ function extractSynthesisText(response = {}) {
   return '';
 }
 
-async function generateRunSynthesis({ prompt, store }) {
+async function _generateRunSynthesis({ prompt, store }) {
   const model = resolveSynthesisModel(store);
   const orchestrator = getOrchestrator(store);
   if (!orchestrator) {
@@ -97,7 +97,7 @@ async function generateRunSynthesis({ prompt, store }) {
   return { model, text };
 }
 
-async function generateRunExtraction({ prompt, store }) {
+async function _generateRunExtraction({ prompt, store }) {
   const model = resolveSynthesisModel(store);
   const orchestrator = getOrchestrator(store);
   if (!orchestrator) {
@@ -127,7 +127,7 @@ async function generateRunExtraction({ prompt, store }) {
   return { model, text };
 }
 
-async function generateRunProgressSummary({ prompt, store }) {
+async function _generateRunProgressSummary({ prompt, store }) {
   const model = resolveSynthesisModel(store);
   const orchestrator = getOrchestrator(store);
   if (!orchestrator) {
@@ -156,14 +156,40 @@ async function generateRunProgressSummary({ prompt, store }) {
   return { model, text };
 }
 
+async function generateResearchLLM({ prompt, maxTokens, store }) {
+  const model = resolveSynthesisModel(store);
+  const inferenceOrch = getOrchestrator(store);
+  if (!inferenceOrch) throw new Error('inference_orchestrator_unavailable');
+  if (!inferenceOrch.initialized && typeof inferenceOrch.initialize === 'function') {
+    await inferenceOrch.initialize();
+  }
+  const numPredict = Math.max(200, Math.min(6000, Number(maxTokens || 1500)));
+  const response = await inferenceOrch.generate({
+    model,
+    prompt: String(prompt || '').trim(),
+    lane: 'lane_agent',
+    workloadType: 'research_llm',
+    allowFallback: true,
+    priority: 10,
+    options: {
+      temperature: 0.2,
+      top_p: 0.9,
+      top_k: 40,
+      repeat_penalty: 1.06,
+      num_predict: numPredict,
+    },
+  });
+  const text = extractSynthesisText(response);
+  if (!text) throw new Error('empty_llm_response');
+  return { model, text };
+}
+
 function ensureOrchestrator({ db, saveDatabase, mainWindow, store }) {
   if (!orchestrator) {
     orchestrator = new ResearchOrchestrator({
       db,
       saveDatabase,
-      synthesisGenerator: async ({ prompt }) => generateRunSynthesis({ prompt, store }),
-      extractionGenerator: async ({ prompt }) => generateRunExtraction({ prompt, store }),
-      progressSummaryGenerator: async ({ prompt }) => generateRunProgressSummary({ prompt, store }),
+      llmCall: async ({ prompt, maxTokens }) => generateResearchLLM({ prompt, maxTokens, store }),
       progressSink: (payload) => {
         try {
           if (mainWindow && !mainWindow.isDestroyed()) {
@@ -208,7 +234,7 @@ function buildCsv(rows, columns) {
   return `${header}\n${body}`;
 }
 
-function normalizeBoolLike(value) {
+function _normalizeBoolLike(value) {
   if (value === true || value === 'true') return 'Yes';
   if (value === false || value === 'false') return 'No';
   const text = String(value ?? '').trim();
@@ -217,7 +243,7 @@ function normalizeBoolLike(value) {
   return text;
 }
 
-function toArray(value) {
+function _toArray(value) {
   if (Array.isArray(value)) return value.filter((item) => String(item || '').trim().length > 0);
   if (value === null || value === undefined) return [];
   return String(value)
@@ -446,9 +472,123 @@ function buildProjectContext(helpers, project, limitConversations = 20) {
   };
 }
 
+function mergeProjectContext(primary = {}, fallback = {}) {
+  const pickText = (...values) => {
+    for (const value of values) {
+      const text = String(value || '').trim();
+      if (text) return text;
+    }
+    return '';
+  };
+  const pickList = (...values) => {
+    for (const value of values) {
+      if (Array.isArray(value) && value.length > 0) {
+        return value
+          .map((item) => String(item || '').trim())
+          .filter(Boolean);
+      }
+    }
+    return [];
+  };
+
+  return {
+    permanentInstructions: pickText(primary.permanentInstructions, fallback.permanentInstructions),
+    runInstructions: pickText(primary.runInstructions, fallback.runInstructions),
+    conversationDigest: pickText(primary.conversationDigest, fallback.conversationDigest),
+    documentDigest: pickText(primary.documentDigest, fallback.documentDigest),
+    linkedConversations: pickList(primary.linkedConversations, fallback.linkedConversations),
+    linkedDocuments: pickList(primary.linkedDocuments, fallback.linkedDocuments),
+  };
+}
+
+function normalizeRunStatus(status = '') {
+  return String(status || '').trim().toLowerCase();
+}
+
+function isTerminalRunStatus(status = '') {
+  const normalized = normalizeRunStatus(status);
+  return normalized === 'completed' || normalized === 'cancelled' || normalized === 'error';
+}
+
+function normalizeTypedEvidence(entry = {}) {
+  const payload = entry && typeof entry === 'object' ? entry : {};
+  const quote = String(payload.quote || payload.excerpt_text || payload.claim_text || '').trim();
+  const sourceUrl = String(payload.sourceUrl || payload.source_url || '').trim();
+  const capturedAt = payload.capturedAt || payload.fetched_at || nowIso();
+  const supportsFindingIds = Array.isArray(payload.supportsFindingIds)
+    ? payload.supportsFindingIds.map((item) => String(item || '').trim()).filter(Boolean)
+    : [];
+  const sourceDomain = String(payload.sourceDomain || payload.source_domain || '').trim();
+  const sourceTitle = String(payload.sourceTitle || payload.source_title || '').trim();
+  const fieldKey = String(payload.fieldKey || payload.field_key || '').trim();
+  const isOfficial = payload.isOfficial !== undefined
+    ? Boolean(payload.isOfficial)
+    : Number(payload.is_official || 0) === 1;
+
+  return {
+    quote,
+    sourceUrl,
+    capturedAt,
+    supportsFindingIds,
+    sourceDomain,
+    sourceTitle,
+    fieldKey,
+    isOfficial,
+    // Legacy compatibility keys
+    claim_text: quote,
+    source_url: sourceUrl,
+    fetched_at: capturedAt,
+    source_domain: sourceDomain,
+    source_title: sourceTitle,
+    field_key: fieldKey,
+    is_official: isOfficial,
+  };
+}
+
+function collectRecordEvidence(record = {}, evidenceRows = []) {
+  const evidence = [];
+
+  if (Array.isArray(record?.evidence)) {
+    for (const item of record.evidence) {
+      const typed = normalizeTypedEvidence(item);
+      if (!typed.quote || !typed.sourceUrl) continue;
+      evidence.push(typed);
+    }
+  }
+
+  if (evidence.length > 0) return evidence;
+
+  if (Array.isArray(evidenceRows)) {
+    for (const row of evidenceRows) {
+      const typed = normalizeTypedEvidence(row);
+      if (!typed.quote || !typed.sourceUrl) continue;
+      evidence.push(typed);
+    }
+  }
+
+  return evidence;
+}
+
 function setupResearchHandlers(ipcMain, mainWindow, { db, saveDatabase, store }) {
   const helpers = createDbHelpers(db, saveDatabase);
   const engine = ensureOrchestrator({ db, saveDatabase, mainWindow, store });
+  const runLocks = new Map();
+
+  const withRunLock = async (runId, fn) => {
+    const key = String(runId || '').trim();
+    if (!key) return fn();
+    const previous = runLocks.get(key) || Promise.resolve();
+    let release = () => {};
+    const gate = new Promise((resolve) => { release = resolve; });
+    runLocks.set(key, previous.then(() => gate));
+    await previous;
+    try {
+      return await fn();
+    } finally {
+      release();
+      if (runLocks.get(key) === gate) runLocks.delete(key);
+    }
+  };
 
   ipcMain.handle('research:project:list', async (_, { workspace } = {}) => {
     const rows = workspace
@@ -525,6 +665,12 @@ function setupResearchHandlers(ipcMain, mainWindow, { db, saveDatabase, store })
     const runRows = helpers.query(`SELECT id FROM research_runs WHERE project_id = ?`, [id]);
     const runIds = runRows.map((row) => row.id);
     for (const runId of runIds) {
+      // Stop live orchestrator activity before deleting persisted run rows.
+      try {
+        await engine.cancelRun(runId);
+      } catch (_error) {
+        // Best effort; continue cleanup.
+      }
       helpers.run(`DELETE FROM research_tasks WHERE run_id = ?`, [runId]);
       helpers.run(`DELETE FROM research_checkpoints WHERE run_id = ?`, [runId]);
     }
@@ -620,128 +766,192 @@ function setupResearchHandlers(ipcMain, mainWindow, { db, saveDatabase, store })
 
   ipcMain.handle('research:run:start', async (_, payload = {}) => {
     const projectId = String(payload.projectId || '').trim();
-    const objective = String(payload.objective || '').trim();
-    if (!projectId || !objective) return { success: false, error: 'Missing project or objective' };
+    const question = String(payload.objective || payload.question || '').trim();
+    const intent = String(payload.intent || '').trim();
+    const jurisdiction = String(payload.jurisdiction || '').trim();
+    const hasSourcePolicy = payload.sourcePolicy !== undefined || payload.source_policy !== undefined;
+    const requestedSourcePolicy = payload.sourcePolicy ?? payload.source_policy;
+    if (!projectId || !question) return { success: false, error: 'Missing project or research question' };
+    if (!intent) return { success: false, error: 'Missing required field: intent' };
+    if (!jurisdiction) return { success: false, error: 'Missing required field: jurisdiction' };
+    if (!hasSourcePolicy || !requestedSourcePolicy || typeof requestedSourcePolicy !== 'object') {
+      return { success: false, error: 'Missing required field: sourcePolicy' };
+    }
     const projectRow = helpers.queryOne(`SELECT * FROM research_projects WHERE id = ?`, [projectId]);
     if (!projectRow) return { success: false, error: 'Project not found' };
     const project = normalizeProjectRow(projectRow);
-    const runId = uuidv4();
-    const workerCount = Math.max(1, Number(payload.workerCount || 4));
-    const runInstructions = String(payload.runInstructions || '').trim();
-    const researchSettings = payload?.researchSettings && typeof payload.researchSettings === 'object'
-      ? payload.researchSettings
-      : {};
-    const context = buildProjectContext(helpers, project);
-    const promptSnapshot = {
-      objective,
-      permanentInstructions: project.permanent_instructions || '',
-      runInstructions,
-      researchSettings,
-      schema: project.schema,
-      sourcePolicy: project.source_policy,
-      conversationDigest: context.conversationDigest,
-      documentDigest: context.documentDigest,
-      linkedConversations: context.linkedConversations,
-      linkedDocuments: context.linkedDocuments,
-      createdAt: nowIso(),
-    };
-
-    helpers.run(
-      `INSERT INTO research_runs
-        (id, project_id, status, objective, run_instructions, worker_count, stats_json, convergence_count, prompt_snapshot_json, created_at, started_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        runId,
-        projectId,
-        'running',
-        objective,
-        runInstructions,
-        workerCount,
-        safeStringify(buildStatsSkeleton()),
-        0,
-        safeStringify(promptSnapshot),
-        nowIso(),
-        nowIso(),
-        nowIso(),
-      ]
+    const linkedContext = buildProjectContext(helpers, project);
+    const projectSourcePolicy = mergeSourcePolicy(
+      DEFAULT_SOURCE_POLICY,
+      safeParseJson(projectRow.source_policy_json, DEFAULT_SOURCE_POLICY)
     );
+    const sourcePolicy = mergeSourcePolicy(
+      projectSourcePolicy,
+      requestedSourcePolicy
+    );
+    const runInstructions = String(payload.runInstructions || '').trim();
+    const projectContext = mergeProjectContext(
+      {
+        permanentInstructions: project.permanent_instructions || '',
+        runInstructions,
+      },
+      linkedContext
+    );
+    const workerCount = Math.max(1, Number(payload.workerCount || 3));
+    const settingsInput = payload?.settings || payload?.researchSettings || {};
+    const settings = settingsInput && typeof settingsInput === 'object'
+      ? { ...settingsInput }
+      : {};
+
+    // Inject SearXNG URL from user settings if not already provided
+    if (!settings.searxngUrl) {
+      const storedUrl = store?.get?.('searxngUrl');
+      if (storedUrl) settings.searxngUrl = storedUrl;
+    }
 
     const snapshot = await engine.startRun({
       projectId,
-      objective,
-      runInstructions,
+      question,
+      intent,
+      jurisdiction,
       workerCount,
-      schema: project.schema,
-      sourcePolicy: project.source_policy,
-      researchSettings,
-      promptSnapshot,
-      existingRunId: runId,
+      settings,
+      sourcePolicy,
+      projectContext,
     });
     return { success: true, run: snapshot };
   });
 
   ipcMain.handle('research:run:pause', async (_, { runId } = {}) => {
     if (!runId) return { success: false, error: 'Missing run id' };
-    const snapshot = engine.pauseRun(runId);
-    if (snapshot) {
+    return withRunLock(runId, async () => {
+      const live = engine.runs?.get(runId);
+      const row = helpers.queryOne(`SELECT status FROM research_runs WHERE id = ?`, [runId]);
+      const status = normalizeRunStatus(live?.status || row?.status || '');
+
+      if (!live && !row) return { success: false, error: 'Run not found' };
+      if (isTerminalRunStatus(status)) {
+        return { success: false, error: `Run already ${status}`, run: engine.getRun(runId) };
+      }
+      if (status === 'paused') {
+        return { success: true, run: engine.getRun(runId) };
+      }
+
+      const snapshot = engine.pauseRun(runId);
       helpers.run(`UPDATE research_runs SET status = ?, updated_at = ? WHERE id = ?`, ['paused', nowIso(), runId]);
-      return { success: true, run: snapshot };
-    }
-    helpers.run(`UPDATE research_runs SET status = ?, updated_at = ? WHERE id = ?`, ['paused', nowIso(), runId]);
-    return { success: true, run: engine.getRun(runId) };
+      return { success: true, run: snapshot || engine.getRun(runId) };
+    });
   });
 
   ipcMain.handle('research:run:resume', async (_, { runId } = {}) => {
     if (!runId) return { success: false, error: 'Missing run id' };
-    const runRow = helpers.queryOne(`SELECT * FROM research_runs WHERE id = ?`, [runId]);
-    if (!runRow) return { success: false, error: 'Run not found' };
-    const projectRow = helpers.queryOne(`SELECT * FROM research_projects WHERE id = ?`, [runRow.project_id]);
-    if (!projectRow) return { success: false, error: 'Project not found' };
-    const project = normalizeProjectRow(projectRow);
-    const promptSnapshot = safeParseJson(runRow.prompt_snapshot_json, {});
-    const context = buildProjectContext(helpers, project);
-    const mergedSnapshot = {
-      ...promptSnapshot,
-      conversationDigest: promptSnapshot.conversationDigest || context.conversationDigest,
-      documentDigest: promptSnapshot.documentDigest || context.documentDigest,
-      linkedConversations: promptSnapshot.linkedConversations || context.linkedConversations,
-      linkedDocuments: promptSnapshot.linkedDocuments || context.linkedDocuments,
-      researchSettings: promptSnapshot.researchSettings || {},
-    };
-    const snapshot = await engine.resumeRun({
-      runId,
-      projectId: runRow.project_id,
-      objective: runRow.objective,
-      runInstructions: runRow.run_instructions || '',
-      workerCount: Number(runRow.worker_count || 4),
-      schema: project.schema,
-      sourcePolicy: project.source_policy,
-      researchSettings: mergedSnapshot.researchSettings || {},
-      promptSnapshot: mergedSnapshot,
+    return withRunLock(runId, async () => {
+      const runRow = helpers.queryOne(`SELECT * FROM research_runs WHERE id = ?`, [runId]);
+      if (!runRow) return { success: false, error: 'Run not found' };
+      const currentStatus = normalizeRunStatus(runRow.status);
+      if (isTerminalRunStatus(currentStatus)) {
+        return { success: false, error: `Run already ${currentStatus}`, run: engine.getRun(runId) };
+      }
+      if (currentStatus === 'running') {
+        return { success: true, run: engine.getRun(runId) };
+      }
+
+      const projectRow = helpers.queryOne(`SELECT * FROM research_projects WHERE id = ?`, [runRow.project_id]);
+      const project = normalizeProjectRow(projectRow);
+      const linkedContext = project ? buildProjectContext(helpers, project) : {};
+      const projectSourcePolicy = mergeSourcePolicy(
+        DEFAULT_SOURCE_POLICY,
+        safeParseJson(projectRow?.source_policy_json, DEFAULT_SOURCE_POLICY)
+      );
+      const promptSnapshot = safeParseJson(runRow.prompt_snapshot_json, {});
+      const snapshotContext = promptSnapshot?.projectContext && typeof promptSnapshot.projectContext === 'object'
+        ? { ...promptSnapshot.projectContext }
+        : {};
+      if (!snapshotContext.runInstructions && promptSnapshot?.runInstructions) {
+        snapshotContext.runInstructions = String(promptSnapshot.runInstructions || '').trim();
+      }
+      const projectContext = mergeProjectContext(
+        snapshotContext,
+        {
+          permanentInstructions: project?.permanent_instructions || '',
+          conversationDigest: linkedContext.conversationDigest || '',
+          documentDigest: linkedContext.documentDigest || '',
+          linkedConversations: linkedContext.linkedConversations || [],
+          linkedDocuments: linkedContext.linkedDocuments || [],
+        }
+      );
+      const snapshot = await engine.resumeRun({
+        runId,
+        projectId: runRow.project_id,
+        question: runRow.objective,
+        intent: String(promptSnapshot.intent || runRow.objective || '').trim(),
+        jurisdiction: String(promptSnapshot.jurisdiction || 'auto').trim() || 'auto',
+        workerCount: Number(runRow.worker_count || 3),
+        settings: promptSnapshot.settings || promptSnapshot.researchSettings || {},
+        sourcePolicy: promptSnapshot.sourcePolicy || projectSourcePolicy,
+        projectContext,
+      });
+      helpers.run(`UPDATE research_runs SET status = ?, updated_at = ? WHERE id = ?`, ['running', nowIso(), runId]);
+      return { success: true, run: snapshot };
     });
-    return { success: true, run: snapshot };
   });
 
   ipcMain.handle('research:run:cancel', async (_, { runId } = {}) => {
     if (!runId) return { success: false, error: 'Missing run id' };
-    const snapshot = await engine.cancelRun(runId);
-    if (!snapshot) {
-      helpers.run(`UPDATE research_runs SET status = ?, ended_at = ?, updated_at = ? WHERE id = ?`, ['cancelled', nowIso(), nowIso(), runId]);
-    }
-    return { success: true, run: snapshot || engine.getRun(runId) };
+    return withRunLock(runId, async () => {
+      const row = helpers.queryOne(`SELECT status FROM research_runs WHERE id = ?`, [runId]);
+      if (!row && !engine.runs?.get(runId)) return { success: false, error: 'Run not found' };
+      const status = normalizeRunStatus(row?.status || engine.runs?.get(runId)?.status || '');
+      if (status === 'cancelled') {
+        return { success: true, run: engine.getRun(runId) };
+      }
+      if (isTerminalRunStatus(status) && status !== 'cancelled') {
+        return { success: false, error: `Run already ${status}`, run: engine.getRun(runId) };
+      }
+      const snapshot = await engine.cancelRun(runId);
+      if (!snapshot) {
+        helpers.run(`UPDATE research_runs SET status = ?, ended_at = ?, updated_at = ? WHERE id = ?`, ['cancelled', nowIso(), nowIso(), runId]);
+      }
+      return { success: true, run: snapshot || engine.getRun(runId) };
+    });
   });
 
   ipcMain.handle('research:run:steer', async (_, { runId, instruction } = {}) => {
     if (!runId) return { success: false, error: 'Missing run id' };
     const steeringText = String(instruction || '').trim();
     if (!steeringText) return { success: false, error: 'Missing steering instruction' };
-    const result = engine.steerRun(runId, steeringText);
-    if (!result?.success) return { success: false, error: result?.error || 'Failed to steer run' };
-    return {
-      success: true,
-      run: result.run,
-      queuedQueries: Number(result.queuedQueries || 0),
-    };
+    return withRunLock(runId, async () => {
+      // Inject the steering instruction as a new search query into the active run
+      const state = engine.runs?.get(runId);
+      if (!state || (state.status !== 'running' && state.status !== 'paused')) {
+        return { success: false, error: 'Run not active' };
+      }
+
+      state.steeringEvents = Array.isArray(state.steeringEvents) ? state.steeringEvents : [];
+      state.steeringEvents.push({
+        id: uuidv4(),
+        at: nowIso(),
+        instruction: steeringText,
+      });
+      if (state.steeringEvents.length > 120) {
+        state.steeringEvents.splice(0, state.steeringEvents.length - 120);
+      }
+
+      const stepKey = `steer:${steeringText.toLowerCase().replace(/\s+/g, ' ').slice(0, 120)}`;
+      const enqueued = engine.enqueueTask(state, 'search', {
+        query: steeringText,
+        depth: 0,
+        stepKey,
+      });
+      state.lastActivityAt = Date.now();
+      if (typeof engine.persistCheckpoint === 'function') engine.persistCheckpoint(state);
+      if (typeof engine.emitProgress === 'function') engine.emitProgress(state, true);
+      return {
+        success: enqueued,
+        run: engine.buildRunSnapshot(state),
+        queuedQueries: enqueued ? 1 : 0,
+      };
+    });
   });
 
   ipcMain.handle('research:run:get', async (_, { runId } = {}) => {
@@ -775,37 +985,61 @@ function setupResearchHandlers(ipcMain, mainWindow, { db, saveDatabase, store })
          LIMIT ?`,
         [projectId, safeLimit]
       );
-    return rows.map((row) => ({
-      id: row.id,
-      project_id: row.project_id,
-      run_id: row.run_id,
-      canonical_key: row.canonical_key,
-      record: safeParseJson(row.record_json, {}),
-      verified_official_url: row.verified_official_url,
-      verified_at: row.verified_at,
-      created_at: row.created_at,
-      updated_at: row.updated_at,
-      evidence_count: Number(row.evidence_count || 0),
-    }));
+    const recordIds = rows.map((row) => row.id).filter(Boolean);
+    const evidenceByRecord = new Map();
+    if (recordIds.length > 0) {
+      const placeholders = recordIds.map(() => '?').join(', ');
+      const evidenceRows = helpers.query(
+        `SELECT record_id, field_key, claim_text, source_url, source_domain, source_title, is_official, fetched_at, excerpt_text
+         FROM research_evidence
+         WHERE record_id IN (${placeholders})
+         ORDER BY fetched_at DESC`,
+        recordIds
+      );
+      for (const item of evidenceRows) {
+        const recordId = String(item.record_id || '').trim();
+        if (!recordId) continue;
+        const list = evidenceByRecord.get(recordId) || [];
+        list.push(normalizeTypedEvidence(item));
+        evidenceByRecord.set(recordId, list);
+      }
+    }
+
+    return rows.map((row) => {
+      const record = safeParseJson(row.record_json, {});
+      const evidence = collectRecordEvidence(record, evidenceByRecord.get(row.id) || []).slice(0, 8);
+      return {
+        id: row.id,
+        project_id: row.project_id,
+        run_id: row.run_id,
+        canonical_key: row.canonical_key,
+        record,
+        evidence,
+        verified_official_url: row.verified_official_url,
+        verified_at: row.verified_at,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        evidence_count: Number(row.evidence_count || 0),
+      };
+    });
   });
 
   ipcMain.handle('research:records:get', async (_, { recordId } = {}) => {
     if (!recordId) return null;
     const row = helpers.queryOne(`SELECT * FROM research_records WHERE id = ?`, [recordId]);
     if (!row) return null;
-    const evidence = helpers.query(
+    const rawEvidence = helpers.query(
       `SELECT * FROM research_evidence WHERE record_id = ? ORDER BY fetched_at DESC`,
       [recordId]
-    ).map((item) => ({
-      ...item,
-      is_official: Number(item.is_official || 0) === 1,
-    }));
+    );
+    const record = safeParseJson(row.record_json, {});
+    const evidence = collectRecordEvidence(record, rawEvidence);
     return {
       id: row.id,
       project_id: row.project_id,
       run_id: row.run_id,
       canonical_key: row.canonical_key,
-      record: safeParseJson(row.record_json, {}),
+      record,
       verified_official_url: row.verified_official_url,
       verified_at: row.verified_at,
       created_at: row.created_at,

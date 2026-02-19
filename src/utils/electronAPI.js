@@ -129,11 +129,12 @@ export const api = {
   getModels: () => safeCall('getModels', [], []),
 
   // NPU
-  getNpuStatus: () => safeCall('getNpuStatus', [], { openvinoInstalled: false, npuAvailable: false, serverRunning: false }),
-  startNpuServer: () => safeCall('startNpuServer', [], { success: false }),
+  getNpuStatus: (options = {}) => safeCall('getNpuStatus', [options], { openvinoInstalled: false, npuAvailable: false, serverRunning: false }),
+  startNpuServer: (options = {}) => safeCall('startNpuServer', [options], { success: false }),
   stopNpuServer: () => safeCall('stopNpuServer', [], { success: false }),
   setupNpu: () => safeCall('setupNpu', [], { success: false }),
-  autoConfigureNpuModel: () => safeCall('autoConfigureNpuModel', [], { configured: false }),
+  autoConfigureNpuModel: (options = {}) => safeCall('autoConfigureNpuModel', [options], { configured: false }),
+  clearNpuCache: () => safeCall('clearNpuCache', [], { success: false }),
 
   // Models
   scanSystemForModels: (options) => safeCall('scanSystemForModels', [options], { models: [], locations: [] }),
@@ -224,10 +225,10 @@ export const api = {
 
   // Vibe IDE: Project scanner & terminal
   scanProject: (rootPath, options) => safeCall('scanProject', [rootPath, options], { root: '', tree: [] }),
-  analyzeProject: (rootPath) => safeCall('project:analyze', [rootPath], null),
-  getGitStatus: (rootPath) => safeCall('git:status', [rootPath], null),
-  stageGitFile: (rootPath, filePath) => safeCall('git:stage', [rootPath, filePath], { success: false }),
-  commitGitChanges: (rootPath, message) => safeCall('git:commit', [rootPath, message], { success: false }),
+  analyzeProject: (rootPath) => safeCall('analyzeProject', [rootPath], null),
+  getGitStatus: (rootPath) => safeCall('getGitStatus', [rootPath], null),
+  stageGitFile: (rootPath, filePath) => safeCall('stageGitFile', [rootPath, filePath], { success: false }),
+  commitGitChanges: (rootPath, message) => safeCall('commitGitChanges', [rootPath, message], { success: false }),
   runTerminalCommand: (payload) => safeCall('runTerminalCommand', [payload], {
     success: false,
     code: -1,
@@ -263,6 +264,12 @@ export const api = {
   // Tooling runtime
   toolHealth: () =>
     safeCall('toolHealth', [], { ok: false, handlersReady: false, error: 'Tooling health unavailable' }),
+
+  toolCreateCheckpoint: (projectRoot, files, reason) =>
+    safeCall('toolCreateCheckpoint', [projectRoot, files, reason], { ok: false, success: false }),
+
+  toolRollbackCheckpoint: (checkpointId) =>
+    safeCall('toolRollbackCheckpoint', [checkpointId], { ok: false, success: false }),
 
   getLlmRuntimeState: () =>
     safeCall('getLlmRuntimeState', [], { queue: { queued: 0, active: 0 }, fallbackCounters: {}, recentDecisions: [] }),

@@ -18,6 +18,25 @@ import { safeCall } from '../utils/electronAPI';
 const MAX_TOOL_ITERATIONS = 15;
 const DEFAULT_TIMEOUT = 30000;
 const DEFAULT_OLLAMA_TIMEOUT = 300000;
+const NETWORK_POLICY_OFFLINE = 'offline';
+const NETWORK_POLICY_RESEARCH_WEB_ONLY = 'research_web_only';
+const WEB_TOOL_NAMES = new Set(['web_search', 'web_fetch_page']);
+
+function normalizeNetworkPolicy(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === NETWORK_POLICY_RESEARCH_WEB_ONLY) return NETWORK_POLICY_RESEARCH_WEB_ONLY;
+  return NETWORK_POLICY_OFFLINE;
+}
+
+function allowWebTools(networkPolicy) {
+  return normalizeNetworkPolicy(networkPolicy) === NETWORK_POLICY_RESEARCH_WEB_ONLY;
+}
+
+function filterToolsForNetwork(tools = [], networkPolicy = NETWORK_POLICY_OFFLINE) {
+  const allowWeb = allowWebTools(networkPolicy);
+  if (allowWeb) return Array.isArray(tools) ? tools : [];
+  return (Array.isArray(tools) ? tools : []).filter((tool) => !WEB_TOOL_NAMES.has(tool?.function?.name));
+}
 
 function normalizePatchOperation(operation, hasNewPath = false) {
   const raw = String(operation || '').trim().toLowerCase();
@@ -146,8 +165,11 @@ function unwrapToolResponse(result, fallbackError = 'Tool not available') {
  * @param {string} projectRoot - Project root path
  * @returns {object} - Tool execution result
  */
-async function executeTool(toolCall, projectRoot) {
+async function executeTool(toolCall, projectRoot, options = {}) {
   const { name, arguments: args } = toolCall.function;
+  const networkPolicy = normalizeNetworkPolicy(options.networkPolicy);
+  const webAllowed = allowWebTools(networkPolicy);
+  const autoRollbackOnFailure = Boolean(options.autoRollbackOnFailure);
   
   try {
     switch (name) {
@@ -218,7 +240,11 @@ async function executeTool(toolCall, projectRoot) {
       
       case 'run_command': {
         const raw = await safeCall('toolRunCommand', [
-          projectRoot, args.command, args.cwd, args.timeout || DEFAULT_TIMEOUT
+          projectRoot,
+          args.command,
+          args.cwd,
+          args.timeout || DEFAULT_TIMEOUT,
+          { autoRollbackOnFailure },
         ], { success: false, error: 'Tool not available' });
         const result = unwrapToolResponse(raw);
         const details = raw?.details || raw;
@@ -285,6 +311,14 @@ async function executeTool(toolCall, projectRoot) {
       }
 
       case 'web_search': {
+        if (!webAllowed) {
+          return {
+            success: false,
+            type: 'web_search',
+            query: args.query,
+            error: 'Web access blocked by network policy (offline).'
+          };
+        }
         const result = await safeCall(
           'webSearch',
           [args.query, { maxResults: args.maxResults || 5 }],
@@ -311,6 +345,14 @@ async function executeTool(toolCall, projectRoot) {
       }
 
       case 'web_fetch_page': {
+        if (!webAllowed) {
+          return {
+            success: false,
+            type: 'web_page',
+            url: args.url,
+            error: 'Web access blocked by network policy (offline).'
+          };
+        }
         const result = await safeCall(
           'webFetchPage',
           [args.url, { maxChars: args.maxChars || 5000 }],
@@ -350,8 +392,11 @@ export class ToolEnabledLLM {
   constructor(options = {}) {
     this.model = options.model;
     this.projectRoot = options.projectRoot;
-    this.tools = options.tools || [...CODE_TOOLS, ...VERIFICATION_TOOLS];
-    this.maxIterations = options.maxIterations || MAX_TOOL_ITERATIONS;
+    this.networkPolicy = normalizeNetworkPolicy(options.networkPolicy);
+    this.autoRollbackOnFailure = Boolean(options.autoRollbackOnFailure);
+    this.maxToolSteps = Math.max(1, Number(options.maxToolSteps || options.maxIterations || MAX_TOOL_ITERATIONS));
+    this.maxIterations = Math.max(1, Number(options.maxIterations || this.maxToolSteps || MAX_TOOL_ITERATIONS));
+    this.tools = filterToolsForNetwork(options.tools || [...CODE_TOOLS, ...VERIFICATION_TOOLS], this.networkPolicy);
     
     // Callbacks
     this.onToolCall = options.onToolCall || (() => {});
@@ -381,6 +426,8 @@ export class ToolEnabledLLM {
    * Build the system prompt with tool instructions
    */
   buildSystemPrompt(basePrompt = '') {
+    const hasWebSearchTool = this.tools.some((tool) => tool?.function?.name === 'web_search');
+    const hasWebFetchTool = this.tools.some((tool) => tool?.function?.name === 'web_fetch_page');
     return `${basePrompt}
 
 You are an AI coding assistant with access to tools that let you explore and modify the codebase.
@@ -392,7 +439,7 @@ You are an AI coding assistant with access to tools that let you explore and mod
 3. **Verify changes**: After proposing edits, use run_lint or check_types to verify.
 4. **Explain rationale**: Always include clear reasoning when proposing edits.
 5. **Be precise**: When editing, specify exact line ranges to minimize unintended changes.
-6. **Research when needed**: If task references an existing product/framework (e.g. "like LM Studio"), use web_search first.
+6. **Network policy**: Respect the active network policy. If web tools are unavailable, stay fully local.
 
 ## Available Tools
 
@@ -404,8 +451,8 @@ You are an AI coding assistant with access to tools that let you explore and mod
 - **run_lint**: Run linter on files
 - **run_tests**: Run test suite
 - **check_types**: Run TypeScript type checker
-- **web_search**: Research external product/technical references
-- **web_fetch_page**: Pull content from a specific source URL
+${hasWebSearchTool ? '- **web_search**: Research external product/technical references' : ''}
+${hasWebFetchTool ? '- **web_fetch_page**: Pull content from a specific source URL' : ''}
 
 ## Important
 
@@ -732,6 +779,7 @@ ${toolDescriptions}
     this.toolCalls = [];
     this.proposedChanges = [];
     this._textToolMode = this.defaultTextToolMode; // Start native unless caller forces text mode
+    let toolSteps = 0;
 
     const messages = [
       ...conversationHistory,
@@ -763,15 +811,32 @@ ${toolDescriptions}
           toolCalls: this.toolCalls,
           proposedChanges: this.proposedChanges,
           iterations: this.iteration,
-          textToolMode: this._textToolMode
+          textToolMode: this._textToolMode,
+          toolSteps,
         };
       }
 
       // Execute each tool call
       for (const toolCall of toolCalls) {
+        if (toolSteps >= this.maxToolSteps) {
+          return {
+            content: `Tool step limit reached (${this.maxToolSteps}). Returning partial progress.`,
+            filesRead: Array.from(this.filesRead),
+            toolCalls: this.toolCalls,
+            proposedChanges: this.proposedChanges,
+            iterations: this.iteration,
+            textToolMode: this._textToolMode,
+            maxToolStepsReached: true
+          };
+        }
+
         this.onToolCall(toolCall);
         
-        const result = await executeTool(toolCall, this.projectRoot);
+        const result = await executeTool(toolCall, this.projectRoot, {
+          networkPolicy: this.networkPolicy,
+          autoRollbackOnFailure: this.autoRollbackOnFailure,
+        });
+        toolSteps += 1;
         
         this.toolCalls.push({
           ...toolCall,
@@ -837,7 +902,8 @@ ${toolDescriptions}
       proposedChanges: this.proposedChanges,
       iterations: this.iteration,
       textToolMode: this._textToolMode,
-      maxIterationsReached: true
+      maxIterationsReached: true,
+      toolSteps,
     };
   }
 
@@ -861,7 +927,11 @@ ${toolDescriptions}
       throw new Error(`Patch not found: ${patchId}`);
     }
 
-    const result = await safeCall('toolApplyPatch', [this.projectRoot, patch], { error: 'Tool not available' });
+    const result = await safeCall(
+      'toolApplyPatch',
+      [this.projectRoot, patch, { autoRollbackOnFailure: this.autoRollbackOnFailure }],
+      { error: 'Tool not available' }
+    );
     
     if (result.error) {
       throw new Error(result.error);
@@ -892,6 +962,9 @@ ${toolDescriptions}
     return {
       model: this.model,
       projectRoot: this.projectRoot,
+      networkPolicy: this.networkPolicy,
+      maxToolSteps: this.maxToolSteps,
+      autoRollbackOnFailure: this.autoRollbackOnFailure,
       iterations: this.iteration,
       filesRead: Array.from(this.filesRead),
       toolCallCount: this.toolCalls.length,

@@ -433,6 +433,9 @@ class AgentOrchestrator {
       model: modelName,
       projectRoot,
       maxIterations: 12,
+      maxToolSteps: 32,
+      networkPolicy: 'offline',
+      autoRollbackOnFailure: true,
       defaultTextToolMode: Boolean(options.forceTextToolMode),
       onToolCall: (toolCall) => {
         const name = toolCall?.function?.name || 'tool';
@@ -590,7 +593,12 @@ class AgentOrchestrator {
     };
   }
 
-  async autoResearchReferences(task) {
+  async autoResearchReferences(task, options = {}) {
+    const networkPolicy = String(options.networkPolicy || 'offline').toLowerCase();
+    if (networkPolicy !== 'research_web_only') {
+      return [];
+    }
+
     const references = extractReferenceProducts(task);
     const findings = [];
 
@@ -642,10 +650,11 @@ class AgentOrchestrator {
     if (researchFindings.length > 0) {
       directives.push('Reference the research context below for feature parity decisions.');
     } else if (extractReferenceProducts(task).length > 0) {
-      directives.push('If benchmark features are unclear, call web_search before proposing architecture.');
+      directives.push('Benchmark references are unavailable in offline mode. Infer architecture from local requirements only.');
     }
 
     directives.push('Do not stop after listing advice. Keep using tools until concrete edits are proposed.');
+    directives.push('Network policy is offline. Do not use web tools during coding runs.');
     return directives;
   }
 
@@ -1461,7 +1470,7 @@ class AgentOrchestrator {
         agentStore.addLog('Clarification prompts skipped by policy. Using smart defaults.');
       }
 
-      const researchFindings = await this.autoResearchReferences(this.task);
+      const researchFindings = await this.autoResearchReferences(this.task, { networkPolicy: 'offline' });
       const directives = this.buildVibeExecutionDirectives(
         this.task,
         projectSnapshot,

@@ -9,8 +9,7 @@ let whisperLib = null;
 try {
   // Optional dependency, may not be installed
   // eslint-disable-next-line global-require
-  // eslint-disable-next-line import/no-extraneous-dependencies
-  whisperLib = require('whisper-node');
+    whisperLib = require('whisper-node');
 } catch (e) {
   // If not installed, we'll fall back to CLI or report unsupported
 }
@@ -99,5 +98,6 @@ module.exports = {
   isAvailable,
   transcribeBuffer,
 };
+
 
 

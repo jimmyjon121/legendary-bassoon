@@ -132,32 +132,73 @@ class HuggingFaceBrowser extends EventEmitter {
   }
 
   /**
-   * Search for GGUF models on HuggingFace
+   * Search for models on HuggingFace (single page metadata).
    */
   async searchModels(query, options = {}) {
+    const page = await this.searchModelsPage(query, options);
+    return page.models;
+  }
+
+  /**
+   * Search models on HuggingFace with pagination metadata.
+   */
+  async searchModelsPage(query, options = {}) {
     const {
       limit = 50,
       sort = 'downloads',
       direction = -1,
       filter = 'gguf',
       author = null,
+      cursor = null,
+      full = true,
+      refresh = false,
     } = options;
 
-    const cacheKey = `search:${query}:${JSON.stringify(options)}`;
-    const cached = this.getFromCache(cacheKey);
-    if (cached) return cached;
+    const normalizedQuery = String(query || '').trim();
+    const normalizedFilter = filter && filter !== 'all' ? String(filter) : null;
+    const requestKey = JSON.stringify({
+      query: normalizedQuery,
+      limit,
+      sort,
+      direction,
+      filter: normalizedFilter || 'all',
+      author: author || null,
+      cursor: cursor || null,
+      full: Boolean(full),
+    });
+    const cacheKey = `search-page:${requestKey}`;
+    if (!refresh) {
+      const cached = this.getFromCache(cacheKey);
+      if (cached) return cached;
+    }
 
     try {
-      let url = `${this.apiUrl}/models?search=${encodeURIComponent(query)}&limit=${limit}&sort=${sort}&direction=${direction}&filter=${filter}`;
-      if (author) url += `&author=${encodeURIComponent(author)}`;
+      const params = new URLSearchParams();
+      params.set('limit', String(limit));
+      params.set('sort', String(sort));
+      params.set('direction', String(direction));
+      if (normalizedQuery) params.set('search', normalizedQuery);
+      if (normalizedFilter) params.set('filter', normalizedFilter);
+      if (author) params.set('author', String(author));
+      if (cursor) params.set('cursor', String(cursor));
+      if (full) params.set('full', 'true');
 
-      const response = await this.fetchJSON(url);
+      const url = `${this.apiUrl}/models?${params.toString()}`;
+      const response = await this.fetchJSONResponse(url);
+      const models = Array.isArray(response.data) ? response.data : [];
+      const nextCursor = this.extractNextCursor(response.headers?.link || response.headers?.Link);
       
       // Enrich results with additional info
-      const enrichedResults = response.map(model => this.enrichModelInfo(model));
+      const enrichedResults = models.map(model => this.enrichModelInfo(model));
+      const result = {
+        models: enrichedResults,
+        nextCursor,
+        hasMore: Boolean(nextCursor),
+        fetchedAt: new Date().toISOString(),
+      };
       
-      this.setCache(cacheKey, enrichedResults);
-      return enrichedResults;
+      this.setCache(cacheKey, result);
+      return result;
     } catch (error) {
       console.error('HuggingFace search error:', error);
       throw error;
@@ -190,11 +231,17 @@ class HuggingFaceBrowser extends EventEmitter {
       const ggufFiles = files
         .filter(f => f.path && f.path.endsWith('.gguf'))
         .map(f => this.parseGGUFFile(f, modelId));
+      const allFiles = files
+        .filter(f => f.path)
+        .map(f => this.parseRepositoryFile(f, modelId));
+      const fileStats = this.computeFileStats(allFiles);
 
       const details = {
         ...modelInfo,
         id: modelId,
         readme,
+        files: allFiles,
+        fileStats,
         ggufFiles,
         enriched: this.enrichModelInfo(modelInfo),
         requirements: this.estimateRequirements(modelInfo, ggufFiles),
@@ -211,16 +258,30 @@ class HuggingFaceBrowser extends EventEmitter {
   /**
    * Get files list for a model
    */
-  async getModelFiles(modelId) {
-    const cacheKey = `files:${modelId}`;
+  async getModelFiles(modelId, options = {}) {
+    const includeAll = options && options.includeAll === true;
+    const cacheKey = `files:${modelId}:${includeAll ? 'all' : 'gguf'}`;
     const cached = this.getFromCache(cacheKey);
     if (cached) return cached;
 
     try {
       const files = await this.fetchJSON(`${this.apiUrl}/models/${modelId}/tree/main`);
+      const allFiles = files
+        .filter(f => f.path)
+        .map(f => this.parseRepositoryFile(f, modelId));
       const ggufFiles = files
         .filter(f => f.path && f.path.endsWith('.gguf'))
         .map(f => this.parseGGUFFile(f, modelId));
+
+      if (includeAll) {
+        const result = {
+          allFiles,
+          ggufFiles,
+          fileStats: this.computeFileStats(allFiles),
+        };
+        this.setCache(cacheKey, result);
+        return result;
+      }
 
       this.setCache(cacheKey, ggufFiles);
       return ggufFiles;
@@ -228,6 +289,52 @@ class HuggingFaceBrowser extends EventEmitter {
       console.error('Failed to get model files:', error);
       throw error;
     }
+  }
+
+  /**
+   * Parse generic repository file metadata.
+   */
+  parseRepositoryFile(file, modelId) {
+    const filename = file.path || file.rfilename || '';
+    const sizeBytes = Number(file.size) || 0;
+    const extension = path.extname(filename || '').toLowerCase();
+    return {
+      filename,
+      path: filename,
+      extension: extension || '',
+      sizeBytes,
+      sizeFormatted: this.formatSize(sizeBytes),
+      downloadUrl: `${this.baseUrl}/${modelId}/resolve/main/${filename}`,
+      modelId,
+    };
+  }
+
+  /**
+   * Compute per-extension file statistics for a model repository.
+   */
+  computeFileStats(files = []) {
+    const stats = {
+      totalFiles: 0,
+      ggufFiles: 0,
+      safetensorsFiles: 0,
+      onnxFiles: 0,
+      binFiles: 0,
+      ptFiles: 0,
+      otherFiles: 0,
+    };
+
+    for (const file of files) {
+      const extension = String(file?.extension || path.extname(file?.filename || '') || '').toLowerCase();
+      stats.totalFiles += 1;
+      if (extension === '.gguf') stats.ggufFiles += 1;
+      else if (extension === '.safetensors') stats.safetensorsFiles += 1;
+      else if (extension === '.onnx') stats.onnxFiles += 1;
+      else if (extension === '.bin') stats.binFiles += 1;
+      else if (extension === '.pt' || extension === '.pth') stats.ptFiles += 1;
+      else stats.otherFiles += 1;
+    }
+
+    return stats;
   }
 
   /**
@@ -272,7 +379,16 @@ class HuggingFaceBrowser extends EventEmitter {
    */
   enrichModelInfo(model) {
     const modelId = model.modelId || model.id;
-    const name = modelId.split('/').pop();
+    const name = String(modelId || '').split('/').pop() || '';
+    const siblings = Array.isArray(model.siblings)
+      ? model.siblings
+          .filter((file) => file?.rfilename)
+          .map((file) => ({ filename: file.rfilename, extension: path.extname(file.rfilename || '').toLowerCase() }))
+      : [];
+    const fileStats = this.computeFileStats(siblings);
+    const hasGgufFromFiles = fileStats.ggufFiles > 0;
+    const hasGgufFromTags = Array.isArray(model.tags) && model.tags.includes('gguf');
+    const hasGgufFromName = name.toLowerCase().includes('gguf');
 
     // Detect model family
     const family = this.detectModelFamily(name);
@@ -290,7 +406,10 @@ class HuggingFaceBrowser extends EventEmitter {
       family,
       params,
       capability,
-      isGGUF: (model.tags || []).includes('gguf') || name.toLowerCase().includes('gguf'),
+      fileStats,
+      variationCount: fileStats.totalFiles,
+      ggufVariantCount: fileStats.ggufFiles,
+      isGGUF: hasGgufFromFiles || hasGgufFromTags || hasGgufFromName,
       downloadCount: model.downloads || 0,
       likes: model.likes || 0,
       lastModified: model.lastModified,
@@ -654,22 +773,28 @@ class HuggingFaceBrowser extends EventEmitter {
    * Get trending/popular models
    */
   async getTrendingModels(limit = 20) {
-    return this.searchModels('gguf', { 
+    const page = await this.searchModelsPage('', { 
       limit, 
       sort: 'downloads',
-      direction: -1 
+      direction: -1,
+      filter: 'gguf',
+      full: true,
     });
+    return page.models;
   }
 
   /**
    * Get recently updated models
    */
   async getRecentModels(limit = 20) {
-    return this.searchModels('gguf', { 
+    const page = await this.searchModelsPage('', { 
       limit, 
       sort: 'lastModified',
-      direction: -1 
+      direction: -1,
+      filter: 'gguf',
+      full: true,
     });
+    return page.models;
   }
 
   /**
@@ -723,7 +848,20 @@ class HuggingFaceBrowser extends EventEmitter {
     return `${(bytes / 1024).toFixed(0)} KB`;
   }
 
-  async fetchJSON(url) {
+  extractNextCursor(linkHeader) {
+    if (!linkHeader || typeof linkHeader !== 'string') return null;
+    const nextMatch = linkHeader.match(/<([^>]+)>\s*;\s*rel="next"/i);
+    if (!nextMatch || !nextMatch[1]) return null;
+    try {
+      const nextUrl = new URL(nextMatch[1]);
+      return nextUrl.searchParams.get('cursor');
+    } catch {
+      const fallback = nextMatch[1].match(/[?&]cursor=([^&]+)/);
+      return fallback ? decodeURIComponent(fallback[1]) : null;
+    }
+  }
+
+  async fetchJSONResponse(url) {
     return new Promise((resolve, reject) => {
       const request = (url.startsWith('https') ? https : http).get(url, {
         headers: {
@@ -732,10 +870,19 @@ class HuggingFaceBrowser extends EventEmitter {
         },
       }, (response) => {
         let data = '';
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          response.resume();
+          reject(new Error(`HTTP ${response.statusCode} for ${url}`));
+          return;
+        }
         response.on('data', chunk => data += chunk);
         response.on('end', () => {
           try {
-            resolve(JSON.parse(data));
+            resolve({
+              data: JSON.parse(data),
+              headers: response.headers || {},
+              statusCode: response.statusCode,
+            });
           } catch (e) {
             reject(new Error('Invalid JSON response'));
           }
@@ -747,6 +894,11 @@ class HuggingFaceBrowser extends EventEmitter {
         reject(new Error('Request timeout'));
       });
     });
+  }
+
+  async fetchJSON(url) {
+    const response = await this.fetchJSONResponse(url);
+    return response.data;
   }
 
   async fetchText(url) {

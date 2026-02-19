@@ -465,6 +465,97 @@ function isSimpleGreeting(text) {
     .test(text.trim());
 }
 
+function isShortCasualPrompt(text) {
+  if (!text || typeof text !== 'string') return false;
+  const raw = text.trim();
+  if (!raw || raw.length > 72) return false;
+
+  if (/^(thanks|thank you|thx|ok|okay|cool|nice|great|sounds good|all good|appreciate it)[!.? ]*$/i.test(raw)) {
+    return true;
+  }
+
+  return isSimpleGreeting(raw);
+}
+
+function isProfileCardArtifact(text) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  const lower = raw.toLowerCase();
+
+  if (lower.includes('quick links') || lower.includes('my availability')) return true;
+  if (/\|\s*day\b/i.test(raw)) return true;
+
+  const bulletLines = raw
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /^[-*]/.test(line));
+  const contactHits = ['call', 'chat', 'email'].reduce((count, token) => (
+    lower.includes(token) ? count + 1 : count
+  ), 0);
+
+  if (contactHits >= 3 && bulletLines.length >= 2 && raw.length > 80) return true;
+  if (lower.includes('availability') && contactHits >= 2) return true;
+  return false;
+}
+
+function sanitizeSimpleGreetingResponse(text) {
+  const raw = String(text || '').trim();
+  if (!raw) {
+    return 'Hey! What would you like to do today?';
+  }
+
+  const lower = raw.toLowerCase();
+  const hasProfileCardMarkers =
+    lower.includes('quick links') ||
+    lower.includes('my availability') ||
+    (lower.includes('call') && lower.includes('email') && raw.length > 90);
+
+  const looksLikeStructuredCard =
+    (/^#+\s/m.test(raw) && /(^|\n)\s*[-*]\s+/m.test(raw) && raw.length > 120) ||
+    /\|\s*day\b/i.test(raw);
+
+  if (hasProfileCardMarkers || looksLikeStructuredCard) {
+    const firstLine = raw
+      .split('\n')
+      .map((line) => line.replace(/^[#>*`\-\s]+/, '').trim())
+      .find(Boolean);
+
+    if (firstLine && /^(hi|hello|hey)\b/i.test(firstLine) && firstLine.length <= 120) {
+      return firstLine;
+    }
+    return 'Hey! Good to see you. What do you want to work on right now?';
+  }
+
+  // Keep greeting replies short and natural.
+  if (raw.length > 260) {
+    const firstLine = raw.split('\n').map((line) => line.trim()).find(Boolean);
+    if (firstLine) return firstLine;
+  }
+
+  return raw;
+}
+
+function sanitizeShortCasualResponse(userPrompt, text) {
+  const raw = String(text || '').trim();
+  if (!raw) return 'I am here. What should we work on?';
+
+  if (!isShortCasualPrompt(userPrompt)) return raw;
+  if (isSimpleGreeting(userPrompt)) {
+    return sanitizeSimpleGreetingResponse(raw);
+  }
+
+  if (isProfileCardArtifact(raw)) {
+    return 'I am here and ready. What do you want to do next?';
+  }
+
+  if (raw.length > 260) {
+    const firstLine = raw.split('\n').map((line) => line.trim()).find(Boolean);
+    if (firstLine) return firstLine;
+  }
+
+  return raw;
+}
+
 function buildRawModelHistory(messages = [], latestUserMessage = '') {
   const normalized = normalizeChatMessages(messages, latestUserMessage);
   if (normalized.length === 0) return [];
@@ -946,8 +1037,11 @@ export const createMessageSlice = (set, get) => ({
     }
     
     // Proceed to generate
+    const allowWebSearch = get().currentWorkspace === 'research'
+      ? Boolean(extra.webSearchEnabled)
+      : false;
     await get()._generateResponse(content, conversationId, {
-      webSearchEnabled: !!extra.webSearchEnabled,
+      webSearchEnabled: allowWebSearch,
       codeContext: extra.codeContext || null,
     });
   },
@@ -982,6 +1076,9 @@ export const createMessageSlice = (set, get) => ({
     const messages = get().messages;
 
     let systemPrompt = workspaceSettings[currentWorkspace]?.systemPrompt || '';
+    const isGreetingTurn = isSimpleGreeting(userContent);
+    const isShortCasualTurn = currentWorkspace === 'casual' && isShortCasualPrompt(userContent);
+    const shouldUseMinimalContext = isGreetingTurn || isShortCasualTurn;
     const userAskedForCode = isLikelyCodeRequest(userContent);
     const userAskedForWorkspaceContext = isWorkspaceAwarenessQuery(userContent);
     const codeContextHints = genOptions.codeContext || null;
@@ -1002,12 +1099,40 @@ export const createMessageSlice = (set, get) => ({
         projectContextMode
       );
     }
+
+    const promotedContextTarget = currentWorkspace === 'code'
+      ? 'code'
+      : currentWorkspace === 'casual'
+        ? 'casual'
+        : null;
+    if (!shouldUseMinimalContext && promotedContextTarget && typeof get().listPromotedResearchContext === 'function') {
+      const promotedEntries = get().listPromotedResearchContext(promotedContextTarget).slice(0, 4);
+      if (promotedEntries.length > 0) {
+        const contextLines = promotedEntries.map((entry, idx) => {
+          const title = String(entry?.title || `Context ${idx + 1}`).trim();
+          const summary = String(entry?.summary || '').trim();
+          const citations = Array.isArray(entry?.citations) ? entry.citations.filter(Boolean).slice(0, 5) : [];
+          return [
+            `${idx + 1}. ${title}`,
+            summary ? `Summary: ${summary}` : '',
+            citations.length > 0 ? `Citations: ${citations.join(', ')}` : '',
+          ].filter(Boolean).join('\n');
+        }).join('\n\n');
+        if (contextLines) {
+          systemPrompt += `\n\n## Promoted Research Context (${promotedContextTarget})\n${contextLines}\nUse this context as user-approved prior research with provenance.`;
+        }
+      }
+    }
     // NOTE: Soul personalization overlay intentionally disabled.
     // We want a "raw model" conversation (plus useful context like memory/RAG/project),
     // without any personality injection.
     
-    // Add web search tool capability to system prompt (only if user enabled it)
-    if (genOptions.webSearchEnabled && isWebSearchAvailable()) {
+    const canUseWebSearch = currentWorkspace === 'research'
+      && Boolean(genOptions.webSearchEnabled)
+      && isWebSearchAvailable();
+
+    // Add web search tool capability to system prompt (research mode only)
+    if (canUseWebSearch) {
       systemPrompt = systemPrompt + '\n\n' + WEB_SEARCH_TOOL_PROMPT;
     }
 
@@ -1035,7 +1160,7 @@ export const createMessageSlice = (set, get) => ({
     let messagesIncluded = 0;
     
     // Try full context builder first (includes memories, soul, project, RAG, etc.)
-    if (isElectron()) {
+    if (isElectron() && !shouldUseMinimalContext) {
       try {
         const editorState = currentWorkspace === 'code' && shouldInjectProjectContext
           ? (editorStateSnapshot || useEditorStore.getState())
@@ -1092,7 +1217,7 @@ export const createMessageSlice = (set, get) => ({
     // Fallback: build messages array directly from conversation history
     if (chatMessages.length === 0) {
       // Memory engine for smart context
-      if (isElectron() && messages.length > 15) {
+      if (!shouldUseMinimalContext && isElectron() && messages.length > 15) {
         try {
           const memoryContext = await safeCall('memoryBuildContext', [{
             conversationId,
@@ -1115,15 +1240,24 @@ export const createMessageSlice = (set, get) => ({
         }
       }
       
-      // Build messages array from recent conversation
-      const maxMessages = Math.min(messages.length, Math.floor(actualContextSize * 0.5 / 500));
-      const recentMessages = messages.slice(-maxMessages);
-      
-      chatMessages = recentMessages.map(m => ({
-        role: m.role === 'user' ? 'user' : 'assistant',
-        content: m.content,
-      }));
-      messagesIncluded = recentMessages.length;
+      // Build messages array from recent conversation.
+      // For simple greetings, avoid injecting heavy history/context to reduce odd template artifacts.
+      if (shouldUseMinimalContext) {
+        chatMessages = [{
+          role: 'user',
+          content: String(userContent || '').trim() || 'hello',
+        }];
+        messagesIncluded = 1;
+      } else {
+        const maxMessages = Math.min(messages.length, Math.floor(actualContextSize * 0.5 / 500));
+        const recentMessages = messages.slice(-maxMessages);
+        
+        chatMessages = recentMessages.map(m => ({
+          role: m.role === 'user' ? 'user' : 'assistant',
+          content: m.content,
+        }));
+        messagesIncluded = recentMessages.length;
+      }
 
       // Fallback: inject minimal code context even if fullContextBuilder failed
       if (currentWorkspace === 'code' && shouldInjectProjectContext) {
@@ -1484,6 +1618,17 @@ export const createMessageSlice = (set, get) => ({
       }
     }
 
+    if (shouldUseMinimalContext) {
+      cleanOptions.num_predict = Math.min(
+        Number.isFinite(cleanOptions.num_predict) ? cleanOptions.num_predict : 180,
+        180
+      );
+      cleanOptions.temperature = Math.min(
+        Math.max(cleanOptions.temperature ?? 0.4, 0.2),
+        0.6
+      );
+    }
+
     const runtimeProfile = {
       model: currentModel,
       mode: useGenerateCompatibility ? 'compat-generate' : 'chat',
@@ -1607,62 +1752,7 @@ export const createMessageSlice = (set, get) => ({
             },
           }));
 
-          // === WEB SEARCH EXECUTION ===
-          // Check if the AI output contains [SEARCH: ...] calls and process them
-          if (hasSearchCalls(fullResponse)) {
-            (async () => {
-              try {
-                const { content: processedContent } = await processSearchCalls(fullResponse);
-                fullResponse = processedContent;
-                // Update the streaming content immediately so user sees results
-                set({ streamingContent: fullResponse });
-              } catch (e) {
-                console.warn('[WebSearch] Failed to process search calls:', e);
-              }
-              // Continue with saving (done below via finalizeAssistantMessage)
-              finalizeAssistantMessage();
-            })();
-            return; // Let the async handler finish
-          }
-
-          // === RESPONSE CLEANUP: Strip any leaked prompt artifacts ===
-          // For thinking models, only do lightweight cleanup (turn markers, echo)
-          // but skip the aggressive prompt-leak stripping which would destroy <think> content.
-          if (_isThinkingModel) {
-            // Just trim turn markers and echo, preserve <think> blocks
-            const turnPatterns = [
-              /\n{1,3}Human:.*$/s,
-              /\n{1,3}User:.*$/s,
-              /\n{1,3}human:.*$/s,
-              /\n{1,3}user:.*$/s,
-              /\n{1,3}Assistant:$/,
-            ];
-            for (const pattern of turnPatterns) {
-              fullResponse = fullResponse.replace(pattern, '');
-            }
-            fullResponse = fullResponse.replace(/^Assistant:\s*/i, '').trim();
-          } else {
-            fullResponse = cleanupResponse(fullResponse);
-          }
-          
-          // If cleanup stripped everything (entire response was leaked reasoning), 
-          // provide a fallback so the user doesn't see an empty bubble
-          if (!fullResponse || fullResponse.length < 5) {
-            fullResponse = 'Hello! How can I help you today?';
-          }
-
-          // If a coding model denies workspace access despite IDE context, recover with
-          // a deterministic workspace-aware response instead of surfacing the denial.
-          if (currentWorkspace === 'code' && shouldInjectProjectContext && isWorkspaceContextDenialResponse(fullResponse)) {
-            fullResponse = buildWorkspaceContextRecovery(
-              editorStateSnapshot || useEditorStore.getState(),
-              codeContextHints
-            );
-          }
-
-          finalizeAssistantMessage();
-
-          function finalizeAssistantMessage() {
+          const finalizeAssistantMessage = () => {
             const assistantMessageId = uuidv4();
             const stateNow = get();
             const branchId = stateNow.currentBranchId || null;
@@ -1687,7 +1777,7 @@ export const createMessageSlice = (set, get) => ({
             } else {
               saveToDb(fullResponse);
             }
-            
+
             const assistantMessage = {
               id: assistantMessageId,
               conversation_id: conversationId,
@@ -1705,7 +1795,7 @@ export const createMessageSlice = (set, get) => ({
                 durationSeconds: elapsedSec,
               },
             };
-            
+
             // === AUTO-TITLE with LLM ===
             const currentMsgs = get().messages;
             if (currentMsgs.length === 1) {
@@ -1717,12 +1807,12 @@ export const createMessageSlice = (set, get) => ({
                 [conversationId]
               );
             }
-            
+
             set(state => ({
               messages: [...state.messages, assistantMessage],
               streamingContent: ''
             }));
-            
+
             // Record to ledger
             safeCall('ledger:recordMessage', [{
               role: 'assistant',
@@ -1733,7 +1823,7 @@ export const createMessageSlice = (set, get) => ({
               conversationId,
               messageId: assistantMessageId,
             }], null).catch(() => {});
-            
+
             safeCall('ledger:recordGenerationComplete', [{
               model: currentModel,
               workspace: currentWorkspace,
@@ -1742,12 +1832,82 @@ export const createMessageSlice = (set, get) => ({
               tokensEstimated: finalMeta.tokensEstimated || Math.round(fullResponse.length / 4),
               conversationId,
             }], null).catch(() => {});
-            
+
             // NOTE: Soul interaction recording intentionally disabled (raw model mode)
-            
+
             // Generate follow-up suggestions (non-blocking)
             _generateFollowUps(userContent, fullResponse);
+          };
+
+          // === WEB SEARCH EXECUTION ===
+          // Check if the AI output contains [SEARCH: ...] calls and process them
+          if (canUseWebSearch && hasSearchCalls(fullResponse)) {
+            (async () => {
+              try {
+                const { content: processedContent } = await processSearchCalls(fullResponse);
+                fullResponse = processedContent;
+                // Update the streaming content immediately so user sees results
+                set({ streamingContent: fullResponse });
+              } catch (e) {
+                console.warn('[WebSearch] Failed to process search calls:', e);
+              }
+              // Continue with saving (done below via finalizeAssistantMessage)
+              finalizeAssistantMessage();
+            })();
+            return; // Let the async handler finish
           }
+
+          if (!canUseWebSearch && hasSearchCalls(fullResponse)) {
+            fullResponse = fullResponse.replace(/\[SEARCH:\s*[^\]]+\]/gi, '').trim();
+          }
+
+          // === RESPONSE CLEANUP: Strip any leaked prompt artifacts ===
+          // For thinking models, only do lightweight cleanup (turn markers, echo)
+          // but skip the aggressive prompt-leak stripping which would destroy <think> content.
+          if (_isThinkingModel) {
+            // Just trim turn markers and echo, preserve <think> blocks
+            const turnPatterns = [
+              /\n{1,3}Human:.*$/s,
+              /\n{1,3}User:.*$/s,
+              /\n{1,3}human:.*$/s,
+              /\n{1,3}user:.*$/s,
+              /\n{1,3}Assistant:$/,
+            ];
+            for (const pattern of turnPatterns) {
+              fullResponse = fullResponse.replace(pattern, '');
+            }
+            fullResponse = fullResponse.replace(/^Assistant:\s*/i, '').trim();
+          } else {
+            fullResponse = cleanupResponse(fullResponse);
+          }
+
+          if (isGreetingTurn) {
+            fullResponse = sanitizeSimpleGreetingResponse(fullResponse);
+          }
+          if (isShortCasualTurn) {
+            const sanitized = sanitizeShortCasualResponse(userContent, fullResponse);
+            if (sanitized !== fullResponse) {
+              enableStabilityMode('casual_short_prompt_artifact');
+              fullResponse = sanitized;
+            }
+          }
+          
+          // If cleanup stripped everything (entire response was leaked reasoning), 
+          // provide a fallback so the user doesn't see an empty bubble
+          if (!fullResponse || fullResponse.length < 5) {
+            fullResponse = 'Hello! How can I help you today?';
+          }
+
+          // If a coding model denies workspace access despite IDE context, recover with
+          // a deterministic workspace-aware response instead of surfacing the denial.
+          if (currentWorkspace === 'code' && shouldInjectProjectContext && isWorkspaceContextDenialResponse(fullResponse)) {
+            fullResponse = buildWorkspaceContextRecovery(
+              editorStateSnapshot || useEditorStore.getState(),
+              codeContextHints
+            );
+          }
+
+          finalizeAssistantMessage();
           
         } else if (chunk.cancelled) {
           // === STREAM RECOVERY: Save partial response if we have content ===
@@ -1831,6 +1991,16 @@ export const createMessageSlice = (set, get) => ({
           if (shouldAbort) {
             // Clean the response and abort the stream
             fullResponse = cleanupResponse(fullResponse);
+            if (isGreetingTurn) {
+              fullResponse = sanitizeSimpleGreetingResponse(fullResponse);
+            }
+            if (isShortCasualTurn) {
+              const sanitized = sanitizeShortCasualResponse(userContent, fullResponse);
+              if (sanitized !== fullResponse) {
+                enableStabilityMode('casual_short_prompt_artifact');
+                fullResponse = sanitized;
+              }
+            }
             try { cleanup?.(); } catch {}
             // If cleanup stripped everything, provide a simple helpful fallback
             if (!fullResponse || fullResponse.length < 10) {

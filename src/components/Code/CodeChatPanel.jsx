@@ -350,13 +350,15 @@ export function CodeChatPanel({
     sendMessage, 
     isGenerating, 
     streamingContent,
-    currentModel
+    currentModel,
+    listPromotedResearchContext
   } = useAppStore((state) => ({
     messages: state.messages,
     sendMessage: state.sendMessage,
     isGenerating: state.isGenerating,
     streamingContent: state.streamingContent,
-    currentModel: state.currentModel
+    currentModel: state.currentModel,
+    listPromotedResearchContext: state.listPromotedResearchContext,
   }));
   
   // Editor store - AI session
@@ -484,6 +486,15 @@ export function CodeChatPanel({
   // Agent mode send - uses ToolEnabledLLM with tool calling loop
   const handleAgentSend = useCallback(async (prompt) => {
     const editorStore = useEditorStore.getState();
+    const promotedContext = typeof listPromotedResearchContext === 'function'
+      ? listPromotedResearchContext('code').slice(0, 3)
+      : [];
+    const contextBlock = promotedContext.length > 0
+      ? `Promoted research context:\n${promotedContext.map((item, idx) => (
+        `${idx + 1}. ${item.title || 'Research context'}\n${item.summary || ''}\nCitations: ${(item.citations || []).slice(0, 5).join(', ') || 'n/a'}`
+      )).join('\n\n')}\n\n`
+      : '';
+    const promptWithContext = contextBlock ? `${contextBlock}Task:\n${prompt}` : prompt;
     
     // Create or reuse the tool-enabled LLM instance
     if (!toolLLMRef.current || toolLLMRef.current.model !== currentModel || toolLLMRef.current.projectRoot !== rootPath) {
@@ -491,6 +502,9 @@ export function CodeChatPanel({
         model: currentModel,
         projectRoot: rootPath,
         maxIterations: 10,
+        maxToolSteps: 24,
+        networkPolicy: 'offline',
+        autoRollbackOnFailure: true,
         onToolCall: (toolCall) => {
           editorStore.recordToolCall(toolCall);
           setAgentThinking(`Using ${toolCall.function?.name?.replace(/_/g, ' ')}...`);
@@ -529,7 +543,7 @@ export function CodeChatPanel({
         content: m.content,
       }));
 
-      const result = await toolLLMRef.current.chat(prompt, history);
+      const result = await toolLLMRef.current.chat(promptWithContext, history);
 
       // Add the assistant response
       const assistantMsg = { 
@@ -563,7 +577,7 @@ export function CodeChatPanel({
     } finally {
       setAgentThinking(null);
     }
-  }, [currentModel, rootPath, messages]);
+  }, [currentModel, rootPath, messages, listPromotedResearchContext]);
 
   const handleKeyDown = (e) => {
     // Don't intercept if FileMentionInput is handling it (dropdown open)

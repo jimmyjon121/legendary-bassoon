@@ -5,7 +5,7 @@ const fs = require('fs');
 let puppeteer = null;
 try {
   // Optional dependency – degrade gracefully if not installed
-  // eslint-disable-next-line global-require, import/no-extraneous-dependencies
+  // eslint-disable-next-line global-require
   puppeteer = require('puppeteer-core');
 } catch (e) {
   console.warn('Browser agent unavailable: puppeteer-core not installed:', e.message);
@@ -303,7 +303,6 @@ module.exports = {
   runTask,
   detectChromeExecutable,
 };
-
 
 
 

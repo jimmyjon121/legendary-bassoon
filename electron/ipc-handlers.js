@@ -19,12 +19,13 @@ const path = require('path');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
 const crypto = require('crypto');
-const { exec } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const http = require('http');
 const https = require('https');
 const { setupWebSearchHandlers } = require('./ipc/web-search-handlers');
 const { setupCodeToolsHandlers } = require('./ipc/code-tools-handlers');
 const { setupResearchHandlers } = require('./ipc/research-handlers');
+const { validatePath } = require('./utils/pathValidator');
 
 // =============================================================================
 // LAZY SERVICE LOADING - Services are loaded on-demand for faster startup
@@ -63,9 +64,10 @@ try {
 // =============================================================================
 
 // Hardware & System
-const getHardwareDetection = () => getService('hardware-detection');
+const _getHardwareDetection = () => getService('hardware-detection');
 const getNpuBridge = () => getService('npu-bridge')?.getNpuBridge?.() || null;
 const npuSetupService = { 
+  get runOpenVinoSetup() { return getService('npu-setup')?.runOpenVinoSetup; },
   get checkDrivers() { return getService('npu-setup')?.checkDrivers; },
   get installDrivers() { return getService('npu-setup')?.installDrivers; },
   get getInstallationProgress() { return getService('npu-setup')?.getInstallationProgress; },
@@ -229,6 +231,191 @@ const agentRunProgressState = {
   snapshot: null,
   updatedAt: 0,
 };
+
+const TERMINAL_ALLOWED_COMMANDS = [
+  /^npm (test|run (lint|build|typecheck|format|dev|start)|install)(\s|$)/i,
+  /^yarn (test|lint|build|typecheck|format|dev|start|install)(\s|$)/i,
+  /^pnpm (test|lint|build|typecheck|format|dev|start|install)(\s|$)/i,
+  /^npx (eslint|prettier|tsc|jest|vitest|playwright)(\s|$)/i,
+  /^git (status|diff|log|branch|show|blame|add|commit)(\s|$)/i,
+  /^node(\s|$)/i,
+  /^python(\s|$)/i,
+  /^python3(\s|$)/i,
+  /^powershell\s+-ExecutionPolicy\s+Bypass\s+-File\s+scripts[\\/]+setup-openvino\.ps1$/i,
+];
+
+function tokenizeCommand(command = '') {
+  const tokens = String(command).match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
+  return tokens.map((token) => token.replace(/^['"]|['"]$/g, ''));
+}
+
+function isTerminalCommandAllowed(command = '') {
+  const trimmed = String(command || '').trim();
+  if (!trimmed) return false;
+  if (/[;&|`<>]/.test(trimmed) || /\$\(/.test(trimmed) || /[\r\n]/.test(trimmed)) {
+    return false;
+  }
+  return TERMINAL_ALLOWED_COMMANDS.some((pattern) => pattern.test(trimmed));
+}
+
+function resolveTerminalCwd(requestedCwd) {
+  if (!requestedCwd || typeof requestedCwd !== 'string') {
+    return process.cwd();
+  }
+
+  const validation = validatePath(requestedCwd, { allowAbsolute: true });
+  if (!validation.valid) {
+    throw new Error(`Invalid working directory: ${validation.reason}`);
+  }
+
+  const resolved = path.resolve(validation.normalizedPath || requestedCwd);
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+    throw new Error('Working directory does not exist');
+  }
+  return resolved;
+}
+
+function executeTerminalCommand(payload = {}) {
+  const normalizedPayload = typeof payload === 'string'
+    ? { command: payload }
+    : (payload && typeof payload === 'object' ? payload : {});
+
+  const command = String(normalizedPayload.command || '').trim();
+  const timeoutMs = Math.min(Math.max(Number(normalizedPayload.timeout) || 20000, 1000), 120000);
+
+  if (!command) {
+    return Promise.resolve({ success: false, code: 1, stdout: '', stderr: 'No command provided' });
+  }
+
+  if (!isTerminalCommandAllowed(command)) {
+    return Promise.resolve({
+      success: false,
+      code: 1,
+      stdout: '',
+      stderr: 'Command blocked by safety policy',
+    });
+  }
+
+  let cwd;
+  try {
+    cwd = resolveTerminalCwd(normalizedPayload.cwd);
+  } catch (error) {
+    return Promise.resolve({ success: false, code: 1, stdout: '', stderr: error.message });
+  }
+
+  const [binary, ...args] = tokenizeCommand(command);
+  if (!binary) {
+    return Promise.resolve({ success: false, code: 1, stdout: '', stderr: 'No executable provided' });
+  }
+
+  return new Promise((resolve) => {
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+
+    const child = spawn(binary, args, {
+      cwd,
+      shell: false,
+      env: {
+        ...process.env,
+        CI: 'true',
+        FORCE_COLOR: '0',
+      },
+      windowsHide: true,
+    });
+
+    const timeoutId = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGTERM');
+    }, timeoutMs);
+
+    child.stdout.on('data', (chunk) => {
+      stdout += String(chunk || '');
+      if (stdout.length > 50000) stdout = stdout.slice(-50000);
+    });
+
+    child.stderr.on('data', (chunk) => {
+      stderr += String(chunk || '');
+      if (stderr.length > 20000) stderr = stderr.slice(-20000);
+    });
+
+    child.on('error', (error) => {
+      clearTimeout(timeoutId);
+      resolve({
+        success: false,
+        code: 1,
+        stdout,
+        stderr: stderr || error.message,
+      });
+    });
+
+    child.on('close', (code) => {
+      clearTimeout(timeoutId);
+      if (timedOut) {
+        resolve({
+          success: false,
+          code: typeof code === 'number' ? code : 1,
+          stdout,
+          stderr: stderr || `Command timed out after ${timeoutMs}ms`,
+        });
+        return;
+      }
+
+      resolve({
+        success: code === 0,
+        code: typeof code === 'number' ? code : 1,
+        stdout,
+        stderr,
+      });
+    });
+  });
+}
+
+function resolveProjectRoot(rootPath) {
+  if (!rootPath || typeof rootPath !== 'string') {
+    throw new Error('Root path is required');
+  }
+  const resolved = path.resolve(String(rootPath).trim());
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+    throw new Error('Project root not found');
+  }
+  return resolved;
+}
+
+function parseGitStatusOutput(stdout = '') {
+  const lines = String(stdout || '').split(/\r?\n/).filter(Boolean);
+  const status = {
+    branch: 'main',
+    ahead: 0,
+    behind: 0,
+    files: [],
+  };
+
+  for (const line of lines) {
+    if (line.startsWith('## ')) {
+      const head = line.slice(3).trim();
+      const branchMatch = head.match(/^([^.\s]+)(?:\.\.\.[^\s]+)?/);
+      if (branchMatch?.[1]) {
+        status.branch = branchMatch[1];
+      }
+      const aheadMatch = head.match(/ahead (\d+)/);
+      const behindMatch = head.match(/behind (\d+)/);
+      status.ahead = aheadMatch ? Number(aheadMatch[1]) : 0;
+      status.behind = behindMatch ? Number(behindMatch[1]) : 0;
+      continue;
+    }
+
+    const code = line.slice(0, 2).trim() || '?';
+    const relPath = line.slice(3).trim();
+    if (!relPath) continue;
+    status.files.push({
+      status: code,
+      path: relPath,
+    });
+  }
+
+  return status;
+}
 
 async function initDatabase(userDataPath) {
   // Load sql.js
@@ -1159,6 +1346,9 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     console.error('[IPC] Failed to setup research handlers:', error.message);
   }
 
+  const { getAgentService } = require('./services/agent-service');
+  const agentService = getAgentService(db);
+
   // Agent run progress mirror (renderer -> main, queryable from any surface)
   ipcMain.handle('agent:updateRunProgress', async (_, payload = {}) => {
     const now = Date.now();
@@ -1192,6 +1382,42 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       ...agentRunProgressState.snapshot,
       updatedAt: agentRunProgressState.updatedAt || agentRunProgressState.snapshot.updatedAt || Date.now(),
     };
+  });
+
+  ipcMain.handle('listAgentTasks', async () => {
+    try {
+      return agentService.listTasks();
+    } catch (error) {
+      console.error('[IPC] listAgentTasks failed:', error.message);
+      return [];
+    }
+  });
+
+  ipcMain.handle('createAgentTask', async (_, payload = {}) => {
+    try {
+      return agentService.createTask(payload || {});
+    } catch (error) {
+      console.error('[IPC] createAgentTask failed:', error.message);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('getAgentTask', async (_, id) => {
+    try {
+      return agentService.getTask(id);
+    } catch (error) {
+      console.error('[IPC] getAgentTask failed:', error.message);
+      return null;
+    }
+  });
+
+  ipcMain.handle('cancelAgentTask', async (_, id) => {
+    try {
+      return agentService.cancelTask(id);
+    } catch (error) {
+      console.error('[IPC] cancelAgentTask failed:', error.message);
+      return { success: false, error: error.message };
+    }
   });
   
   // Window controls
@@ -2674,52 +2900,29 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
    * Agent terminal execution (guarded).
    */
   ipcMain.handle('agent:runCommand', async (_, payload = {}) => {
-    const { command, cwd: requestedCwd, timeout = 20000 } = payload;
-    if (!command || typeof command !== 'string') {
-      return { success: false, error: 'No command provided' };
-    }
+    return executeTerminalCommand(payload);
+  });
 
-    const forbidden = ['rm -rf', 'rm -r', 'del /s', 'format', 'shutdown', 'mkfs'];
-    if (forbidden.some((token) => command.toLowerCase().includes(token))) {
-      return { success: false, error: 'Command blocked by safety guard' };
-    }
-
-    const cwd = requestedCwd && typeof requestedCwd === 'string' ? requestedCwd : process.cwd();
-
-    return await new Promise((resolve) => {
-      const child = exec(command, { cwd, timeout }, (error, stdout, stderr) => {
-        if (error) {
-          resolve({
-            success: false,
-            code: error.code,
-            error: error.message,
-            stdout,
-            stderr,
-          });
-        } else {
-          resolve({
-            success: true,
-            code: 0,
-            stdout,
-            stderr,
-          });
-        }
-      });
-
-      child.on('error', (err) => {
-        resolve({ success: false, error: err.message });
-      });
-    });
+  ipcMain.handle('runTerminalCommand', async (_, payload = {}) => {
+    return executeTerminalCommand(payload);
   });
   
   ipcMain.handle('fs:readFile', async (_, filePath) => {
-    return await fsPromises.readFile(filePath, 'utf-8');
+    const validation = validatePath(filePath, { allowAbsolute: true });
+    if (!validation.valid) {
+      throw new Error(`Invalid path: ${validation.reason}`);
+    }
+    return await fsPromises.readFile(validation.normalizedPath, 'utf-8');
   });
 
   // Read file as base64 - used for vision/multimodal model image input
   ipcMain.handle('fs:readFileBase64', async (_, filePath) => {
     try {
-      const buffer = await fsPromises.readFile(filePath);
+      const validation = validatePath(filePath, { allowAbsolute: true });
+      if (!validation.valid) {
+        throw new Error(`Invalid path: ${validation.reason}`);
+      }
+      const buffer = await fsPromises.readFile(validation.normalizedPath);
       return buffer.toString('base64');
     } catch (error) {
       console.error('Failed to read file as base64:', error);
@@ -2728,25 +2931,39 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   });
   
   ipcMain.handle('fs:writeFile', async (_, filePath, content) => {
+    const validation = validatePath(filePath, { allowAbsolute: true });
+    if (!validation.valid) {
+      throw new Error(`Invalid path: ${validation.reason}`);
+    }
+    const targetPath = validation.normalizedPath;
     // Ensure parent directory exists
-    const dir = path.dirname(filePath);
+    const dir = path.dirname(targetPath);
     await fsPromises.mkdir(dir, { recursive: true });
-    await fsPromises.writeFile(filePath, content, 'utf-8');
+    await fsPromises.writeFile(targetPath, content, 'utf-8');
     return true;
   });
 
   ipcMain.handle('fs:createFolder', async (_, folderPath) => {
-    await fsPromises.mkdir(folderPath, { recursive: true });
+    const validation = validatePath(folderPath, { allowAbsolute: true });
+    if (!validation.valid) {
+      throw new Error(`Invalid path: ${validation.reason}`);
+    }
+    await fsPromises.mkdir(validation.normalizedPath, { recursive: true });
     return true;
   });
   
   ipcMain.handle('fs:listModels', async (_, directory) => {
     try {
-      const files = await fsPromises.readdir(directory, { withFileTypes: true });
+      const validation = validatePath(directory, { allowAbsolute: true });
+      if (!validation.valid) {
+        throw new Error(`Invalid path: ${validation.reason}`);
+      }
+      const files = await fsPromises.readdir(validation.normalizedPath, { withFileTypes: true });
       return files
         .filter(f => f.isFile() && (f.name.endsWith('.gguf') || f.name.endsWith('.bin')))
-        .map(f => ({ name: f.name, path: path.join(directory, f.name) }));
-    } catch {
+        .map(f => ({ name: f.name, path: path.join(validation.normalizedPath, f.name) }));
+    } catch (error) {
+      console.warn('[IPC] fs:listModels failed:', error.message);
       return [];
     }
   });
@@ -2785,6 +3002,97 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     } catch (error) {
       console.error('Failed to scan project:', error);
       return { root: '', tree: [] };
+    }
+  });
+
+  ipcMain.handle('project:analyze', async (_, rootPath) => {
+    try {
+      const resolvedRoot = resolveProjectRoot(rootPath);
+      const { analyzeProject } = require('./services/code-intelligence');
+      return await analyzeProject(resolvedRoot);
+    } catch (error) {
+      console.error('Failed to analyze project:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('git:status', async (_, rootPath) => {
+    try {
+      const resolvedRoot = resolveProjectRoot(rootPath);
+      const result = spawnSync('git', ['status', '--porcelain', '--branch'], {
+        cwd: resolvedRoot,
+        encoding: 'utf8',
+        windowsHide: true,
+      });
+
+      if (result.error) {
+        return { branch: 'main', ahead: 0, behind: 0, files: [], error: result.error.message };
+      }
+      if (result.status !== 0) {
+        return {
+          branch: 'main',
+          ahead: 0,
+          behind: 0,
+          files: [],
+          error: String(result.stderr || 'Not a git repository').trim(),
+        };
+      }
+      return parseGitStatusOutput(result.stdout || '');
+    } catch (error) {
+      return { branch: 'main', ahead: 0, behind: 0, files: [], error: error.message };
+    }
+  });
+
+  ipcMain.handle('git:stage', async (_, rootPath, filePath) => {
+    try {
+      const resolvedRoot = resolveProjectRoot(rootPath);
+      const absoluteFile = path.resolve(resolvedRoot, String(filePath || ''));
+      const relativeFile = path.relative(resolvedRoot, absoluteFile);
+      if (!relativeFile || relativeFile.startsWith('..') || path.isAbsolute(relativeFile)) {
+        throw new Error('File path must be inside project root');
+      }
+
+      const result = spawnSync('git', ['add', '--', relativeFile], {
+        cwd: resolvedRoot,
+        encoding: 'utf8',
+        windowsHide: true,
+      });
+
+      if (result.error || result.status !== 0) {
+        return {
+          success: false,
+          error: result.error?.message || String(result.stderr || 'git add failed').trim(),
+        };
+      }
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('git:commit', async (_, rootPath, message) => {
+    try {
+      const resolvedRoot = resolveProjectRoot(rootPath);
+      const commitMessage = String(message || '').trim();
+      if (!commitMessage) {
+        throw new Error('Commit message is required');
+      }
+
+      const result = spawnSync('git', ['commit', '-m', commitMessage], {
+        cwd: resolvedRoot,
+        encoding: 'utf8',
+        windowsHide: true,
+      });
+
+      if (result.error || result.status !== 0) {
+        return {
+          success: false,
+          error: result.error?.message || String(result.stderr || 'git commit failed').trim(),
+        };
+      }
+      return { success: true, output: String(result.stdout || '').trim() };
+    } catch (error) {
+      return { success: false, error: error.message };
     }
   });
 
@@ -3370,8 +3678,33 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   ipcMain.handle('app:getVersion', () => app.getVersion());
   
   // Shell
-  ipcMain.handle('shell:openExternal', (_, url) => shell.openExternal(url));
-  ipcMain.handle('shell:openPath', (_, path) => shell.openPath(path));
+  ipcMain.handle('shell:openExternal', async (_, url) => {
+    try {
+      const parsed = new URL(String(url || ''));
+      if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol)) {
+        throw new Error(`Unsupported protocol: ${parsed.protocol}`);
+      }
+      await shell.openExternal(parsed.toString());
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+  ipcMain.handle('shell:openPath', async (_, targetPath) => {
+    try {
+      const validation = validatePath(targetPath, { allowAbsolute: true });
+      if (!validation.valid) {
+        throw new Error(validation.reason || 'Invalid path');
+      }
+      const result = await shell.openPath(validation.normalizedPath);
+      return {
+        success: !result,
+        error: result || null,
+      };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
   
   // GPU Info (legacy - kept for compatibility)
   ipcMain.handle('system:gpuInfo', async () => {
@@ -3599,20 +3932,30 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // NPU / OpenVINO Helper
   // ============================================
 
-  const npuBridge = getNpuBridge();
-
-  ipcMain.handle('npu:getStatus', async () => {
+  ipcMain.handle('npu:getStatus', async (_, options = {}) => {
     try {
-      return await npuBridge.getStatus();
+      const npuBridge = getNpuBridge();
+      if (!npuBridge?.getStatus) {
+        return { error: 'NPU bridge unavailable', setupRequired: true };
+      }
+      return await npuBridge.getStatus(options || {});
     } catch (error) {
       console.error('Failed to get NPU status:', error);
       return { error: error.message };
     }
   });
 
-  ipcMain.handle('npu:startServer', async () => {
+  ipcMain.handle('npu:startServer', async (_, options = {}) => {
     try {
-      const result = await npuBridge.startServer();
+      const npuBridge = getNpuBridge();
+      if (!npuBridge?.startServer) {
+        return { success: false, error: 'NPU bridge unavailable', setupRequired: true };
+      }
+      const result = await npuBridge.startServer(options || {});
+      if (result?.success) {
+        npuBridge.clearAllCaches?.();
+        hardwareDetection.clearCache?.();
+      }
       return result;
     } catch (error) {
       console.error('Failed to start NPU server:', error);
@@ -3622,7 +3965,13 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
 
   ipcMain.handle('npu:stopServer', async () => {
     try {
+      const npuBridge = getNpuBridge();
+      if (!npuBridge?.stopServer) {
+        return { success: false, error: 'NPU bridge unavailable' };
+      }
       const result = await npuBridge.stopServer();
+      npuBridge.clearAllCaches?.();
+      hardwareDetection.clearCache?.();
       return result;
     } catch (error) {
       console.error('Failed to stop NPU server:', error);
@@ -3632,10 +3981,44 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
 
   ipcMain.handle('npu:setup', async () => {
     try {
+      if (typeof npuSetupService.runOpenVinoSetup !== 'function') {
+        return { success: false, error: 'NPU setup helper unavailable' };
+      }
+
       const result = await npuSetupService.runOpenVinoSetup(appPath);
+      if (result?.success) {
+        const npuBridge = getNpuBridge();
+        npuBridge?.clearAllCaches?.();
+        hardwareDetection.clearCache?.();
+      }
       return result;
     } catch (error) {
       console.error('Failed to run OpenVINO setup script:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('npu:autoConfigureModel', async (_, options = {}) => {
+    try {
+      const npuBridge = getNpuBridge();
+      if (!npuBridge?.autoConfigureModel) {
+        return { configured: false, error: 'NPU bridge unavailable' };
+      }
+      return await npuBridge.autoConfigureModel(options || {});
+    } catch (error) {
+      console.error('Failed to auto-configure NPU model:', error);
+      return { configured: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('npu:clearCache', async () => {
+    try {
+      const npuBridge = getNpuBridge();
+      npuBridge?.clearAllCaches?.();
+      hardwareDetection.clearCache?.();
+      return { success: true };
+    } catch (error) {
+      console.error('Failed to clear NPU cache:', error);
       return { success: false, error: error.message };
     }
   });
@@ -4203,10 +4586,11 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   const imageBackendHelper = imageBackendHelperFactory ? imageBackendHelperFactory({ shell, makeRequest, store }) : null;
 
   ipcMain.handle('models:scan', async (_, directory) => {
-    if (directory) {
-      modelManager.setModelsDirectory(directory);
+    const scanDirectory = directory || resolveModelsDirectory();
+    if (scanDirectory) {
+      modelManager.setModelsDirectory(scanDirectory);
     }
-    return await modelManager.scanDirectory(directory);
+    return await modelManager.scanDirectory(scanDirectory);
   });
 
   ipcMain.handle('models:getAll', () => {
@@ -4268,6 +4652,12 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   });
 
   ipcMain.handle('models:getDiskSpace', async () => {
+    if (!modelManager.modelsDirectory) {
+      const dir = resolveModelsDirectory();
+      if (dir) {
+        modelManager.setModelsDirectory(dir);
+      }
+    }
     return await modelManager.getDiskSpace();
   });
 
@@ -4747,6 +5137,20 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return [];
     }
   });
+
+  ipcMain.handle('hf:searchPage', async (_, query, options) => {
+    try {
+      return await hfBrowser.searchModelsPage(query, options);
+    } catch (error) {
+      console.error('HF searchPage failed:', error);
+      return {
+        models: [],
+        nextCursor: null,
+        hasMore: false,
+        fetchedAt: new Date().toISOString(),
+      };
+    }
+  });
   
   ipcMain.handle('hf:getModelDetails', async (_, modelId) => {
     try {
@@ -4757,12 +5161,14 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     }
   });
   
-  ipcMain.handle('hf:getModelFiles', async (_, modelId) => {
+  ipcMain.handle('hf:getModelFiles', async (_, modelId, options = {}) => {
     try {
-      return await hfBrowser.getModelFiles(modelId);
+      return await hfBrowser.getModelFiles(modelId, options || {});
     } catch (error) {
       console.error('HF getModelFiles failed:', error);
-      return [];
+      return options?.includeAll
+        ? { allFiles: [], ggufFiles: [], fileStats: null }
+        : [];
     }
   });
   

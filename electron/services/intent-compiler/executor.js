@@ -180,17 +180,19 @@ async function executeEditFile(params, context) {
       }
       break;
       
-    case 'insert':
+    case 'insert': {
       const insertBefore = lines.slice(0, params.startLine - 1);
       const insertAfter = lines.slice(params.startLine - 1);
       newContent = [...insertBefore, params.content, ...insertAfter].join('\n');
       break;
+    }
       
-    case 'delete':
+    case 'delete': {
       const deleteBefore = lines.slice(0, params.startLine - 1);
       const deleteAfter = lines.slice(params.endLine || params.startLine);
       newContent = [...deleteBefore, ...deleteAfter].join('\n');
       break;
+    }
       
     case 'append':
       newContent = content + '\n' + params.content;

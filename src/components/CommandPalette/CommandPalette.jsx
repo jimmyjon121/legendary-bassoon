@@ -171,13 +171,14 @@ export function CommandPalette({
         e.preventDefault();
         setSelectedIndex(prev => Math.max(prev - 1, 0));
         break;
-      case 'Enter':
+      case 'Enter': {
         e.preventDefault();
         const selected = commandItems[selectedIndex];
         if (selected) {
           executeCommand(selected);
         }
         break;
+      }
       case 'Escape':
         e.preventDefault();
         onClose();

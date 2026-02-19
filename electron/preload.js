@@ -67,7 +67,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // Folders
   listFolders: (workspace) => ipcRenderer.invoke('folders:list', workspace),
-  createFolder: (data) => ipcRenderer.invoke('folders:create', data),
+  createConversationFolder: (data) => ipcRenderer.invoke('folders:create', data),
   updateFolder: (data) => ipcRenderer.invoke('folders:update', data),
   deleteFolder: (folderId) => ipcRenderer.invoke('folders:delete', folderId),
   
@@ -164,10 +164,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   stopImageBackend: (command) => ipcRenderer.invoke('imageBackend:stop', command),
 
   // NPU / OpenVINO
-  getNpuStatus: () => ipcRenderer.invoke('npu:getStatus'),
+  getNpuStatus: (options) => ipcRenderer.invoke('npu:getStatus', options),
   setupNpu: () => ipcRenderer.invoke('npu:setup'),
-  startNpuServer: () => ipcRenderer.invoke('npu:startServer'),
+  startNpuServer: (options) => ipcRenderer.invoke('npu:startServer', options),
   stopNpuServer: () => ipcRenderer.invoke('npu:stopServer'),
+  autoConfigureNpuModel: (options) => ipcRenderer.invoke('npu:autoConfigureModel', options),
+  clearNpuCache: () => ipcRenderer.invoke('npu:clearCache'),
 
   // ============================================
   // Power Mode
@@ -429,12 +431,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.invoke('tool:searchCode', { projectRoot, pattern, fileGlob, maxResults, caseSensitive }),
   
   // Run command (sandboxed)
-  toolRunCommand: (projectRoot, command, cwd, timeout) => 
-    ipcRenderer.invoke('tool:runCommand', { projectRoot, command, cwd, timeout }),
+  toolRunCommand: (projectRoot, command, cwd, timeout, options = {}) => 
+    ipcRenderer.invoke('tool:runCommand', { projectRoot, command, cwd, timeout, ...(options || {}) }),
   
   // Apply a patch
-  toolApplyPatch: (projectRoot, patch) => 
-    ipcRenderer.invoke('tool:applyPatch', { projectRoot, patch }),
+  toolApplyPatch: (projectRoot, patch, options = {}) => 
+    ipcRenderer.invoke('tool:applyPatch', { projectRoot, patch, ...(options || {}) }),
+
+  toolCreateCheckpoint: (projectRoot, files, reason) =>
+    ipcRenderer.invoke('tool:createCheckpoint', { projectRoot, files, reason }),
+
+  toolRollbackCheckpoint: (checkpointId) =>
+    ipcRenderer.invoke('tool:rollbackCheckpoint', { checkpointId }),
   
   // Generate diff preview
   toolGenerateDiff: (oldContent, newContent, filePath) => 
@@ -661,12 +669,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   
   // Search for GGUF models on HuggingFace
   hfSearch: (query, options) => ipcRenderer.invoke('hf:search', query, options),
+  hfSearchPage: (query, options) => ipcRenderer.invoke('hf:searchPage', query, options),
   
   // Get detailed model information
   hfGetModelDetails: (modelId) => ipcRenderer.invoke('hf:getModelDetails', modelId),
   
   // Get model files list
-  hfGetModelFiles: (modelId) => ipcRenderer.invoke('hf:getModelFiles', modelId),
+  hfGetModelFiles: (modelId, options) => ipcRenderer.invoke('hf:getModelFiles', modelId, options),
   
   // Get curated collections
   hfGetCollections: () => ipcRenderer.invoke('hf:getCollections'),

@@ -36,6 +36,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useAppStore } from '../../stores/appStore';
 import { useModelExperience } from '../../services/modelExperience';
 
+const WEB_SEARCH_PREF_KEY = 'researchWebSearchEnabled';
+
 const QUICK_ACTIONS = [
   { id: 'explain', label: 'Explain this', icon: MessageSquare, prompt: 'Can you explain' },
   { id: 'summarize', label: 'Summarize', icon: ArrowUp, prompt: 'Please summarize' },
@@ -93,6 +95,7 @@ export function SmartInput({ onSubmit, disabled = false, onImageGenerate, minima
   const isGenerating = useAppStore(s => s.isGenerating);
   const stopGeneration = useAppStore(s => s.stopGeneration);
   const currentModel = useAppStore(s => s.currentModel);
+  const currentWorkspace = useAppStore(s => s.currentWorkspace);
   const generationMetadata = useAppStore(s => s.generationMetadata);
   const contextUtilization = useAppStore(s => s.contextUtilization);
   const lastGenerationProfile = useAppStore(s => s.lastGenerationProfile);
@@ -103,6 +106,7 @@ export function SmartInput({ onSubmit, disabled = false, onImageGenerate, minima
   const recalibration = useAppStore(s => s.recalibration);
   const recalibrateCurrentModel = useAppStore(s => s.recalibrateCurrentModel);
   const modelFamily = useModelExperience(s => s.modelFamily);
+  const canUseWebSearch = currentWorkspace === 'research';
 
   const activeProfile = currentModel && lastGenerationProfile?.model === currentModel
     ? lastGenerationProfile
@@ -112,13 +116,21 @@ export function SmartInput({ onSubmit, disabled = false, onImageGenerate, minima
 
   // Persist web search preference
   useEffect(() => {
-    const saved = localStorage.getItem('webSearchEnabled');
+    const saved = localStorage.getItem(WEB_SEARCH_PREF_KEY);
     if (saved === 'true') setWebSearchEnabled(true);
   }, []);
 
   useEffect(() => {
-    localStorage.setItem('webSearchEnabled', webSearchEnabled.toString());
-  }, [webSearchEnabled]);
+    if (canUseWebSearch) {
+      localStorage.setItem(WEB_SEARCH_PREF_KEY, webSearchEnabled.toString());
+    }
+  }, [webSearchEnabled, canUseWebSearch]);
+
+  useEffect(() => {
+    if (!canUseWebSearch && webSearchEnabled) {
+      setWebSearchEnabled(false);
+    }
+  }, [canUseWebSearch, webSearchEnabled]);
 
   // Initialize speech recognition
   useEffect(() => {
@@ -311,7 +323,7 @@ export function SmartInput({ onSubmit, disabled = false, onImageGenerate, minima
         id: a.id, name: a.name, type: a.type, size: a.size,
         data: a.data, isImage: a.isImage, isScreenshot: a.isScreenshot
       })),
-      webSearchEnabled,
+      webSearchEnabled: canUseWebSearch ? webSearchEnabled : false,
     });
     setAttachments([]);
   };
@@ -601,20 +613,22 @@ export function SmartInput({ onSubmit, disabled = false, onImageGenerate, minima
           {/* Left side: feature toggles */}
           <div className="flex items-center gap-0.5">
             {/* Web Search Toggle */}
-            <motion.button
-              onClick={() => setWebSearchEnabled(!webSearchEnabled)}
-              className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
-                webSearchEnabled 
-                  ? 'bg-blue-500/15 text-blue-400 border border-blue-500/25' 
-                  : 'text-text-muted hover:text-text-secondary hover:bg-surface-2 border border-transparent'
-              }`}
-              whileHover={{ scale: 1.02 }}
-              whileTap={{ scale: 0.98 }}
-              title={webSearchEnabled ? "Web search enabled - click to disable" : "Enable web search"}
-            >
-              <Globe size={14} />
-              <span className="hidden sm:inline">Search</span>
-            </motion.button>
+            {canUseWebSearch && (
+              <motion.button
+                onClick={() => setWebSearchEnabled(!webSearchEnabled)}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium transition-all ${
+                  webSearchEnabled 
+                    ? 'bg-blue-500/15 text-blue-400 border border-blue-500/25' 
+                    : 'text-text-muted hover:text-text-secondary hover:bg-surface-2 border border-transparent'
+                }`}
+                whileHover={{ scale: 1.02 }}
+                whileTap={{ scale: 0.98 }}
+                title={webSearchEnabled ? "Web search enabled - click to disable" : "Enable web search"}
+              >
+                <Globe size={14} />
+                <span className="hidden sm:inline">Search</span>
+              </motion.button>
+            )}
 
             {/* Quick actions */}
             <motion.button
@@ -764,7 +778,7 @@ export function SmartInput({ onSubmit, disabled = false, onImageGenerate, minima
               </span>
             </span>
           )}
-          {webSearchEnabled && (
+          {canUseWebSearch && webSearchEnabled && (
             <span className="flex items-center gap-1 text-blue-400">
               <Globe size={10} />
               Web search on

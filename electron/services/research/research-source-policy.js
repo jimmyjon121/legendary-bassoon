@@ -1,57 +1,69 @@
-const DIRECTORY_HOST_PATTERNS = [
-  'wikipedia.org',
-  'wikidata.org',
-  'mapquest.com',
-  'yelp.com',
-  'yellowpages.com',
-  'findhelp.org',
-  'psychologytoday.com',
-  'rehab.com',
-  'healthgrades.com',
-  'zocdoc.com',
+/**
+ * Research Source Policy
+ *
+ * Strict-by-default policy intended for verification-heavy research.
+ * Official/authoritative sources are prioritized and tertiary sources are blocked.
+ */
+
+const SPAM_DOMAINS = [
+  'pinterest.com',
+  'reddit.com',
+  'quora.com',
+  'tiktok.com',
+  'ebay.com',
+  'etsy.com',
+  'fandom.com',
+];
+
+const SOCIAL_DOMAINS = [
   'facebook.com',
   'instagram.com',
   'linkedin.com',
   'x.com',
   'twitter.com',
   'youtube.com',
+  'threads.net',
 ];
 
-const DIRECTORY_PATH_PATTERNS = [
-  '/directory',
-  '/directories',
-  '/listing',
-  '/listings',
-  '/reviews',
-  '/compare',
-  '/find/',
-  '/search',
+const DIRECTORY_DOMAINS = [
+  'yelp.com',
+  'yellowpages.com',
+  'mapquest.com',
+  'healthgrades.com',
+  'zocdoc.com',
 ];
 
-const OFFICIAL_TITLE_HINTS = [
-  /\bofficial\b/i,
-  /\babout us\b/i,
-  /\bcontact us\b/i,
-  /\bour programs\b/i,
-  /\bservices\b/i,
-  /\bapply\b/i,
-  /\breferral\b/i,
+const TERTIARY_REFERENCE_DOMAINS = [
+  'wikipedia.org',
+  'wikidata.org',
+  'wikivoyage.org',
+  'britannica.com',
 ];
 
-const REJECT_TITLE_HINTS = [
-  /\bbest\b/i,
-  /\btop\b/i,
-  /\breviews?\b/i,
-  /\bcompare\b/i,
-  /\bdirectory\b/i,
+const AUTHORITATIVE_TLDS = ['.gov', '.mil', '.edu'];
+const SECONDARY_TLDS = ['.org'];
+const COMMERCIAL_OFFICIAL_TLDS = ['.com', '.io', '.ai', '.co', '.dev', '.app'];
+
+const DEFAULT_HARD_BLOCKLIST = [
+  ...SPAM_DOMAINS,
+  ...SOCIAL_DOMAINS,
+  ...DIRECTORY_DOMAINS,
+  ...TERTIARY_REFERENCE_DOMAINS,
 ];
 
 const DEFAULT_SOURCE_POLICY = {
-  mode: 'discover_broad_verify_official',
+  mode: 'strict_official_first',
   requireOfficial: true,
-  rejectDirectoryPages: true,
-  rejectSocialProfiles: true,
+  allowSecondary: false,
+  rejectSpam: true,
+  rejectSocial: true,
+  rejectDirectories: true,
+  rejectTertiary: true,
+  allowedDomains: [],
   officialDomains: [],
+  secondaryDomains: [],
+  blockedDomains: [],
+  hardBlockedDomains: DEFAULT_HARD_BLOCKLIST,
 };
 
 function safeLower(input) {
@@ -61,6 +73,15 @@ function safeLower(input) {
 function normalizeDomain(input) {
   let domain = safeLower(input);
   if (!domain) return '';
+
+  if (domain.includes('://')) {
+    try {
+      domain = new URL(domain).hostname.toLowerCase();
+    } catch (_error) {
+      // fall through
+    }
+  }
+
   if (domain.startsWith('www.')) domain = domain.slice(4);
   return domain;
 }
@@ -68,6 +89,7 @@ function normalizeDomain(input) {
 function normalizeUrl(urlLike) {
   const raw = String(urlLike || '').trim();
   if (!raw) return '';
+
   try {
     const value = raw.startsWith('http://') || raw.startsWith('https://') ? raw : `https://${raw}`;
     const parsed = new URL(value);
@@ -85,128 +107,277 @@ function domainMatches(candidateDomain, targetDomain) {
   return left === right || left.endsWith(`.${right}`);
 }
 
-function hostLooksInstitutional(domain) {
-  if (!domain) return false;
-  if (domain.endsWith('.gov') || domain.endsWith('.edu')) return true;
-  const segments = domain.split('.');
-  if (segments.length <= 2) return true;
-  return !['blogspot.com', 'substack.com', 'wordpress.com', 'medium.com'].some((host) => domainMatches(domain, host));
+function matchesDomainList(domain, list = []) {
+  if (!domain || !Array.isArray(list) || list.length === 0) return false;
+  return list.some((item) => domainMatches(domain, item));
 }
 
-function isDirectoryHost(domain) {
-  return DIRECTORY_HOST_PATTERNS.some((item) => domainMatches(domain, item));
+function normalizeDomainList(list = []) {
+  return Array.from(new Set((Array.isArray(list) ? list : [])
+    .map((item) => normalizeDomain(item))
+    .filter(Boolean)));
 }
 
-function isDirectoryPath(pathname = '') {
-  const lowered = safeLower(pathname);
-  if (!lowered) return false;
-  return DIRECTORY_PATH_PATTERNS.some((pattern) => lowered.includes(pattern));
+function normalizePolicy(rawPolicy = {}) {
+  const source = rawPolicy && typeof rawPolicy === 'object' ? rawPolicy : {};
+  const policy = { ...DEFAULT_SOURCE_POLICY, ...source };
+
+  // Legacy aliases
+  if (source.rejectDirectoryPages !== undefined && source.rejectDirectories === undefined) {
+    policy.rejectDirectories = Boolean(source.rejectDirectoryPages);
+  }
+  if (source.rejectSocialProfiles !== undefined && source.rejectSocial === undefined) {
+    policy.rejectSocial = Boolean(source.rejectSocialProfiles);
+  }
+  if (Array.isArray(source.officialDomains) && source.allowedDomains === undefined) {
+    policy.allowedDomains = source.officialDomains.slice();
+  }
+
+  policy.mode = String(policy.mode || DEFAULT_SOURCE_POLICY.mode).trim().toLowerCase() || DEFAULT_SOURCE_POLICY.mode;
+
+  if (policy.mode === 'strict_official_first' || policy.mode === 'official_first') {
+    policy.requireOfficial = true;
+    policy.allowSecondary = false;
+    policy.rejectTertiary = true;
+    policy.rejectSocial = true;
+    policy.rejectDirectories = true;
+  } else if (policy.mode === 'balanced') {
+    policy.requireOfficial = true;
+    policy.allowSecondary = true;
+    policy.rejectTertiary = false;
+  } else if (policy.mode === 'open_web') {
+    policy.requireOfficial = false;
+    policy.allowSecondary = true;
+    policy.rejectTertiary = false;
+  }
+
+  policy.requireOfficial = Boolean(policy.requireOfficial);
+  policy.allowSecondary = Boolean(policy.allowSecondary);
+  policy.rejectSpam = Boolean(policy.rejectSpam);
+  policy.rejectSocial = Boolean(policy.rejectSocial);
+  policy.rejectDirectories = Boolean(policy.rejectDirectories);
+  policy.rejectTertiary = Boolean(policy.rejectTertiary);
+  policy.allowedDomains = normalizeDomainList(policy.allowedDomains);
+  policy.officialDomains = normalizeDomainList(policy.officialDomains);
+  policy.secondaryDomains = normalizeDomainList(policy.secondaryDomains);
+  policy.blockedDomains = normalizeDomainList(policy.blockedDomains);
+  policy.hardBlockedDomains = normalizeDomainList(
+    (policy.hardBlockedDomains || []).concat(DEFAULT_HARD_BLOCKLIST)
+  );
+
+  return policy;
 }
 
-function titleLooksDirectory(title = '', snippet = '') {
-  const haystack = `${title || ''} ${snippet || ''}`;
-  return REJECT_TITLE_HINTS.some((pattern) => pattern.test(haystack));
+function classifyDomainTier(domain = '', policy = DEFAULT_SOURCE_POLICY) {
+  const normalized = normalizeDomain(domain);
+  if (!normalized) return { tier: 'rejected', domainClass: 'invalid', quality: 0 };
+
+  if (
+    matchesDomainList(normalized, policy.allowedDomains) ||
+    matchesDomainList(normalized, policy.officialDomains) ||
+    AUTHORITATIVE_TLDS.some((tld) => normalized.endsWith(tld))
+  ) {
+    return { tier: 'authoritative', domainClass: 'official', quality: 0.95, isOfficial: true };
+  }
+
+  if (COMMERCIAL_OFFICIAL_TLDS.some((tld) => normalized.endsWith(tld))) {
+    return { tier: 'authoritative', domainClass: 'commercial', quality: 0.78, isOfficial: true };
+  }
+
+  if (
+    matchesDomainList(normalized, policy.secondaryDomains) ||
+    SECONDARY_TLDS.some((tld) => normalized.endsWith(tld))
+  ) {
+    return { tier: 'secondary', domainClass: 'secondary', quality: 0.68, isOfficial: false };
+  }
+
+  return { tier: 'tertiary', domainClass: 'tertiary', quality: 0.32, isOfficial: false };
 }
 
-function titleLooksOfficial(title = '', snippet = '') {
-  const haystack = `${title || ''} ${snippet || ''}`;
-  return OFFICIAL_TITLE_HINTS.some((pattern) => pattern.test(haystack));
-}
-
+/**
+ * Returns:
+ * {
+ *   normalizedUrl, domain, quality, tier, domainClass,
+ *   isRejected, isOfficial, reason
+ * }
+ */
 function classifySource(candidate = {}, rawPolicy = DEFAULT_SOURCE_POLICY) {
-  const policy = {
-    ...DEFAULT_SOURCE_POLICY,
-    ...(rawPolicy || {}),
-    officialDomains: Array.isArray(rawPolicy?.officialDomains)
-      ? rawPolicy.officialDomains.map(normalizeDomain).filter(Boolean)
-      : [],
-  };
-
+  const policy = normalizePolicy(rawPolicy);
   const normalizedUrl = normalizeUrl(candidate.url || candidate.source_url || '');
   if (!normalizedUrl) {
     return {
       normalizedUrl: '',
       domain: '',
-      isOfficial: false,
+      quality: 0,
+      tier: 'rejected',
+      domainClass: 'invalid',
       isRejected: true,
-      confidence: 0,
+      isOfficial: false,
       reason: 'invalid_url',
     };
   }
 
-  const parsed = new URL(normalizedUrl);
-  const domain = normalizeDomain(parsed.hostname);
-  const title = String(candidate.title || candidate.source_title || '');
-  const snippet = String(candidate.snippet || candidate.excerpt_text || '');
+  let domain = '';
+  try {
+    domain = normalizeDomain(new URL(normalizedUrl).hostname);
+  } catch (_error) {
+    return {
+      normalizedUrl,
+      domain: '',
+      quality: 0,
+      tier: 'rejected',
+      domainClass: 'invalid',
+      isRejected: true,
+      isOfficial: false,
+      reason: 'invalid_url',
+    };
+  }
 
-  if (policy.officialDomains.length > 0) {
-    const allowed = policy.officialDomains.some((item) => domainMatches(domain, item));
-    if (!allowed) {
+  if (
+    matchesDomainList(domain, policy.hardBlockedDomains) ||
+    matchesDomainList(domain, policy.blockedDomains)
+  ) {
+    return {
+      normalizedUrl,
+      domain,
+      quality: 0,
+      tier: 'rejected',
+      domainClass: 'blocked',
+      isRejected: true,
+      isOfficial: false,
+      reason: matchesDomainList(domain, policy.hardBlockedDomains) ? 'hard_blocked_domain' : 'blocked_domain',
+    };
+  }
+
+  if (policy.rejectSpam && matchesDomainList(domain, SPAM_DOMAINS)) {
+    return {
+      normalizedUrl,
+      domain,
+      quality: 0,
+      tier: 'rejected',
+      domainClass: 'spam',
+      isRejected: true,
+      isOfficial: false,
+      reason: 'spam_domain',
+    };
+  }
+
+  if (policy.rejectSocial && matchesDomainList(domain, SOCIAL_DOMAINS)) {
+    return {
+      normalizedUrl,
+      domain,
+      quality: 0,
+      tier: 'rejected',
+      domainClass: 'social',
+      isRejected: true,
+      isOfficial: false,
+      reason: 'social_domain',
+    };
+  }
+
+  if (policy.rejectDirectories && matchesDomainList(domain, DIRECTORY_DOMAINS)) {
+    return {
+      normalizedUrl,
+      domain,
+      quality: 0,
+      tier: 'rejected',
+      domainClass: 'directory',
+      isRejected: true,
+      isOfficial: false,
+      reason: 'directory_domain',
+    };
+  }
+
+  const tierInfo = classifyDomainTier(domain, policy);
+  const tier = tierInfo.tier || 'tertiary';
+  const domainClass = tierInfo.domainClass || 'tertiary';
+  const isOfficial = Boolean(tierInfo.isOfficial);
+
+  if (policy.rejectTertiary && tier === 'tertiary') {
+    return {
+      normalizedUrl,
+      domain,
+      quality: 0.08,
+      tier: 'rejected',
+      domainClass,
+      isRejected: true,
+      isOfficial,
+      reason: 'tertiary_source_rejected',
+    };
+  }
+
+  if (policy.requireOfficial && tier !== 'authoritative') {
+    if (policy.allowSecondary && tier === 'secondary') {
       return {
         normalizedUrl,
         domain,
+        quality: Number(tierInfo.quality || 0.68),
+        tier,
+        domainClass,
+        isRejected: false,
         isOfficial: false,
-        isRejected: true,
-        confidence: 0.05,
-        reason: 'not_in_official_allowlist',
+        reason: 'accepted_secondary_fallback',
       };
     }
-  }
-
-  const isDirectory = isDirectoryHost(domain) || isDirectoryPath(parsed.pathname) || titleLooksDirectory(title, snippet);
-  if (policy.rejectDirectoryPages && isDirectory) {
     return {
       normalizedUrl,
       domain,
-      isOfficial: false,
+      quality: Number(tierInfo.quality || 0.2),
+      tier: 'rejected',
+      domainClass,
       isRejected: true,
-      confidence: 0.1,
-      reason: 'directory_or_review_source',
+      isOfficial: false,
+      reason: 'non_authoritative_source',
     };
   }
 
-  const looksSocial = ['facebook.com', 'instagram.com', 'x.com', 'twitter.com', 'linkedin.com', 'youtube.com']
-    .some((item) => domainMatches(domain, item));
-  if (policy.rejectSocialProfiles && looksSocial) {
-    return {
-      normalizedUrl,
-      domain,
-      isOfficial: false,
-      isRejected: true,
-      confidence: 0.1,
-      reason: 'social_profile_source',
-    };
-  }
-
-  let confidence = 0.2;
-  if (hostLooksInstitutional(domain)) confidence += 0.25;
-  if (titleLooksOfficial(title, snippet)) confidence += 0.25;
-  if (domain.endsWith('.gov') || domain.endsWith('.edu')) confidence += 0.2;
-
-  const isOfficial = confidence >= 0.55;
   return {
     normalizedUrl,
     domain,
-    isOfficial,
+    quality: Number(tierInfo.quality || 0.5),
+    tier,
+    domainClass,
     isRejected: false,
-    confidence: Math.min(1, Math.max(0, confidence)),
-    reason: isOfficial ? 'official_confident' : 'insufficient_official_confidence',
+    isOfficial,
+    reason: `accepted_${tier}`,
   };
 }
 
 function mergeSourcePolicy(basePolicy = DEFAULT_SOURCE_POLICY, overridePolicy = {}) {
+  const normalizedBase = normalizePolicy(basePolicy);
+  const normalizedOverride = normalizePolicy(overridePolicy);
   const merged = {
     ...DEFAULT_SOURCE_POLICY,
-    ...(basePolicy || {}),
-    ...(overridePolicy || {}),
+    ...normalizedBase,
+    ...normalizedOverride,
   };
-  const officialDomains = []
-    .concat(basePolicy?.officialDomains || [])
-    .concat(overridePolicy?.officialDomains || [])
-    .map(normalizeDomain)
-    .filter(Boolean);
-  merged.officialDomains = Array.from(new Set(officialDomains));
-  return merged;
+
+  merged.allowedDomains = normalizeDomainList(
+    (normalizedBase.allowedDomains || []).concat(normalizedOverride.allowedDomains || [])
+  );
+  merged.officialDomains = normalizeDomainList(
+    (normalizedBase.officialDomains || []).concat(normalizedOverride.officialDomains || [])
+  );
+  merged.secondaryDomains = normalizeDomainList(
+    (normalizedBase.secondaryDomains || []).concat(normalizedOverride.secondaryDomains || [])
+  );
+  merged.blockedDomains = normalizeDomainList(
+    (normalizedBase.blockedDomains || []).concat(normalizedOverride.blockedDomains || [])
+  );
+  merged.hardBlockedDomains = normalizeDomainList(
+    (normalizedBase.hardBlockedDomains || [])
+      .concat(normalizedOverride.hardBlockedDomains || [])
+      .concat(DEFAULT_HARD_BLOCKLIST)
+  );
+
+  merged.requireOfficial = Boolean(merged.requireOfficial);
+  merged.allowSecondary = Boolean(merged.allowSecondary);
+  merged.rejectSpam = Boolean(merged.rejectSpam);
+  merged.rejectSocial = Boolean(merged.rejectSocial);
+  merged.rejectDirectories = Boolean(merged.rejectDirectories);
+  merged.rejectTertiary = Boolean(merged.rejectTertiary);
+
+  return normalizePolicy(merged);
 }
 
 module.exports = {
@@ -216,4 +387,5 @@ module.exports = {
   normalizeUrl,
   normalizeDomain,
   domainMatches,
+  normalizePolicy,
 };

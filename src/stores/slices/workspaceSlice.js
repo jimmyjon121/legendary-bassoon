@@ -79,6 +79,10 @@ export const createWorkspaceSlice = (set, get) => ({
   workspaceSettings: { ...WORKSPACES },
   isLocked: true,
   nsfwPassword: null,
+  promotedResearchContext: {
+    casual: [],
+    code: [],
+  },
 
   // Actions
   setWorkspace: async (workspaceId) => {
@@ -166,6 +170,48 @@ export const createWorkspaceSlice = (set, get) => ({
       streamingContent: ''
     });
   },
-});
 
+  promoteResearchContext: (payload = {}) => {
+    const target = String(payload.target || 'casual').toLowerCase() === 'code' ? 'code' : 'casual';
+    const entry = {
+      id: payload.id || `promoted-${Date.now()}`,
+      runId: payload.runId || null,
+      title: String(payload.title || 'Research context').trim() || 'Research context',
+      summary: String(payload.summary || '').trim(),
+      citations: Array.isArray(payload.citations)
+        ? payload.citations.map((item) => String(item || '').trim()).filter(Boolean)
+        : [],
+      metadata: payload.metadata && typeof payload.metadata === 'object' ? { ...payload.metadata } : {},
+      promotedAt: new Date().toISOString(),
+      target,
+    };
+
+    set((state) => ({
+      promotedResearchContext: {
+        ...state.promotedResearchContext,
+        [target]: [entry, ...(state.promotedResearchContext?.[target] || [])].slice(0, 24),
+      },
+    }));
+    return entry;
+  },
+
+  clearPromotedResearchContext: (target = null) => {
+    if (!target) {
+      set({ promotedResearchContext: { casual: [], code: [] } });
+      return;
+    }
+    const normalized = String(target || '').toLowerCase() === 'code' ? 'code' : 'casual';
+    set((state) => ({
+      promotedResearchContext: {
+        ...state.promotedResearchContext,
+        [normalized]: [],
+      },
+    }));
+  },
+
+  listPromotedResearchContext: (target = 'casual') => {
+    const normalized = String(target || '').toLowerCase() === 'code' ? 'code' : 'casual';
+    return get().promotedResearchContext?.[normalized] || [];
+  },
+});
 

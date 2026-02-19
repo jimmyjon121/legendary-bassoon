@@ -26,13 +26,10 @@ const ALLOWED_BASES = [
 
 // Patterns that indicate potential attacks
 const DANGEROUS_PATTERNS = [
-  /\.\.[\/\\]/, // Directory traversal
-  /^[\/\\]/, // Absolute paths starting with / or \
-  /^[a-zA-Z]:/, // Windows absolute paths like C:
+  /\.\.[/\\]/, // Directory traversal
   /%2e%2e/i, // URL-encoded ..
   /%2f/i, // URL-encoded /
   /%5c/i, // URL-encoded \
-  /\0/, // Null bytes
 ];
 
 // Dangerous file extensions that should be blocked for writes
@@ -49,8 +46,22 @@ const BLOCKED_PATHS = [
   'Windows', 'System32', 'SysWOW64',
   'Program Files', 'Program Files (x86)',
   '.ssh', '.gnupg', '.aws', '.azure',
-  'node_modules', // Prevent tampering with dependencies
 ];
+
+const INVALID_FILENAME_CHARS_REGEX = /[<>:"/\\|?*]/g;
+
+function normalizeForCompare(value) {
+  const resolved = path.resolve(String(value || ''));
+  const normalized = path.normalize(resolved).replace(/[\\/]+$/, '');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function isSubPath(targetPath, basePath) {
+  const target = normalizeForCompare(targetPath);
+  const base = normalizeForCompare(basePath);
+  const relative = path.relative(base, target);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
 
 /**
  * Validates if a path is safe for file operations
@@ -59,13 +70,15 @@ const BLOCKED_PATHS = [
  * @param {boolean} options.allowAbsolute - Allow absolute paths (default: false)
  * @param {boolean} options.isWrite - Is this a write operation (stricter checks)
  * @param {string[]} options.additionalAllowed - Additional allowed base paths
+ * @param {boolean} options.allowOutsideAllowedBases - Skip allowed-base checks (default: false)
  * @returns {{ valid: boolean, reason?: string, normalizedPath?: string }}
  */
 function validatePath(requestedPath, options = {}) {
   const { 
     allowAbsolute = false, 
     isWrite = false,
-    additionalAllowed = []
+    additionalAllowed = [],
+    allowOutsideAllowedBases = false,
   } = options;
 
   // Basic null/undefined check
@@ -75,6 +88,7 @@ function validatePath(requestedPath, options = {}) {
 
   // Trim and normalize
   let normalizedPath = requestedPath.trim();
+  const isAbsoluteInput = path.isAbsolute(normalizedPath);
 
   // Check for dangerous patterns
   for (const pattern of DANGEROUS_PATTERNS) {
@@ -85,9 +99,29 @@ function validatePath(requestedPath, options = {}) {
       };
     }
   }
+  if (normalizedPath.includes('\0')) {
+    return {
+      valid: false,
+      reason: 'Null byte detected in path',
+    };
+  }
+
+  if (isAbsoluteInput && !allowAbsolute) {
+    return {
+      valid: false,
+      reason: 'Absolute paths are not allowed',
+    };
+  }
 
   // Check for blocked system paths
-  const lowerPath = normalizedPath.toLowerCase();
+  let resolvedPath;
+  try {
+    resolvedPath = path.resolve(normalizedPath);
+  } catch (e) {
+    return { valid: false, reason: `Invalid path format: ${e.message}` };
+  }
+
+  const lowerPath = resolvedPath.toLowerCase();
   for (const blocked of BLOCKED_PATHS) {
     if (lowerPath.includes(blocked.toLowerCase())) {
       return { 
@@ -95,14 +129,6 @@ function validatePath(requestedPath, options = {}) {
         reason: `Access to system path "${blocked}" is not allowed` 
       };
     }
-  }
-
-  // Resolve to absolute path
-  let resolvedPath;
-  try {
-    resolvedPath = path.resolve(normalizedPath);
-  } catch (e) {
-    return { valid: false, reason: `Invalid path format: ${e.message}` };
   }
 
   // Check if path is within allowed bases
@@ -114,11 +140,11 @@ function validatePath(requestedPath, options = {}) {
   ];
 
   const isInAllowedBase = allowedPaths.some(base => {
-    const normalizedBase = path.normalize(base);
-    return resolvedPath.startsWith(normalizedBase);
+    if (!base) return false;
+    return isSubPath(resolvedPath, base);
   });
 
-  if (!isInAllowedBase && !allowAbsolute) {
+  if (!isInAllowedBase && !allowOutsideAllowedBases) {
     return { 
       valid: false, 
       reason: 'Path is outside allowed directories' 
@@ -170,7 +196,10 @@ function sanitizeFilename(filename) {
   }
 
   return filename
-    .replace(/[<>:"/\\|?*\x00-\x1f]/g, '_') // Remove invalid chars
+    .replace(INVALID_FILENAME_CHARS_REGEX, '_') // Remove invalid chars
+    .split('')
+    .map((char) => (char.charCodeAt(0) < 32 ? '_' : char)) // Remove control chars
+    .join('')
     .replace(/^\.+/, '') // Remove leading dots
     .replace(/\.+$/, '') // Remove trailing dots
     .replace(/\s+/g, '_') // Replace spaces with underscores
@@ -185,13 +214,16 @@ function sanitizeFilename(filename) {
  */
 function createSafePath(baseDir, relativePath) {
   const sanitized = relativePath
-    .split(/[\/\\]/)
+    .split(/[/\\]/)
     .map(sanitizeFilename)
     .filter(Boolean)
     .join(path.sep);
 
   const fullPath = path.join(baseDir, sanitized);
-  const result = validatePath(fullPath, { allowAbsolute: true });
+  const result = validatePath(fullPath, {
+    allowAbsolute: true,
+    additionalAllowed: [baseDir],
+  });
 
   if (!result.valid) {
     throw new Error(`Cannot create safe path: ${result.reason}`);
@@ -207,10 +239,7 @@ function createSafePath(baseDir, relativePath) {
  * @returns {boolean}
  */
 function isWithinDirectory(targetPath, parentDir) {
-  const resolvedTarget = path.resolve(targetPath);
-  const resolvedParent = path.resolve(parentDir);
-  return resolvedTarget.startsWith(resolvedParent + path.sep) || 
-         resolvedTarget === resolvedParent;
+  return isSubPath(targetPath, parentDir);
 }
 
 module.exports = {

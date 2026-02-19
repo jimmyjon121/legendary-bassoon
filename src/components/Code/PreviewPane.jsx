@@ -48,7 +48,6 @@ export function PreviewPane() {
       {isElectron && (
         <div className="flex-1 overflow-hidden rounded border border-forge-border bg-black/30">
           {loadedUrl ? (
-            // eslint-disable-next-line react/no-unknown-property
             <webview
               src={loadedUrl}
               style={{ width: '100%', height: '100%', minHeight: '200px' }}
@@ -67,7 +66,6 @@ export function PreviewPane() {
 }
 
 export default PreviewPane;
-
 
 
 

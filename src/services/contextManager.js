@@ -47,7 +47,7 @@ export const TASK_TYPES = {
     id: 'math',
     name: 'Math',
     keywords: ['calculate', 'solve', 'equation', 'formula', 'math', 'computation', 'number'],
-    patterns: [/\d+\s*[\+\-\*\/\^]\s*\d+/, /solve\s+/, /calculate\s+/, /=\s*\?/],
+    patterns: [/\d+\s*[-+*/^]\s*\d+/, /solve\s+/, /calculate\s+/, /=\s*\?/],
     suggestedWorkspace: 'work',
     contextStrategy: 'precise',
     maxTokens: 2000

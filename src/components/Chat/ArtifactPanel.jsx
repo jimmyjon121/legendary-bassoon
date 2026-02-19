@@ -320,7 +320,7 @@ export const ArtifactPanel = memo(function ArtifactPanel({
               srcDoc={iframeSrcDoc}
               onLoad={handleIframeLoad}
               onError={handleIframeError}
-              sandbox="allow-scripts allow-same-origin"
+              sandbox="allow-scripts"
               className="w-full h-full bg-[#1a1a2e] border-none"
               title="Artifact Preview"
             />

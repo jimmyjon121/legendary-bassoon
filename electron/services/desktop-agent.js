@@ -1,7 +1,7 @@
 let robot = null;
 try {
   // Optional dependency – degrade gracefully if not installed
-  // eslint-disable-next-line global-require, import/no-extraneous-dependencies
+  // eslint-disable-next-line global-require
   robot = require('robotjs');
 } catch (e) {
   console.warn('Desktop agent unavailable: robotjs not installed:', e.message);
@@ -42,6 +42,7 @@ module.exports = {
   isAvailable,
   runTask,
 };
+
 
 
 

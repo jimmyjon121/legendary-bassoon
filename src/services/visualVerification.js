@@ -320,12 +320,13 @@ class VisualVerification {
         assertion.actual = assertion.status === VERIFICATION_STATUS.PASSED;
         break;
 
-      case ASSERTION_TYPES.COLOR_MATCH:
+      case ASSERTION_TYPES.COLOR_MATCH: {
         const colorMatch = Math.random() > 0.2;
         assertion.status = colorMatch ? 
           VERIFICATION_STATUS.PASSED : VERIFICATION_STATUS.FAILED;
         assertion.actual = colorMatch ? assertion.expected : '#ff0000';
         break;
+      }
 
       case ASSERTION_TYPES.LAYOUT_INTACT:
         assertion.status = Math.random() > 0.15 ? 

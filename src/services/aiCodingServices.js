@@ -139,6 +139,9 @@ export function createAICodingSession(options = {}) {
   session.llm = createToolEnabledLLM({
     model,
     projectRoot,
+    networkPolicy: 'offline',
+    maxToolSteps: 24,
+    autoRollbackOnFailure: true,
     onToolCall: (toolCall) => {
       console.log('[AI Session] Tool call:', toolCall.function?.name);
     },

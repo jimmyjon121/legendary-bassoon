@@ -15,14 +15,46 @@ const STARTUP_STEPS = {
   COMPLETE: { id: 'complete', name: 'COMPLETE', order: 7 },
 };
 
+const STARTUP_TIMEOUTS_MS = {
+  ollama: 15000,
+  npu: 45000,
+  imageBackend: 6000,
+};
+
 function normalizeLogSymbols(input) {
   return String(input || '')
-    .replace(/âœ“|✓|✅/g, '[OK]')
-    .replace(/âœ—|✗|❌/g, '[FAIL]')
-    .replace(/âš |⚠️?|⚠/g, '[WARN]')
-    .replace(/â„¹|ℹ️?|ℹ/g, '[INFO]')
-    .replace(/ðŸ”„|🔄/g, '[RETRY]')
-    .replace(/â€“|–/g, '-');
+    .replace(/[\u2705\u2713]/g, '[OK]')
+    .replace(/[\u274C\u2717]/g, '[FAIL]')
+    .replace(/\u26A0(?:\uFE0F)?/g, '[WARN]')
+    .replace(/\u2139(?:\uFE0F)?/g, '[INFO]')
+    .replace(/\uD83D\uDD04/g, '[RETRY]')
+    .replace(/[\u2013\u2014]/g, '-');
+}
+
+function withTimeout(taskFn, timeoutMs, label = 'operation') {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    Promise.resolve()
+      .then(taskFn)
+      .then((value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
 }
 
 class StartupManager {
@@ -75,6 +107,33 @@ class StartupManager {
     }
   }
 
+  async fetchWithTimeout(url, timeoutMs = 2000, options = {}) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(url, {
+        ...options,
+        signal: controller.signal,
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async runStepWithTimeout(stepLabel, timeoutMs, taskFn, fallback = {}) {
+    try {
+      return await withTimeout(taskFn, timeoutMs, stepLabel);
+    } catch (error) {
+      const message = String(error?.message || error || 'Unknown startup error');
+      this.addLog(`[WARN] ${stepLabel} degraded: ${message}`);
+      return {
+        ...fallback,
+        timeout: /timed out/i.test(message),
+        error: message,
+      };
+    }
+  }
+
   /**
    * Verify all npm dependencies are installed; install missing ones automatically.
    * Runs synchronously at startup so the app doesn't try to load missing modules.
@@ -86,12 +145,12 @@ class StartupManager {
 
     // Quick check: if node_modules doesn't exist at all, run full install
     if (!fs.existsSync(nodeModulesPath)) {
-      this.addLog('node_modules missing – running npm install...');
+      this.addLog('node_modules missing - running npm install...');
       try {
         execSync('npm install', { cwd: projectRoot, stdio: 'inherit' });
-        this.addLog('✓ npm install complete');
+        this.addLog('[OK] npm install complete');
       } catch (err) {
-        this.addLog(`⚠ npm install failed: ${err.message}`);
+        this.addLog(`[WARN] npm install failed: ${err.message}`);
       }
       return;
     }
@@ -101,7 +160,7 @@ class StartupManager {
     try {
       pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
     } catch (err) {
-      this.addLog(`⚠ Could not read package.json: ${err.message}`);
+      this.addLog(`[WARN] Could not read package.json: ${err.message}`);
       return;
     }
 
@@ -123,7 +182,7 @@ class StartupManager {
     }
 
     if (missing.length === 0) {
-      this.addLog('✓ All npm dependencies present');
+      this.addLog('[OK] All npm dependencies present');
       return;
     }
 
@@ -132,9 +191,9 @@ class StartupManager {
 
     try {
       execSync('npm install', { cwd: projectRoot, stdio: 'inherit' });
-      this.addLog('✓ npm install complete');
+      this.addLog('[OK] npm install complete');
     } catch (err) {
-      this.addLog(`⚠ npm install failed: ${err.message}`);
+      this.addLog(`[WARN] npm install failed: ${err.message}`);
     }
   }
 
@@ -153,11 +212,18 @@ class StartupManager {
 
     // Ollama check
     this.emitProgress('ollama', 'running', 'Connecting to Ollama...', 35);
-    const ollamaResult = await this.ensureOllamaRunning();
+    const ollamaResult = await this.runStepWithTimeout(
+      'ollama',
+      STARTUP_TIMEOUTS_MS.ollama,
+      () => this.ensureOllamaRunning(),
+      { running: false, installed: true }
+    );
     const results = { ollama: ollamaResult };
     
     if (ollamaResult.running) {
       this.emitProgress('ollama', 'success', 'Ollama connected', 50);
+    } else if (ollamaResult.timeout) {
+      this.emitProgress('ollama', 'warning', 'Ollama startup timed out; continuing degraded', 50);
     } else if (ollamaResult.installed === false) {
       this.emitProgress('ollama', 'warning', 'Ollama not installed', 50);
     } else {
@@ -166,10 +232,17 @@ class StartupManager {
 
     // NPU Server check
     this.emitProgress('npu', 'running', 'Checking NPU availability...', 55);
-    results.npu = await this.startNPUServerIfConfigured();
+    results.npu = await this.runStepWithTimeout(
+      'npu',
+      STARTUP_TIMEOUTS_MS.npu,
+      () => this.startNPUServerIfConfigured(),
+      { running: false, configured: false }
+    );
     
     if (results.npu.running) {
       this.emitProgress('npu', 'success', 'NPU server active', 70);
+    } else if (results.npu.timeout) {
+      this.emitProgress('npu', 'warning', 'NPU check timed out; continuing without NPU', 70);
     } else if (results.npu.configured) {
       this.emitProgress('npu', 'warning', 'NPU configured (manual start)', 70);
     } else {
@@ -178,20 +251,32 @@ class StartupManager {
 
     // Image Backend check
     this.emitProgress('imageBackend', 'running', 'Checking image backend...', 75);
-    results.imageBackend = await this.checkImageBackend();
+    results.imageBackend = await this.runStepWithTimeout(
+      'image_backend',
+      STARTUP_TIMEOUTS_MS.imageBackend,
+      () => this.checkImageBackend(),
+      { running: false }
+    );
     
     if (results.imageBackend.running) {
       this.emitProgress('imageBackend', 'success', 'Image backend ready', 85);
+    } else if (results.imageBackend.timeout) {
+      this.emitProgress('imageBackend', 'warning', 'Image backend check timed out', 85);
     } else {
       this.emitProgress('imageBackend', 'pending', 'Not configured', 85);
     }
 
     // Start health monitoring after initial setup
     this.emitProgress('healthMonitor', 'running', 'Starting health monitor...', 90);
-    if (!this.healthMonitorStarted) {
-      this.startHealthMonitoring(results);
+    try {
+      if (!this.healthMonitorStarted) {
+        this.startHealthMonitoring(results);
+      }
+      this.emitProgress('healthMonitor', 'success', 'Health monitor active', 95);
+    } catch (error) {
+      this.addLog(`[WARN] Health monitor unavailable: ${error.message}`);
+      this.emitProgress('healthMonitor', 'warning', 'Health monitor unavailable', 95);
     }
-    this.emitProgress('healthMonitor', 'success', 'Health monitor active', 95);
 
     this.addLog('Service startup complete');
     this.emitProgress('complete', 'success', 'All systems operational', 100);
@@ -211,7 +296,7 @@ class StartupManager {
       healthMonitor.setServiceEnabled('npu', true);
     } else if (initialResults.npu?.configured) {
       // NPU configured but not running - log once, don't enable continuous monitoring
-      this.addLog('ℹ NPU configured but not started (start manually in settings)');
+      this.addLog('[INFO] NPU configured but not started (start manually in settings)');
     }
     
     if (initialResults.imageBackend?.running) {
@@ -220,19 +305,19 @@ class StartupManager {
     
     // Listen for health events
     healthMonitor.on('serviceUnhealthy', (data) => {
-      this.addLog(`⚠ Service unhealthy: ${data.service} (${data.failures} failures)`);
+      this.addLog(`[WARN] Service unhealthy: ${data.service} (${data.failures} failures)`);
     });
     
     healthMonitor.on('recoveryAttempt', (data) => {
-      this.addLog(`🔄 Attempting recovery: ${data.service} (attempt ${data.attempt})`);
+      this.addLog(`[RETRY] Attempting recovery: ${data.service} (attempt ${data.attempt})`);
     });
     
     healthMonitor.on('recoverySuccess', (data) => {
-      this.addLog(`✓ Service recovered: ${data.service}`);
+      this.addLog(`[OK] Service recovered: ${data.service}`);
     });
     
     healthMonitor.on('recoveryFailed', (data) => {
-      this.addLog(`✗ Recovery failed: ${data.service} - ${data.error}`);
+      this.addLog(`[FAIL] Recovery failed: ${data.service} - ${data.error}`);
     });
     
     // Start monitoring with lite intervals (check every 120 seconds)
@@ -243,13 +328,14 @@ class StartupManager {
   async ensureOllamaRunning() {
     try {
       // Check if already running
-      const response = await fetch('http://localhost:11434/api/tags', {
-        method: 'GET',
-        signal: AbortSignal.timeout(2000)
-      });
+      const response = await this.fetchWithTimeout(
+        'http://127.0.0.1:11434/api/tags',
+        2000,
+        { method: 'GET' }
+      );
 
       if (response.ok) {
-        this.addLog('✓ Ollama already running');
+        this.addLog('[OK] Ollama already running');
         return { running: true, started: false };
       }
     } catch (error) {
@@ -268,7 +354,7 @@ class StartupManager {
       const binary = await ollamaHelper.detectBinary();
       
       if (!binary) {
-        this.addLog('⚠ Ollama not installed');
+        this.addLog('[WARN] Ollama not installed');
         return { running: false, installed: false };
       }
 
@@ -276,14 +362,14 @@ class StartupManager {
       const result = await ollamaHelper.start();
       
       if (result.success) {
-        this.addLog('✓ Ollama started');
+        this.addLog('[OK] Ollama started');
         return { running: true, started: true };
       } else {
-        this.addLog(`⚠ Failed to start Ollama: ${result.error}`);
+        this.addLog(`[WARN] Failed to start Ollama: ${result.error}`);
         return { running: false, installed: true, error: result.error };
       }
     } catch (error) {
-      this.addLog(`⚠ Ollama startup error: ${error.message}`);
+      this.addLog(`[WARN] Ollama startup error: ${error.message}`);
       return { running: false, error: error.message };
     }
   }
@@ -294,13 +380,13 @@ class StartupManager {
       const status = await npuBridge.getStatus();
       
       if (status.serverRunning) {
-        this.addLog('✓ NPU server already running');
+        this.addLog('[OK] NPU server already running');
         return { running: true };
       }
 
       // Check if OpenVINO is set up
       if (!status.openvinoInstalled) {
-        this.addLog('ℹ NPU not configured (optional)');
+        this.addLog('[INFO] NPU not configured (optional)');
         return { running: false, configured: false };
       }
 
@@ -310,7 +396,7 @@ class StartupManager {
       try {
         if (fs.existsSync(configPath)) {
           const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
-          autoStart = config.auto_start === true && config.model_path;
+          autoStart = config.auto_start === true && (config.model_path || config.model_id);
         }
       } catch (e) {
         // Config doesn't exist or is invalid
@@ -320,35 +406,36 @@ class StartupManager {
         this.addLog('Starting NPU server (auto-start enabled)...');
         const result = await npuBridge.startServer();
         if (result.success) {
-          this.addLog('✓ NPU server started');
+          this.addLog('[OK] NPU server started');
           return { running: true, configured: true, started: true };
         } else {
-          this.addLog(`⚠ NPU server failed to start: ${result.error}`);
+          this.addLog(`[WARN] NPU server failed to start: ${result.error}`);
           return { running: false, configured: true, error: result.error };
         }
       }
 
-      this.addLog('ℹ NPU configured but not started (start manually in settings)');
+      this.addLog('[INFO] NPU configured but not started (start manually in settings)');
       return { running: false, configured: true };
     } catch (error) {
-      this.addLog(`ℹ NPU check skipped: ${error.message}`);
+      this.addLog(`[INFO] NPU check skipped: ${error.message}`);
       return { running: false, error: error.message };
     }
   }
 
   async checkImageBackend() {
     try {
-      const response = await fetch('http://localhost:8188/system_stats', {
-        method: 'GET',
-        signal: AbortSignal.timeout(2000)
-      });
+      const response = await this.fetchWithTimeout(
+        'http://127.0.0.1:8188/system_stats',
+        2000,
+        { method: 'GET' }
+      );
 
       if (response.ok) {
-        this.addLog('✓ Image backend running');
+        this.addLog('[OK] Image backend running');
         return { running: true };
       }
     } catch (error) {
-      this.addLog('ℹ Image backend not running (optional)');
+      this.addLog('[INFO] Image backend not running (optional)');
     }
 
     return { running: false };

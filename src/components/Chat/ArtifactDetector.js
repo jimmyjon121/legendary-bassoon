@@ -60,6 +60,19 @@ export const ARTIFACT_TYPES = {
   },
 };
 
+function escapeHtml(value = '') {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function escapeScriptTagBreakout(value = '') {
+  return String(value).replace(/<\/script/gi, '<\\/script');
+}
+
 /**
  * Extract code blocks from markdown content
  * Returns array of { language, code, startIndex, endIndex }
@@ -160,9 +173,11 @@ export function hasArtifacts(content) {
  * Wraps code in a complete HTML document with styling
  */
 export function prepareHtmlForIframe(code, type = 'html') {
+  const content = String(code || '');
+
   // If it's already a complete HTML document, return as-is
-  if (code.toLowerCase().includes('<!doctype') || code.toLowerCase().includes('<html')) {
-    return code;
+  if (content.toLowerCase().includes('<!doctype') || content.toLowerCase().includes('<html')) {
+    return content;
   }
   
   // SVG can be rendered directly
@@ -186,13 +201,14 @@ export function prepareHtmlForIframe(code, type = 'html') {
   </style>
 </head>
 <body>
-  ${code}
+  ${content}
 </body>
 </html>`;
   }
   
   // CSS gets a demo wrapper
   if (type === 'css') {
+    const safeCss = content.replace(/<\/style/gi, '<\\/style');
     return `
 <!DOCTYPE html>
 <html>
@@ -206,7 +222,7 @@ export function prepareHtmlForIframe(code, type = 'html') {
       font-family: system-ui, sans-serif;
       padding: 20px;
     }
-    ${code}
+    ${safeCss}
   </style>
 </head>
 <body>
@@ -254,7 +270,7 @@ export function prepareHtmlForIframe(code, type = 'html') {
   </style>
 </head>
 <body>
-  ${code}
+  ${content}
 </body>
 </html>`;
 }
@@ -264,8 +280,9 @@ export function prepareHtmlForIframe(code, type = 'html') {
  * Returns an HTML document with React loaded via CDN
  */
 export function prepareReactForIframe(code) {
+  const safeCode = escapeScriptTagBreakout(code || '');
   // Try to extract the component name
-  const componentMatch = code.match(/(?:function|const|class)\s+(\w+)/);
+  const componentMatch = safeCode.match(/(?:function|const|class)\s+(\w+)/);
   const componentName = componentMatch ? componentMatch[1] : 'App';
   
   return `
@@ -291,7 +308,7 @@ export function prepareReactForIframe(code) {
   <div id="root"></div>
   <script type="text/babel">
     try {
-      ${code}
+      ${safeCode}
       
       // Try to render the component
       const root = ReactDOM.createRoot(document.getElementById('root'));
@@ -309,6 +326,7 @@ export function prepareReactForIframe(code) {
  * Returns HTML with mermaid.js loaded
  */
 export function prepareMermaidForIframe(code) {
+  const safeCode = escapeHtml(code || '');
   return `
 <!DOCTYPE html>
 <html>
@@ -333,7 +351,7 @@ export function prepareMermaidForIframe(code) {
 </head>
 <body>
   <pre class="mermaid">
-${code}
+${safeCode}
   </pre>
   <script>
     mermaid.initialize({ 
@@ -357,6 +375,7 @@ ${code}
  * Prepare markdown for rendering
  */
 export function prepareMarkdownForIframe(code) {
+  const markdownJson = JSON.stringify(String(code || '')).replace(/</g, '\\u003c');
   return `
 <!DOCTYPE html>
 <html>
@@ -397,8 +416,11 @@ export function prepareMarkdownForIframe(code) {
 </head>
 <body>
   <div id="content"></div>
+  <script type="application/json" id="markdown-source">${markdownJson}</script>
   <script>
-    document.getElementById('content').innerHTML = marked.parse(\`${code.replace(/`/g, '\\`').replace(/\$/g, '\\$')}\`);
+    const source = document.getElementById('markdown-source');
+    const markdown = source ? JSON.parse(source.textContent || '""') : '';
+    document.getElementById('content').innerHTML = marked.parse(markdown);
   </script>
 </body>
 </html>`;

@@ -1,0 +1,40 @@
+#!/usr/bin/env node
+/* eslint-disable no-console */
+
+const { execSync } = require('child_process');
+
+const checks = [
+  { id: 'research', command: 'node scripts/research-eval.js' },
+  { id: 'casual', command: 'node scripts/casual-eval.js' },
+  { id: 'coding', command: 'node scripts/coding-eval.js' },
+];
+
+function runCheck(check) {
+  process.stdout.write(`Running ${check.id} gate... `);
+  try {
+    execSync(check.command, { stdio: 'pipe' });
+    console.log('PASS');
+    return { id: check.id, ok: true };
+  } catch (error) {
+    console.log('FAIL');
+    const stderr = String(error?.stderr || '').trim();
+    const stdout = String(error?.stdout || '').trim();
+    const output = stderr || stdout || String(error?.message || 'Unknown failure');
+    return { id: check.id, ok: false, output };
+  }
+}
+
+function main() {
+  const results = checks.map(runCheck);
+  const failed = results.filter((result) => !result.ok);
+  if (failed.length > 0) {
+    console.error('\nRelease Gate FAILED');
+    for (const failure of failed) {
+      console.error(`- ${failure.id}: ${failure.output}`);
+    }
+    process.exit(1);
+  }
+  console.log('\nRelease Gate PASS');
+}
+
+main();

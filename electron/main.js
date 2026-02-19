@@ -57,12 +57,12 @@ const logStream = fs.createWriteStream(logPath, { flags: 'a' });
 
 function normalizeLogSymbols(input) {
   return String(input || '')
-    .replace(/âœ“|✓|✅/g, '[OK]')
-    .replace(/âœ—|✗|❌/g, '[FAIL]')
-    .replace(/âš |⚠️?|⚠/g, '[WARN]')
-    .replace(/â„¹|ℹ️?|ℹ/g, '[INFO]')
-    .replace(/ðŸ”„|🔄/g, '[RETRY]')
-    .replace(/â€“|–/g, '-');
+    .replace(/[\u2705\u2713]/g, '[OK]')
+    .replace(/[\u274C\u2717]/g, '[FAIL]')
+    .replace(/\u26A0(?:\uFE0F)?/g, '[WARN]')
+    .replace(/\u2139(?:\uFE0F)?/g, '[INFO]')
+    .replace(/\uD83D\uDD04/g, '[RETRY]')
+    .replace(/[\u2013\u2014]/g, '-');
 }
 
 function log(message, level = 'INFO') {
@@ -73,6 +73,32 @@ function log(message, level = 'INFO') {
   if (process.env.NODE_ENV !== 'production') {
     console.log(logMessage.trim());
   }
+}
+
+function withTimeout(taskFn, timeoutMs, label = 'operation') {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    Promise.resolve()
+      .then(taskFn)
+      .then((value) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
 }
 
 log('DevForge starting...');
@@ -548,7 +574,11 @@ async function createWindow() {
     
     log('Starting all services...');
     try {
-      const results = await startupManager.startAllServices();
+      const results = await withTimeout(
+        () => startupManager.startAllServices(),
+        90000,
+        'startup services'
+      );
       log('Service startup complete');
       
       // Auto-start image generation backend if configured

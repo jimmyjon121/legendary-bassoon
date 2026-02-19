@@ -11,11 +11,20 @@ const path = require('path');
 function runOpenVinoSetup(appPath) {
   return new Promise((resolve) => {
     try {
-      const scriptPath = path.join(appPath, 'scripts', 'setup-openvino.ps1');
-      if (!fs.existsSync(scriptPath)) {
+      const candidates = [
+        appPath ? path.join(appPath, 'scripts', 'setup-openvino.ps1') : null,
+        appPath && String(appPath).includes('app.asar')
+          ? path.join(String(appPath).replace('app.asar', 'app.asar.unpacked'), 'scripts', 'setup-openvino.ps1')
+          : null,
+        path.join(process.cwd(), 'scripts', 'setup-openvino.ps1'),
+        path.join(__dirname, '../../scripts/setup-openvino.ps1'),
+      ].filter(Boolean);
+
+      const scriptPath = candidates.find((candidate) => fs.existsSync(candidate));
+      if (!scriptPath) {
         resolve({
           success: false,
-          error: `Setup script not found at ${scriptPath}`,
+          error: `Setup script not found. Checked: ${candidates.join(', ')}`,
         });
         return;
       }
@@ -33,7 +42,7 @@ function runOpenVinoSetup(appPath) {
         'powershell.exe',
         ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
         {
-          cwd: appPath,
+          cwd: path.dirname(path.dirname(scriptPath)),
           windowsHide: true,
         },
       );

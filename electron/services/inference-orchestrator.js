@@ -15,12 +15,14 @@ const PROFILE_ORDER = {
   speed: ['ollama-cuda', 'llamacpp-vulkan', 'openvino-npu', 'ollama-cpu'],
   balanced: ['ollama-cuda', 'openvino-npu', 'llamacpp-vulkan', 'ollama-cpu'],
   efficiency: ['openvino-npu', 'ollama-cpu', 'llamacpp-vulkan', 'ollama-cuda'],
+  laptop: ['ollama-cuda', 'openvino-npu', 'llamacpp-vulkan', 'ollama-cpu'],
 };
 
 const PROFILE_PRIORITY = {
   speed: -15,
   balanced: 0,
   efficiency: 10,
+  laptop: -5,
 };
 
 const DEFAULT_LANE_CONFIG = {
@@ -113,6 +115,12 @@ class InferenceOrchestrator {
       laneConfig.lane_embedding = { concurrency: hasNpu ? 2 : 1, priorityBase: -20 };
       laneConfig.lane_maintenance = { concurrency: 1, priorityBase: 20 };
       maxConcurrent = hasNpu ? 4 : 3;
+    } else if (this.profile === 'laptop') {
+      // Keep laptop responsive: favor interactive lane and limit concurrent heavy jobs.
+      laneConfig.lane_agent = { concurrency: 1, priorityBase: 8 };
+      laneConfig.lane_embedding = { concurrency: hasNpu ? 2 : 1, priorityBase: -18 };
+      laneConfig.lane_maintenance = { concurrency: 1, priorityBase: 26 };
+      maxConcurrent = hasNpu ? 2 : 1;
     } else if (this.profile === 'efficiency') {
       laneConfig.lane_agent = { concurrency: 1, priorityBase: 10 };
       laneConfig.lane_embedding = { concurrency: hasNpu ? 2 : 1, priorityBase: -5 };
@@ -235,14 +243,20 @@ class InferenceOrchestrator {
     return [...listed, ...remaining];
   }
 
-  async _tryStartNpuServer() {
+  async _tryStartNpuServer(context = {}) {
     try {
       const { getNpuBridge } = require('./npu-bridge');
       const npuBridge = getNpuBridge();
       const status = await npuBridge.getStatus();
       if (!status.openvinoInstalled) return false;
       if (status.serverRunning) return true;
-      await npuBridge.autoConfigureModel({ enableAutoStart: true });
+      await npuBridge.autoConfigureModel({
+        enableAutoStart: true,
+        workload: context.workload || 'chat',
+        profile: context.profile || this.profile,
+        preferredModel: context.preferredModel || null,
+        forceStatusRefresh: true,
+      });
       const result = await npuBridge.startServer();
       return Boolean(result?.success);
     } catch (error) {
@@ -261,7 +275,10 @@ class InferenceOrchestrator {
           return preferred;
         }
         if (this.preferredBackendId.includes('npu') || this.preferredBackendId.includes('openvino')) {
-          const started = await this._tryStartNpuServer();
+          const started = await this._tryStartNpuServer({
+            workload: 'interactive',
+            profile: this.profile,
+          });
           if (started) {
             const retryHealth = await this._safeBackendHealth(preferred);
             if (retryHealth.available) {
@@ -278,7 +295,10 @@ class InferenceOrchestrator {
       if (npuBackend) {
         let health = await this._safeBackendHealth(npuBackend);
         if (!health.available) {
-          const started = await this._tryStartNpuServer();
+          const started = await this._tryStartNpuServer({
+            workload: 'interactive',
+            profile: this.profile,
+          });
           if (started) health = await this._safeBackendHealth(npuBackend);
         }
         if (health.available) {
@@ -408,6 +428,72 @@ class InferenceOrchestrator {
     return base;
   }
 
+  _lanePreferenceRank(lane, backendId) {
+    const lanePreference = {
+      lane_embedding: ['openvino-npu', 'openvino-gpu', 'ollama-cuda', 'ollama-cpu', 'llamacpp-vulkan'],
+      lane_maintenance: ['ollama-cpu', 'openvino-npu', 'openvino-gpu', 'ollama-cuda', 'llamacpp-vulkan'],
+      lane_agent: ['ollama-cuda', 'llamacpp-vulkan', 'openvino-npu', 'openvino-gpu', 'ollama-cpu'],
+      lane_interactive: ['ollama-cuda', 'llamacpp-vulkan', 'openvino-npu', 'openvino-gpu', 'ollama-cpu'],
+    };
+    const order = lanePreference[lane] || lanePreference.lane_interactive;
+    const idx = order.indexOf(backendId);
+    return idx === -1 ? order.length : idx;
+  }
+
+  _scoreBackendCandidate({ backendId, backend, lane, modelSize, baseOrderRank }) {
+    let score = 0;
+
+    const laneRank = this._lanePreferenceRank(lane, backendId);
+    score += Math.max(0, 55 - laneRank * 10);
+    score += Math.max(0, 24 - baseOrderRank * 4);
+
+    if (modelSize !== null && Number.isFinite(modelSize)) {
+      const perf = backend.estimatePerformance(modelSize);
+      if (perf?.suitable === false) {
+        score -= 120;
+      } else {
+        const tps = Number(perf?.tokensPerSecond || 0);
+        if (Number.isFinite(tps)) {
+          score += Math.min(45, tps);
+        }
+      }
+
+      if (backendId === 'openvino-npu') {
+        if (modelSize <= 3) score += 18;
+        else if (modelSize <= 7) score += 4;
+        else score -= 45;
+      }
+      if (backendId === 'ollama-cuda') {
+        if (modelSize >= 7) score += 16;
+        else if (modelSize >= 3) score += 8;
+      }
+      if (backendId === 'ollama-cpu' && modelSize >= 7) {
+        score -= 18;
+      }
+    }
+
+    if (lane === 'lane_embedding') {
+      if (backend.supports?.('embeddings')) score += 22;
+      if (backendId === 'openvino-npu') score += 8;
+    }
+
+    if (this.profile === 'speed' && backendId === 'ollama-cuda') score += 10;
+    if (this.profile === 'efficiency' && backendId === 'openvino-npu') score += 10;
+    if (this.profile === 'efficiency' && backendId === 'ollama-cpu') score += 6;
+    if (this.profile === 'laptop') {
+      if (lane === 'lane_interactive' && backendId === 'ollama-cuda') score += 10;
+      if ((lane === 'lane_embedding' || lane === 'lane_maintenance') && backendId === 'openvino-npu') score += 16;
+      if (backendId === 'ollama-cpu') score -= 6;
+    }
+
+    if (this.hardware?.npu?.detected && backendId === 'openvino-npu') score += 4;
+    if (Array.isArray(this.hardware?.gpus) && this.hardware.gpus.some((gpu) => gpu.type === 'nvidia') && backendId === 'ollama-cuda') {
+      score += 4;
+    }
+
+    return score;
+  }
+
   async _selectBackendForRequest(payload = {}) {
     const lane = normalizeLane(payload.lane, payload.workloadType);
     const modelSize = parseModelSizeHint(payload.model);
@@ -449,19 +535,45 @@ class InferenceOrchestrator {
     }
 
     const candidates = [...new Set([...laneOrder, ...order])];
-    for (const backendId of candidates) {
+    const available = [];
+    for (let index = 0; index < candidates.length; index += 1) {
+      const backendId = candidates[index];
       const backend = this.backends.get(backendId);
       if (!backend) continue;
+
       let health = await this._safeBackendHealth(backend);
       if (!health.available && backendId === 'openvino-npu') {
-        const started = await this._tryStartNpuServer();
+        const started = await this._tryStartNpuServer({
+          workload: lane,
+          profile: this.profile,
+          preferredModel: payload.model || null,
+        });
         if (started) {
           health = await this._safeBackendHealth(backend);
         }
       }
-      if (health.available) {
-        return { backend, fallbackReason: backendId === candidates[0] ? null : `fallback:${backendId}` };
-      }
+      if (!health.available) continue;
+
+      const score = this._scoreBackendCandidate({
+        backendId,
+        backend,
+        lane,
+        modelSize,
+        baseOrderRank: index,
+      });
+      available.push({ backendId, backend, score, index });
+    }
+
+    if (available.length > 0) {
+      available.sort((a, b) => {
+        if (b.score !== a.score) return b.score - a.score;
+        return a.index - b.index;
+      });
+      const best = available[0];
+      return {
+        backend: best.backend,
+        fallbackReason: best.backendId === candidates[0] ? null : `fallback:${best.backendId}`,
+      };
     }
 
     return {

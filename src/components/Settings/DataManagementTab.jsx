@@ -98,12 +98,13 @@ export function DataManagementTab() {
           data = await safeCall('ledger:getFrictionSignals', [{ limit: 10000 }], []);
           filename = `devforge-friction-${new Date().toISOString().split('T')[0]}.json`;
           break;
-        case 'all':
+        case 'all': {
           const events = await safeCall('ledger:listEvents', [{ limit: 10000 }], []);
           const friction = await safeCall('ledger:getFrictionSignals', [{ limit: 10000 }], []);
           data = { events, friction, exportedAt: new Date().toISOString() };
           filename = `devforge-export-${new Date().toISOString().split('T')[0]}.json`;
           break;
+        }
       }
 
       // Trigger download
@@ -340,7 +341,6 @@ function DataCategory({ icon: Icon, title, description, count, onExport, onClear
 }
 
 export default DataManagementTab;
-
 
 
 

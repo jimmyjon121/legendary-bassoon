@@ -351,7 +351,7 @@ const DEFAULT_SETTINGS = {
   autoLockTimeout: 5, // minutes
   
   // Performance
-  performanceProfile: 'balanced', // 'speed' | 'balanced' | 'efficiency'
+  performanceProfile: 'balanced', // 'speed' | 'balanced' | 'efficiency' | 'laptop'
   maxConcurrentInferences: 1,
   enableGpuAcceleration: true,
   
@@ -447,7 +447,6 @@ module.exports = {
   getInferencePreset,
   applyInferencePreset,
 };
-
 
 
 

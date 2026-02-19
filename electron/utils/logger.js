@@ -12,12 +12,12 @@ const THROTTLE_MS = 5000; // Don't repeat same message within 5 seconds
 
 function normalizeLogSymbols(input) {
   return String(input || '')
-    .replace(/âœ“|✓|✅/g, '[OK]')
-    .replace(/âœ—|✗|❌/g, '[FAIL]')
-    .replace(/âš |⚠️?|⚠/g, '[WARN]')
-    .replace(/â„¹|ℹ️?|ℹ/g, '[INFO]')
-    .replace(/ðŸ”„|🔄/g, '[RETRY]')
-    .replace(/â€“|–/g, '-');
+    .replace(/[\u2705\u2713]/g, '[OK]')
+    .replace(/[\u274C\u2717]/g, '[FAIL]')
+    .replace(/\u26A0(?:\uFE0F)?/g, '[WARN]')
+    .replace(/\u2139(?:\uFE0F)?/g, '[INFO]')
+    .replace(/\uD83D\uDD04/g, '[RETRY]')
+    .replace(/[\u2013\u2014]/g, '-');
 }
 
 function shouldLog(message) {

@@ -2,7 +2,7 @@ let autoUpdater = null;
 
 try {
   // Lazy require so the app still runs if electron-updater isn't installed
-  // eslint-disable-next-line global-require, import/no-extraneous-dependencies
+  // eslint-disable-next-line global-require
   ({ autoUpdater } = require('electron-updater'));
 } catch (error) {
   autoUpdater = null;
@@ -72,5 +72,6 @@ module.exports = {
   downloadUpdate,
   installUpdate,
 };
+
 
 

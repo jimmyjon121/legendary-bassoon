@@ -25,10 +25,12 @@ const TAB_OPTIONS = [
 const FIELD_TYPES = ['text', 'url', 'number', 'boolean', 'date', 'array'];
 
 const DEFAULT_SOURCE_POLICY = {
-  mode: 'discover_broad_verify_official',
+  mode: 'strict_official_first',
   requireOfficial: true,
-  rejectDirectoryPages: true,
-  rejectSocialProfiles: true,
+  allowSecondary: false,
+  rejectDirectories: true,
+  rejectSocial: true,
+  rejectTertiary: true,
   officialDomains: [],
 };
 
@@ -193,6 +195,9 @@ export function ResearchPanel({ isOpen, onClose, workspace = 'work' }) {
     const result = await api.research.startRun({
       projectId: selectedProjectId,
       objective: runDraft.objective.trim(),
+      intent: runDraft.objective.trim(),
+      jurisdiction: 'auto',
+      sourcePolicy: projectDraft.source_policy || DEFAULT_SOURCE_POLICY,
       runInstructions: runDraft.runInstructions.trim(),
       workerCount: Number(runDraft.workerCount || 4),
     });
@@ -270,7 +275,7 @@ export function ResearchPanel({ isOpen, onClose, workspace = 'work' }) {
                     <input value={projectDraft.name} onChange={(e) => setProjectDraft((prev) => ({ ...prev, name: e.target.value }))} placeholder="Project name" className="input text-sm" />
                     <textarea value={projectDraft.description} onChange={(e) => setProjectDraft((prev) => ({ ...prev, description: e.target.value }))} placeholder="Project description" className="input text-sm min-h-[70px]" />
                     <textarea value={projectDraft.permanent_instructions} onChange={(e) => setProjectDraft((prev) => ({ ...prev, permanent_instructions: e.target.value }))} placeholder="Permanent instructions for every run" className="input text-sm min-h-[140px]" />
-                    <input value={(projectDraft.source_policy?.officialDomains || []).join(', ')} onChange={(e) => setProjectDraft((prev) => ({ ...prev, source_policy: { ...(prev.source_policy || DEFAULT_SOURCE_POLICY), officialDomains: e.target.value.split(',').map((item) => item.trim()).filter(Boolean) } }))} placeholder="Optional official domain allowlist (comma-separated)" className="input text-sm" />
+                    <input value={(projectDraft.source_policy?.allowedDomains || []).join(', ')} onChange={(e) => setProjectDraft((prev) => ({ ...prev, source_policy: { ...(prev.source_policy || DEFAULT_SOURCE_POLICY), allowedDomains: e.target.value.split(',').map((item) => item.trim()).filter(Boolean) } }))} placeholder="Optional allowed domain allowlist (comma-separated)" className="input text-sm" />
                     <div className="flex gap-2">
                       <button type="button" onClick={handleSaveProject} className="btn btn-primary text-xs flex items-center gap-1"><Save size={12} />Save Project</button>
                       {selectedProjectId && <button type="button" onClick={async () => { await api.research.deleteProject(selectedProjectId); setSelectedProjectId(null); setNotice('Project deleted.'); refreshProjects(); }} className="btn text-xs border border-forge-border">Delete</button>}

@@ -45,7 +45,7 @@ export const createOrganizationSlice = (set, get) => ({
         }
       }
       
-      const result = await window.electronAPI?.createFolder({
+      const result = await window.electronAPI?.createConversationFolder({
         id,
         name: storedName,
         color,
@@ -351,5 +351,4 @@ export const createOrganizationSlice = (set, get) => ({
     }
   },
 });
-
 

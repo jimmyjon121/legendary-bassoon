@@ -1,0 +1,139 @@
+{
+  "version": 1,
+  "threshold": 82,
+  "cases": [
+    {
+      "id": "ga_treatment_programs",
+      "question": "Find and verify residential treatment programs in Georgia state (United States) for ages 11-18. Use official pages as the source of truth.",
+      "sourcePolicy": {
+        "mode": "discover_broad_verify_official",
+        "requireOfficial": true,
+        "rejectDirectoryPages": true,
+        "rejectSocialProfiles": true
+      },
+      "seedQueries": [
+        "georgia residential treatment programs",
+        "georgia treatment wikipedia",
+        "adolescent behavioral health georgia state"
+      ],
+      "searchCandidates": [
+        {
+          "url": "https://en.wikipedia.org/wiki/Georgia_(country)",
+          "title": "Georgia (country) - Wikipedia",
+          "snippet": "Georgia is a country in the Caucasus region.",
+          "expectAccepted": false
+        },
+        {
+          "url": "https://dbhdd.georgia.gov",
+          "title": "Georgia Department of Behavioral Health and Developmental Disabilities",
+          "snippet": "Behavioral health services and licensing information.",
+          "expectAccepted": true
+        },
+        {
+          "url": "https://www.tiktok.com/@example",
+          "title": "Georgia treatment center review",
+          "snippet": "Social media clips.",
+          "expectAccepted": false
+        }
+      ],
+      "contentSamples": [
+        {
+          "text": "Georgia is a country in the Caucasus region on the Black Sea and its capital is Tbilisi.",
+          "expectRelevant": false
+        },
+        {
+          "text": "Our Atlanta, Georgia residential treatment program provides adolescent behavioral therapy for ages 11-18.",
+          "expectRelevant": true
+        }
+      ]
+    },
+    {
+      "id": "cloud_incident_response",
+      "question": "Build a practical incident response runbook for AWS IAM credential compromise with first-party guidance.",
+      "sourcePolicy": {
+        "mode": "official_first",
+        "requireOfficial": true,
+        "rejectSocialProfiles": true
+      },
+      "seedQueries": [
+        "aws iam credential compromise",
+        "reddit aws breach checklist",
+        "aws security best practices"
+      ],
+      "searchCandidates": [
+        {
+          "url": "https://docs.aws.amazon.com/IAM/latest/UserGuide/best-practices.html",
+          "title": "AWS IAM best practices",
+          "snippet": "Official AWS documentation for IAM security.",
+          "expectAccepted": true
+        },
+        {
+          "url": "https://www.reddit.com/r/aws/comments/example",
+          "title": "What do you do after leaked IAM keys?",
+          "snippet": "Community discussion thread.",
+          "expectAccepted": false
+        },
+        {
+          "url": "https://aws.amazon.com/security/security-learning/",
+          "title": "AWS Security",
+          "snippet": "AWS security resources.",
+          "expectAccepted": true
+        }
+      ],
+      "contentSamples": [
+        {
+          "text": "A user posted on reddit that key rotation is optional and mostly unnecessary.",
+          "expectRelevant": false
+        },
+        {
+          "text": "AWS recommends immediate key deactivation, CloudTrail review, and credential rotation for compromised access keys.",
+          "expectRelevant": true
+        }
+      ]
+    },
+    {
+      "id": "product_pricing_comparison",
+      "question": "Compare current pricing and enterprise limits for Postgres managed database providers in the US market.",
+      "sourcePolicy": {
+        "mode": "general",
+        "requireOfficial": false,
+        "rejectSocialProfiles": true
+      },
+      "seedQueries": [
+        "managed postgres pricing",
+        "postgres managed service compare",
+        "vendor pricing page postgres us"
+      ],
+      "searchCandidates": [
+        {
+          "url": "https://supabase.com/pricing",
+          "title": "Supabase Pricing",
+          "snippet": "Official Supabase pricing plans.",
+          "expectAccepted": true
+        },
+        {
+          "url": "https://www.linkedin.com/posts/example",
+          "title": "Postgres pricing rumors",
+          "snippet": "LinkedIn post speculation.",
+          "expectAccepted": false
+        },
+        {
+          "url": "https://www.cockroachlabs.com/pricing/",
+          "title": "CockroachDB Pricing",
+          "snippet": "Official pricing and limits.",
+          "expectAccepted": true
+        }
+      ],
+      "contentSamples": [
+        {
+          "text": "A social post claims one provider removed all usage limits.",
+          "expectRelevant": false
+        },
+        {
+          "text": "The pricing page lists plan tiers, storage limits, and overage rates for managed Postgres deployments.",
+          "expectRelevant": true
+        }
+      ]
+    }
+  ]
+}

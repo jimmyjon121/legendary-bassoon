@@ -1,4 +1,4 @@
-import React, { useMemo, memo } from 'react';
+import { useMemo, memo, useCallback } from 'react';
 import { marked } from 'marked';
 import DOMPurify from 'dompurify';
 import hljs from 'highlight.js';
@@ -61,7 +61,7 @@ function createRenderer() {
           </div>
           <span class="text-[10px] text-white/35 font-mono ml-1">${lang || 'text'}</span>
         </div>
-        <button class="copy-code-btn text-[10px] px-2.5 py-1 rounded-md text-white/35 hover:text-white/80 hover:bg-white/[0.06] transition-colors font-medium" data-code="${encoded}" onclick="(function(btn){navigator.clipboard.writeText(btn.getAttribute('data-code')).then(function(){btn.textContent='Copied!';setTimeout(function(){btn.textContent='Copy'},1500)});})(this)">Copy</button>
+        <button class="copy-code-btn text-[10px] px-2.5 py-1 rounded-md text-white/35 hover:text-white/80 hover:bg-white/[0.06] transition-colors font-medium" data-code="${encoded}">Copy</button>
       </div>
       <pre class="!mt-0 !rounded-t-none !py-3.5 !px-4"><code class="language-${lang}" data-highlighted="true">${highlighted}</code></pre>
     </div>`;
@@ -183,7 +183,7 @@ function parseMarkdown(content, isStreaming) {
     html = renderMath(html);
     return DOMPurify.sanitize(html, {
       ADD_TAGS: ['span', 'math', 'semantics', 'mrow', 'mi', 'mo', 'mn', 'msup', 'msub', 'mfrac', 'mover', 'munder', 'mtable', 'mtr', 'mtd', 'annotation'],
-      ADD_ATTR: ['class', 'style', 'aria-hidden', 'data-code', 'onclick', 'encoding', 'xmlns'],
+      ADD_ATTR: ['class', 'style', 'aria-hidden', 'data-code', 'encoding', 'xmlns'],
     });
   } catch (e) {
     console.warn('[StreamingMarkdown] Parse error:', e);
@@ -250,6 +250,35 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
   isStreaming = false,
   className = '',
 }) {
+  const handleMarkdownClick = useCallback(async (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const copyButton = target.closest('.copy-code-btn');
+    if (!copyButton) return;
+
+    event.preventDefault();
+    const code = copyButton.getAttribute('data-code');
+    if (!code) return;
+
+    try {
+      await navigator.clipboard.writeText(code);
+      const previousText = copyButton.textContent;
+      copyButton.textContent = 'Copied!';
+      setTimeout(() => {
+        if (copyButton.isConnected) {
+          copyButton.textContent = previousText || 'Copy';
+        }
+      }, 1500);
+    } catch {
+      copyButton.textContent = 'Failed';
+      setTimeout(() => {
+        if (copyButton.isConnected) {
+          copyButton.textContent = 'Copy';
+        }
+      }, 1500);
+    }
+  }, []);
+
   const htmlContent = useMemo(() => {
     if (!content) return '';
 
@@ -277,6 +306,7 @@ export const StreamingMarkdown = memo(function StreamingMarkdown({
   return (
     <div
       className={`prose prose-sm prose-invert max-w-none streaming-markdown ${className}`}
+      onClick={handleMarkdownClick}
       dangerouslySetInnerHTML={{ __html: htmlContent }}
     />
   );

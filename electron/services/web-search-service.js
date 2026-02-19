@@ -16,7 +16,7 @@ const SEARCH_CONFIG = {
   timeout: 10000,
   userAgent:
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  defaultProviderOrder: ['brave', 'serper', 'searxng', 'bing', 'duckduckgo'],
+  defaultProviderOrder: ['searxng', 'bing', 'duckduckgo', 'brave', 'serper'],
   minIntervalMs: Math.max(20, Number(process.env.RESEARCH_WEB_MIN_INTERVAL_MS || 180)),
   maxConcurrent: Math.max(1, Math.min(12, Number(process.env.RESEARCH_WEB_MAX_CONCURRENT || 4))),
   circuitFailureThreshold: Math.max(2, Number(process.env.RESEARCH_WEB_CIRCUIT_FAILS || 3)),
@@ -649,7 +649,7 @@ async function fetchRenderedPageContent(url, options = {}) {
 
   let puppeteer = null;
   try {
-    // eslint-disable-next-line global-require, import/no-extraneous-dependencies
+    // eslint-disable-next-line global-require
     puppeteer = require('puppeteer-core');
   } catch (_error) {
     return null;
@@ -773,3 +773,4 @@ module.exports = {
   hasSearchToolCall,
   SEARCH_CONFIG,
 };
+

@@ -1,5 +1,5 @@
-﻿import React, { useState, useEffect, Suspense, lazy, memo } from 'react';
-import { X, Settings, Server, Image, Shield, Keyboard, FolderOpen, Loader, Cpu, Zap, Bug } from 'lucide-react';
+import React, { useState, useEffect, Suspense, lazy, memo } from 'react';
+import { X, Settings, Server, Image, Shield, Keyboard, FolderOpen, Loader, Cpu, Zap, Bug, Search } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { api } from '../../utils/electronAPI';
 import { useShortcutsStore } from '../../stores/shortcutsStore';
@@ -33,6 +33,7 @@ const TABS = [
   { id: 'llm', label: 'LLM Backend', icon: Server },
   { id: 'image', label: 'Image Gen', icon: Image },
   { id: 'memory', label: 'Memory', icon: Brain },
+  { id: 'research', label: 'Research', icon: Search },
   { id: 'data', label: 'Data & Storage', icon: Database },
   { id: 'privacy', label: 'Privacy', icon: Shield },
   { id: 'shortcuts', label: 'Shortcuts', icon: Keyboard },
@@ -56,6 +57,7 @@ export function SettingsModal() {
     imageStopCommand: '',
     llamaQuantizePath: '',
     pythonPath: '',
+    searxngUrl: '',
   });
 
   useEffect(() => {
@@ -71,7 +73,8 @@ export function SettingsModal() {
           'imageBackendStartCommand',
           'imageBackendStopCommand',
           'tools.llamaQuantizePath',
-          'tools.pythonPath'
+          'tools.pythonPath',
+          'searxngUrl'
         ]);
         
         if (batch) {
@@ -87,6 +90,7 @@ export function SettingsModal() {
             imageStopCommand: batch.imageBackendStopCommand || '',
             llamaQuantizePath: batch['tools.llamaQuantizePath'] || '',
             pythonPath: batch['tools.pythonPath'] || '',
+            searxngUrl: batch.searxngUrl || '',
           }));
         }
       } catch (error) {
@@ -108,6 +112,7 @@ export function SettingsModal() {
         imageBackendStopCommand: settings.imageStopCommand || null,
         'tools.llamaQuantizePath': settings.llamaQuantizePath || '',
         'tools.pythonPath': settings.pythonPath || '',
+        searxngUrl: settings.searxngUrl || '',
       });
     } catch (error) {
       console.error('Failed to save settings:', error);
@@ -214,6 +219,9 @@ export function SettingsModal() {
               <Suspense fallback={<TabLoader />}>
                 <MemoryTab />
               </Suspense>
+            )}
+            {activeTab === 'research' && (
+              <ResearchSettings settings={settings} setSettings={setSettings} />
             )}
             {activeTab === 'data' && (
               <Suspense fallback={<TabLoader />}>
@@ -1124,7 +1132,7 @@ function NPUModelConverter() {
           }`}>
             {conversionResult.success ? (
               <div>
-                <div className="font-medium text-status-success mb-1">âœ“ Conversion Successful!</div>
+                <div className="font-medium text-status-success mb-1">Conversion Successful!</div>
                 <div className="text-text-muted">
                   Output saved to: <code className="bg-forge-bg px-1 rounded">{conversionResult.outputPath}</code>
                 </div>
@@ -1134,7 +1142,7 @@ function NPUModelConverter() {
               </div>
             ) : conversionResult.needsSetup ? (
               <div>
-                <div className="font-medium text-amber-400 mb-1">âš ï¸ OpenVINO Setup Required</div>
+                <div className="font-medium text-amber-400 mb-1">OpenVINO Setup Required</div>
                 <div className="text-text-muted mb-2">
                   {conversionResult.error}
                 </div>
@@ -1153,7 +1161,7 @@ function NPUModelConverter() {
               </div>
             ) : (
               <div>
-                <div className="font-medium text-status-error mb-1">âœ— Conversion Failed</div>
+                <div className="font-medium text-status-error mb-1">Conversion Failed</div>
                 <div className="text-text-muted whitespace-pre-wrap">{conversionResult.error}</div>
                 {conversionResult.stderr && (
                   <details className="mt-2">
@@ -1418,6 +1426,56 @@ function ImageSettings({ settings, setSettings }) {
         <p className="text-[10px] text-text-muted mt-2">
           DevForge auto-detects model type from filename and applies optimal settings.
         </p>
+      </div>
+    </div>
+  );
+}
+
+function ResearchSettings({ settings, setSettings }) {
+  return (
+    <div className="space-y-6">
+      <div>
+        <h3 className="text-lg font-semibold mb-1">Web Search Configuration</h3>
+        <p className="text-sm text-text-muted mb-4">
+          Configure search providers for the Deep Research feature. SearXNG is recommended for private, self-hosted search.
+        </p>
+      </div>
+
+      <div className="space-y-4">
+        <div>
+          <label className="block text-sm font-medium mb-1.5">SearXNG Instance URL</label>
+          <input
+            type="text"
+            value={settings.searxngUrl || ''}
+            onChange={(e) => setSettings(prev => ({ ...prev, searxngUrl: e.target.value }))}
+            placeholder="http://localhost:8888"
+            className="input w-full"
+          />
+          <p className="text-xs text-text-muted mt-1.5">
+            URL of your SearXNG instance. Leave blank to use environment variable SEARXNG_URL, or fall back to Bing/DuckDuckGo.
+          </p>
+        </div>
+
+        <div className="p-3 rounded-lg bg-surface-1/50 border border-border-subtle space-y-2">
+          <h4 className="text-sm font-medium">Provider Priority</h4>
+          <p className="text-xs text-text-muted">
+            Research will try providers in this order: <strong>SearXNG</strong> → Bing RSS → DuckDuckGo → Brave → Serper.
+            SearXNG, Bing RSS, and DuckDuckGo work without API keys.
+          </p>
+        </div>
+
+        <div className="p-3 rounded-lg bg-surface-1/50 border border-border-subtle space-y-2">
+          <h4 className="text-sm font-medium">Quick Setup: SearXNG</h4>
+          <p className="text-xs text-text-muted">
+            Run SearXNG locally with Docker:
+          </p>
+          <code className="block text-xs bg-surface-0/80 p-2 rounded font-mono text-text-secondary">
+            docker run -d --name searxng -p 8888:8080 searxng/searxng
+          </code>
+          <p className="text-xs text-text-muted mt-1">
+            Then set the URL above to <strong>http://localhost:8888</strong>.
+          </p>
+        </div>
       </div>
     </div>
   );
@@ -1865,6 +1923,7 @@ function HardwareSettings() {
   const [backends, setBackends] = React.useState([]);
   const [npuStatus, setNpuStatus] = React.useState(null);
   const [npuBusy, setNpuBusy] = React.useState(false);
+  const [laptopBusy, setLaptopBusy] = React.useState(false);
   const [profile, setProfile] = React.useState('balanced');
   const [profileLoading, setProfileLoading] = React.useState(true);
   const [imageStatus, setImageStatus] = React.useState(null);
@@ -1902,6 +1961,18 @@ function HardwareSettings() {
     }
   }, []);
 
+  const refreshNpuStatus = React.useCallback(async (force = false) => {
+    if (!window.electronAPI?.getNpuStatus) return null;
+    try {
+      const status = await window.electronAPI.getNpuStatus({ force });
+      setNpuStatus(status || null);
+      return status || null;
+    } catch (error) {
+      console.warn('Failed to refresh NPU status:', error);
+      return null;
+    }
+  }, []);
+
   React.useEffect(() => {
     // Load current settings
     const loadSettings = async () => {
@@ -1927,10 +1998,7 @@ function HardwareSettings() {
         }
         setProfileLoading(false);
 
-        if (window.electronAPI?.getNpuStatus) {
-          const status = await window.electronAPI.getNpuStatus();
-          setNpuStatus(status);
-        }
+        await refreshNpuStatus(false);
         if (window.electronAPI?.getImageBackendStatus) {
           const status = await window.electronAPI.getImageBackendStatus();
           setImageStatus(status);
@@ -1957,7 +2025,7 @@ function HardwareSettings() {
     }, 8000);
 
     return () => clearInterval(interval);
-  }, [refreshRuntimeState]);
+  }, [refreshRuntimeState, refreshNpuStatus]);
   
   // Warmup/preload model onto GPU
   const handleWarmupModel = async (modelName) => {
@@ -2029,6 +2097,59 @@ function HardwareSettings() {
     }
   };
 
+  const handleLaptopDailyTune = async () => {
+    setLaptopBusy(true);
+    try {
+      const targetProfile = 'laptop';
+      setProfile(targetProfile);
+      await window.electronAPI?.setPerformanceProfile?.(targetProfile);
+
+      await window.electronAPI?.setSettings?.('preferredBackend', 'auto');
+      await window.electronAPI?.setBackend?.('auto');
+      setBackend('auto');
+
+      let status = await refreshNpuStatus(true);
+      let configResult = null;
+      if (status?.openvinoInstalled && status?.npuAvailable && window.electronAPI?.autoConfigureNpuModel) {
+        configResult = await window.electronAPI.autoConfigureNpuModel({
+          enableAutoStart: false,
+          workload: 'chat',
+          profile: targetProfile,
+          forceReconfigure: true,
+          forceStatusRefresh: true,
+          maxModelSizeB: 3,
+          targetModelSizeB: 1.5,
+        });
+      }
+
+      if (status?.openvinoInstalled && status?.npuAvailable && !status?.serverRunning && window.electronAPI?.startNpuServer) {
+        await window.electronAPI.startNpuServer({ device: 'NPU' });
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        await window.electronAPI?.clearNpuCache?.();
+        await window.electronAPI?.clearHardwareCache?.();
+        status = await refreshNpuStatus(true);
+      }
+
+      await refreshRuntimeState();
+      const selectedModel = configResult?.model || 'unchanged';
+      // eslint-disable-next-line no-alert
+      alert(
+        `Laptop Daily Driver profile applied.\n\n` +
+          `Profile: laptop\n` +
+          `Backend: auto\n` +
+          `NPU: ${status?.npuAvailable ? 'available' : 'not detected'}\n` +
+          `Server: ${status?.serverRunning ? 'running' : 'not running'}\n` +
+          `NPU model: ${selectedModel}`
+      );
+    } catch (error) {
+      console.error('Failed to apply laptop profile:', error);
+      // eslint-disable-next-line no-alert
+      alert(`Laptop tune-up failed: ${error.message || error}`);
+    } finally {
+      setLaptopBusy(false);
+    }
+  };
+
   const handleRunBenchmark = async () => {
     if (!currentModel || benchmarkRunning) return;
     if (!window.electronAPI?.runLlmBenchmark) return;
@@ -2062,7 +2183,7 @@ function HardwareSettings() {
     setNpuBusy(true);
     
     try {
-      let status = await window.electronAPI.getNpuStatus();
+      let status = await refreshNpuStatus(true);
       console.log('[NPU Optimize] Initial status:', status);
 
       // Step 1: Check/install OpenVINO if needed
@@ -2095,14 +2216,22 @@ function HardwareSettings() {
           return;
         }
 
-        status = await window.electronAPI.getNpuStatus();
+        await window.electronAPI?.clearNpuCache?.();
+        await window.electronAPI?.clearHardwareCache?.();
+        status = await refreshNpuStatus(true);
         console.log('[NPU Optimize] Status after setup:', status);
       }
 
       // Step 2: Auto-configure a model for NPU if not already configured
       if (window.electronAPI.autoConfigureNpuModel) {
         console.log('[NPU Optimize] Auto-configuring NPU model...');
-        const configResult = await window.electronAPI.autoConfigureNpuModel();
+        const configResult = await window.electronAPI.autoConfigureNpuModel({
+          enableAutoStart: true,
+          workload: 'chat',
+          profile,
+          forceReconfigure: true,
+          forceStatusRefresh: true,
+        });
         console.log('[NPU Optimize] Model config result:', configResult);
         
         if (configResult?.configured) {
@@ -2111,9 +2240,18 @@ function HardwareSettings() {
       }
 
       // Step 3: Start the NPU server if not already running
-      if (!status.serverRunning && window.electronAPI.startNpuServer) {
+      if (status?.serverRunning && window.electronAPI.stopNpuServer) {
+        console.log('[NPU Optimize] Restart requested - stopping current server first...');
+        await window.electronAPI.stopNpuServer();
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        status = await refreshNpuStatus(true);
+      }
+
+      if (!status?.serverRunning && window.electronAPI.startNpuServer) {
         console.log('[NPU Optimize] Starting NPU server...');
-        const serverResult = await window.electronAPI.startNpuServer();
+        const serverResult = await window.electronAPI.startNpuServer({
+          device: 'NPU',
+        });
         console.log('[NPU Optimize] Server start result:', serverResult);
         
         if (!serverResult?.success) {
@@ -2126,15 +2264,17 @@ function HardwareSettings() {
         }
         
         // Wait a moment for server to fully initialize
-        await new Promise(resolve => setTimeout(resolve, 2000));
-        status = await window.electronAPI.getNpuStatus();
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        await window.electronAPI?.clearNpuCache?.();
+        await window.electronAPI?.clearHardwareCache?.();
+        status = await refreshNpuStatus(true);
         console.log('[NPU Optimize] Status after server start:', status);
       }
 
-      setNpuStatus(status);
+      setNpuStatus(status || null);
 
       // Step 4: Switch to NPU backend if everything is ready
-      if (status.serverRunning) {
+      if (status?.serverRunning) {
         console.log('[NPU Optimize] Switching to OpenVINO NPU backend...');
         await handleBackendChange('openvino-npu');
         // eslint-disable-next-line no-alert
@@ -2145,7 +2285,7 @@ function HardwareSettings() {
           'âœ“ Backend switched to NPU\n\n' +
           'Your AI inference will now use the Intel NPU for efficient processing.'
         );
-      } else if (status.npuAvailable) {
+      } else if (status?.npuAvailable) {
         // eslint-disable-next-line no-alert
         alert('NPU detected but server failed to start. Check Settings for details.');
       } else {
@@ -2451,6 +2591,7 @@ function HardwareSettings() {
           disabled={profileLoading}
           className="input w-full"
         >
+          <option value="laptop">Laptop Daily Driver (Hybrid GPU + NPU)</option>
           <option value="speed">Speed (Prefer GPU/NPU)</option>
           <option value="balanced">Balanced</option>
           <option value="efficiency">Efficiency (Prefer NPU/CPU)</option>
@@ -2459,6 +2600,16 @@ function HardwareSettings() {
           Profiles influence how DevForge schedules work across all backends and how the job queue
           prioritizes requests.
         </p>
+        <div className="mt-3">
+          <button
+            type="button"
+            onClick={handleLaptopDailyTune}
+            disabled={laptopBusy || profileLoading}
+            className="btn btn-secondary text-xs"
+          >
+            {laptopBusy ? 'Applying laptop profile...' : 'Apply Laptop Daily Driver Tune-Up'}
+          </button>
+        </div>
       </div>
 
       {/* NPU Oneâ€‘Click Setup */}
@@ -2473,20 +2624,35 @@ function HardwareSettings() {
             {npuStatus && (
               <div className="mt-2 space-y-1">
                 <div className="flex items-center gap-2 text-[11px]">
-                  <span className={`w-2 h-2 rounded-full ${npuStatus.openvinoInstalled ? 'bg-status-success' : 'bg-status-error'}`} />
-                  <span className="text-text-muted">OpenVINO: {npuStatus.openvinoInstalled ? `Installed (${npuStatus.openvinoVersion || 'env'})` : 'Not installed'}</span>
+                  <span className={`w-2 h-2 rounded-full ${npuStatus.openvinoInstalled === true ? 'bg-status-success' : npuStatus.openvinoInstalled === false ? 'bg-status-error' : 'bg-status-warning'}`} />
+                  <span className="text-text-muted">
+                    OpenVINO:{' '}
+                    {npuStatus.openvinoInstalled === true
+                      ? `Installed (${npuStatus.openvinoVersion || 'env'})`
+                      : npuStatus.openvinoInstalled === false
+                        ? 'Not installed'
+                        : 'Unknown'}
+                  </span>
                 </div>
                 <div className="flex items-center gap-2 text-[11px]">
-                  <span className={`w-2 h-2 rounded-full ${npuStatus.npuAvailable ? 'bg-status-success' : 'bg-status-warning'}`} />
-                  <span className="text-text-muted">NPU Device: {npuStatus.npuAvailable ? 'Detected' : 'Not detected'}</span>
+                  <span className={`w-2 h-2 rounded-full ${npuStatus.npuAvailable === true ? 'bg-status-success' : 'bg-status-warning'}`} />
+                  <span className="text-text-muted">NPU Device: {npuStatus.npuAvailable === true ? 'Detected' : 'Not detected'}</span>
                 </div>
                 <div className="flex items-center gap-2 text-[11px]">
-                  <span className={`w-2 h-2 rounded-full ${npuStatus.serverRunning ? 'bg-status-success' : 'bg-status-error'}`} />
-                  <span className="text-text-muted">Server: {npuStatus.serverRunning ? 'Running on port 8081' : 'Not running'}</span>
+                  <span className={`w-2 h-2 rounded-full ${npuStatus.serverRunning === true ? 'bg-status-success' : 'bg-status-error'}`} />
+                  <span className="text-text-muted">Server: {npuStatus.serverRunning === true ? 'Running on port 8081' : 'Not running'}</span>
                 </div>
                 {npuStatus.devices?.length > 0 && (
                   <div className="text-[11px] text-text-muted mt-1">
                     Available devices: {npuStatus.devices.map(d => d.id).join(', ')}
+                  </div>
+                )}
+                {npuStatus.diagnostics?.pythonExecutable && (
+                  <div
+                    className="text-[10px] text-neutral-500 mt-1 font-mono truncate"
+                    title={npuStatus.diagnostics.pythonExecutable}
+                  >
+                    Python: {npuStatus.diagnostics.pythonExecutable}
                   </div>
                 )}
                 {npuStatus.error && (
@@ -2511,8 +2677,9 @@ function HardwareSettings() {
                 type="button"
                 onClick={async () => {
                   await window.electronAPI?.stopNpuServer();
-                  const status = await window.electronAPI?.getNpuStatus();
-                  setNpuStatus(status);
+                  await window.electronAPI?.clearNpuCache?.();
+                  await window.electronAPI?.clearHardwareCache?.();
+                  await refreshNpuStatus(true);
                 }}
                 className="btn btn-secondary whitespace-nowrap text-xs"
               >
@@ -3006,4 +3173,3 @@ function MemoryTab() {
     </div>
   );
 }
-

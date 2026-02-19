@@ -12,10 +12,7 @@
 const fs = require('fs');
 const fsPromises = require('fs/promises');
 const path = require('path');
-const { exec, spawn } = require('child_process');
-const { promisify } = require('util');
-
-const execAsync = promisify(exec);
+const { spawn } = require('child_process');
 
 // ============================================================================
 // Command Allowlist for Safety
@@ -57,9 +54,203 @@ const ALLOWED_COMMANDS = [
   /^python3\s+--version$/,
 ];
 
+const MAX_STORED_CHECKPOINTS = 40;
+const CHECKPOINTS = new Map();
+let EXECUTION_SEQUENCE = 0;
+let CHECKPOINT_SEQUENCE = 0;
+
+function normalizeForCompare(value) {
+  const resolved = path.resolve(String(value || ''));
+  const normalized = path.normalize(resolved).replace(/[\\/]+$/, '');
+  return process.platform === 'win32' ? normalized.toLowerCase() : normalized;
+}
+
+function isSubPath(targetPath, basePath) {
+  const target = normalizeForCompare(targetPath);
+  const base = normalizeForCompare(basePath);
+  const relative = path.relative(base, target);
+  return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
+}
+
+async function resolveWithinProject(projectRoot, relativePath = '') {
+  if (!projectRoot || typeof projectRoot !== 'string') {
+    throw new Error('projectRoot is required');
+  }
+
+  const normalizedRootInput = path.resolve(String(projectRoot).trim());
+  const projectBase = await fsPromises.realpath(normalizedRootInput).catch(() => normalizedRootInput);
+  const targetPath = path.resolve(projectBase, String(relativePath || ''));
+
+  if (!isSubPath(targetPath, projectBase)) {
+    throw new Error('Path traversal detected - access denied');
+  }
+
+  return {
+    projectBase,
+    targetPath,
+  };
+}
+
+function tokenizeCommand(command = '') {
+  const tokens = String(command).match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) || [];
+  return tokens.map((token) => token.replace(/^['"]|['"]$/g, ''));
+}
+
 function isCommandAllowed(command) {
   const trimmed = command.trim();
+  if (!trimmed) return false;
+
+  // Block obvious shell chaining/expansion tokens.
+  if (/[;&|`<>]/.test(trimmed) || /\$\(/.test(trimmed) || /[\r\n]/.test(trimmed)) {
+    return false;
+  }
+
   return ALLOWED_COMMANDS.some(pattern => pattern.test(trimmed));
+}
+
+function nextExecutionId() {
+  EXECUTION_SEQUENCE += 1;
+  return `exec_${Date.now()}_${EXECUTION_SEQUENCE}`;
+}
+
+function nextCheckpointId() {
+  CHECKPOINT_SEQUENCE += 1;
+  return `chk_${Date.now()}_${CHECKPOINT_SEQUENCE}`;
+}
+
+function scoreCommandRisk(command = '') {
+  const trimmed = String(command || '').trim().toLowerCase();
+  if (!trimmed) {
+    return { level: 'high', blocked: true, mutating: false, reason: 'empty_command' };
+  }
+
+  if (/(?:^|\s)(del|rm|rmdir|rd)\s/.test(trimmed)) {
+    return { level: 'high', blocked: true, mutating: true, reason: 'destructive_delete_command' };
+  }
+
+  if (/git\s+(reset|clean|checkout\s+--)/.test(trimmed)) {
+    return { level: 'high', blocked: true, mutating: true, reason: 'destructive_git_command' };
+  }
+
+  if (/npm\s+install|yarn\s+add|pnpm\s+add|pnpm\s+install/.test(trimmed)) {
+    return { level: 'medium', blocked: false, mutating: true, reason: 'dependency_mutation' };
+  }
+
+  if (/npm\s+run\s+format|prettier\s+--write|eslint\s+--fix/.test(trimmed)) {
+    return { level: 'medium', blocked: false, mutating: true, reason: 'bulk_file_modification' };
+  }
+
+  if (/npm\s+run\s+build|npm\s+test|npx\s+tsc|npm\s+run\s+lint/.test(trimmed)) {
+    return { level: 'low', blocked: false, mutating: false, reason: 'verification_or_build' };
+  }
+
+  return { level: 'low', blocked: false, mutating: false, reason: 'read_or_safe_command' };
+}
+
+function buildAuditMetadata({
+  tool = 'unknown',
+  operation = '',
+  projectRoot = '',
+  target = '',
+  risk = null,
+  blocked = false,
+}) {
+  return {
+    tool,
+    operation: String(operation || '').trim(),
+    projectRoot: String(projectRoot || '').trim(),
+    target: String(target || '').trim(),
+    riskLevel: risk?.level || 'low',
+    riskReason: risk?.reason || '',
+    mutating: Boolean(risk?.mutating),
+    blocked: Boolean(blocked),
+    timestamp: new Date().toISOString(),
+  };
+}
+
+function trimCheckpointStore() {
+  if (CHECKPOINTS.size <= MAX_STORED_CHECKPOINTS) return;
+  const entries = Array.from(CHECKPOINTS.values()).sort((a, b) => a.createdAtMs - b.createdAtMs);
+  const overflow = entries.length - MAX_STORED_CHECKPOINTS;
+  for (let i = 0; i < overflow; i += 1) {
+    CHECKPOINTS.delete(entries[i].id);
+  }
+}
+
+async function captureCheckpointForFiles(projectRoot, relativePaths = [], reason = 'mutation') {
+  const uniquePaths = Array.from(new Set((Array.isArray(relativePaths) ? relativePaths : [])
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)));
+  const files = [];
+
+  for (const relPath of uniquePaths) {
+    const { targetPath: fullPath } = await resolveWithinProject(projectRoot, relPath);
+    let exists = false;
+    let content = '';
+    try {
+      const stat = await fsPromises.stat(fullPath);
+      exists = stat.isFile();
+      if (exists) {
+        content = await fsPromises.readFile(fullPath, 'utf-8');
+      }
+    } catch (_error) {
+      exists = false;
+      content = '';
+    }
+    files.push({
+      path: relPath,
+      fullPath,
+      exists,
+      content,
+    });
+  }
+
+  const id = nextCheckpointId();
+  CHECKPOINTS.set(id, {
+    id,
+    reason,
+    projectRoot,
+    createdAt: new Date().toISOString(),
+    createdAtMs: Date.now(),
+    files,
+  });
+  trimCheckpointStore();
+  return id;
+}
+
+async function captureCheckpointForCommand(projectRoot, command = '') {
+  const risk = scoreCommandRisk(command);
+  if (!risk.mutating) return null;
+
+  const commandLower = String(command || '').toLowerCase();
+  const candidateFiles = ['package.json'];
+  if (/npm\s+install|pnpm\s+install|yarn\s+add|pnpm\s+add/.test(commandLower)) {
+    candidateFiles.push('package-lock.json', 'pnpm-lock.yaml', 'yarn.lock');
+  }
+
+  return captureCheckpointForFiles(projectRoot, candidateFiles, `command:${commandLower.slice(0, 120)}`);
+}
+
+async function rollbackCheckpoint(checkpointId) {
+  const checkpoint = CHECKPOINTS.get(String(checkpointId || '').trim());
+  if (!checkpoint) {
+    return { success: false, error: 'Checkpoint not found' };
+  }
+
+  for (const file of checkpoint.files || []) {
+    if (file.exists) {
+      await fsPromises.mkdir(path.dirname(file.fullPath), { recursive: true });
+      await fsPromises.writeFile(file.fullPath, file.content, 'utf-8');
+    } else {
+      await fsPromises.unlink(file.fullPath).catch(() => {});
+    }
+  }
+
+  return {
+    success: true,
+    checkpointId: checkpoint.id,
+    restoredFiles: (checkpoint.files || []).map((item) => item.path),
+  };
 }
 
 // ============================================================================
@@ -70,14 +261,7 @@ function isCommandAllowed(command) {
  * Read file contents with optional line range
  */
 async function readFileWithRange(projectRoot, filePath, startLine, endLine) {
-  const fullPath = path.join(projectRoot, filePath);
-  
-  // Validate path is within project
-  const normalizedPath = path.normalize(fullPath);
-  const normalizedRoot = path.normalize(projectRoot);
-  if (!normalizedPath.startsWith(normalizedRoot)) {
-    throw new Error('Path traversal detected - access denied');
-  }
+  const { targetPath: fullPath } = await resolveWithinProject(projectRoot, filePath);
   
   const content = await fsPromises.readFile(fullPath, 'utf-8');
   const lines = content.split('\n');
@@ -109,14 +293,7 @@ async function readFileWithRange(projectRoot, filePath, startLine, endLine) {
  * List directory contents
  */
 async function listDirectory(projectRoot, dirPath = '', recursive = false, maxDepth = 3) {
-  const fullPath = path.join(projectRoot, dirPath);
-  
-  // Validate path is within project
-  const normalizedPath = path.normalize(fullPath);
-  const normalizedRoot = path.normalize(projectRoot);
-  if (!normalizedPath.startsWith(normalizedRoot)) {
-    throw new Error('Path traversal detected - access denied');
-  }
+  const { targetPath: fullPath } = await resolveWithinProject(projectRoot, dirPath);
   
   const results = [];
   
@@ -177,6 +354,7 @@ async function listDirectory(projectRoot, dirPath = '', recursive = false, maxDe
  * Search for patterns in code files (grep-like)
  */
 async function searchCode(projectRoot, pattern, fileGlob, maxResults = 20, caseSensitive = false) {
+  const { projectBase } = await resolveWithinProject(projectRoot, '.');
   const results = [];
   const regex = new RegExp(pattern, caseSensitive ? 'g' : 'gi');
   
@@ -275,7 +453,7 @@ async function searchCode(projectRoot, pattern, fileGlob, maxResults = 20, caseS
     }
   }
   
-  await walkAndSearch(projectRoot, '');
+  await walkAndSearch(projectBase, '');
   
   return {
     pattern,
@@ -293,11 +471,13 @@ async function searchCode(projectRoot, pattern, fileGlob, maxResults = 20, caseS
  * Run a command in a sandboxed environment
  */
 async function runCommand(projectRoot, command, cwd, timeout = 30000) {
+  const rawCommand = String(command || '').trim();
+
   // Validate command against allowlist
-  if (!isCommandAllowed(command)) {
+  if (!isCommandAllowed(rawCommand)) {
     return {
       success: false,
-      error: `Command not allowed: "${command}". Only safe commands from the allowlist can be executed.`,
+      error: `Command not allowed: "${rawCommand}". Only safe commands from the allowlist can be executed.`,
       allowedPatterns: [
         'npm test/run/install',
         'yarn/pnpm commands',
@@ -309,44 +489,94 @@ async function runCommand(projectRoot, command, cwd, timeout = 30000) {
       ]
     };
   }
-  
-  const workingDir = cwd ? path.join(projectRoot, cwd) : projectRoot;
-  
-  // Validate working directory is within project
-  const normalizedCwd = path.normalize(workingDir);
-  const normalizedRoot = path.normalize(projectRoot);
-  if (!normalizedCwd.startsWith(normalizedRoot)) {
-    return {
-      success: false,
-      error: 'Working directory must be within project root'
-    };
-  }
-  
+
   try {
-    const { stdout, stderr } = await execAsync(command, {
-      cwd: workingDir,
-      timeout,
-      maxBuffer: 1024 * 1024, // 1MB buffer
-      env: {
-        ...process.env,
-        // Disable interactive prompts
-        CI: 'true',
-        FORCE_COLOR: '0'
-      }
+    const targetDir = cwd ? String(cwd) : '.';
+    const { targetPath: workingDir } = await resolveWithinProject(projectRoot, targetDir);
+    const [binary, ...args] = tokenizeCommand(rawCommand);
+
+    if (!binary) {
+      return {
+        success: false,
+        error: 'No command provided',
+      };
+    }
+
+    return await new Promise((resolve) => {
+      let stdout = '';
+      let stderr = '';
+      let killedByTimeout = false;
+      const maxDuration = Math.min(Math.max(Number(timeout) || 30000, 1000), 120000);
+
+      const child = spawn(binary, args, {
+        cwd: workingDir,
+        shell: false,
+        env: {
+          ...process.env,
+          CI: 'true',
+          FORCE_COLOR: '0',
+        },
+      });
+
+      const timeoutId = setTimeout(() => {
+        killedByTimeout = true;
+        child.kill('SIGTERM');
+      }, maxDuration);
+
+      child.stdout.on('data', (chunk) => {
+        stdout += String(chunk || '');
+        if (stdout.length > 50000) {
+          stdout = stdout.slice(-50000);
+        }
+      });
+
+      child.stderr.on('data', (chunk) => {
+        stderr += String(chunk || '');
+        if (stderr.length > 10000) {
+          stderr = stderr.slice(-10000);
+        }
+      });
+
+      child.on('error', (error) => {
+        clearTimeout(timeoutId);
+        resolve({
+          success: false,
+          stdout,
+          stderr: stderr || error.message,
+          exitCode: 1,
+          error: error.message,
+        });
+      });
+
+      child.on('close', (code) => {
+        clearTimeout(timeoutId);
+        const exitCode = Number.isInteger(code) ? code : 1;
+        if (killedByTimeout) {
+          resolve({
+            success: false,
+            stdout,
+            stderr: stderr || `Command timed out after ${maxDuration}ms`,
+            exitCode,
+            error: 'Command timed out',
+          });
+          return;
+        }
+
+        resolve({
+          success: exitCode === 0,
+          stdout,
+          stderr,
+          exitCode,
+          ...(exitCode !== 0 ? { error: `Command exited with code ${exitCode}` } : {}),
+        });
+      });
     });
-    
-    return {
-      success: true,
-      stdout: stdout.slice(0, 50000), // Limit output size
-      stderr: stderr.slice(0, 10000),
-      exitCode: 0
-    };
   } catch (error) {
     return {
       success: false,
-      stdout: error.stdout?.slice(0, 50000) || '',
-      stderr: error.stderr?.slice(0, 10000) || error.message,
-      exitCode: error.code || 1,
+      stdout: '',
+      stderr: error.message,
+      exitCode: 1,
       error: error.message
     };
   }
@@ -384,15 +614,8 @@ function normalizePatchOperation(operation) {
  */
 async function applyPatch(projectRoot, patch) {
   const { path: filePath, operation, startLine, endLine, oldContent, newContent, newPath } = patch;
-  const fullPath = path.join(projectRoot, filePath);
+  const { targetPath: fullPath, projectBase } = await resolveWithinProject(projectRoot, filePath);
   const normalizedOperation = normalizePatchOperation(operation);
-  
-  // Validate path is within project
-  const normalizedPath = path.normalize(fullPath);
-  const normalizedRoot = path.normalize(projectRoot);
-  if (!normalizedPath.startsWith(normalizedRoot)) {
-    throw new Error('Path traversal detected - access denied');
-  }
   
   switch (normalizedOperation) {
     case 'create': {
@@ -511,11 +734,7 @@ async function applyPatch(projectRoot, patch) {
         throw new Error('newPath is required for rename operation');
       }
       
-      const newFullPath = path.join(projectRoot, newPath);
-      const normalizedNewPath = path.normalize(newFullPath);
-      if (!normalizedNewPath.startsWith(normalizedRoot)) {
-        throw new Error('Path traversal detected - access denied');
-      }
+      const { targetPath: newFullPath } = await resolveWithinProject(projectBase, newPath);
       
       // Ensure target directory exists
       await fsPromises.mkdir(path.dirname(newFullPath), { recursive: true });
@@ -600,7 +819,7 @@ function errorResult(error, code = 'tool_error', retryable = false, details = nu
   };
 }
 
-function setupCodeToolsHandlers(ipcMain, mainWindow, store) {
+function setupCodeToolsHandlers(ipcMain, _mainWindow, _store) {
   console.log('[IPC] Setting up code tools handlers...');
   
   // Read file with optional line range
@@ -631,22 +850,129 @@ function setupCodeToolsHandlers(ipcMain, mainWindow, store) {
   });
   
   // Run command (sandboxed)
-  ipcMain.handle('tool:runCommand', async (_, { projectRoot, command, cwd, timeout }) => {
+  ipcMain.handle('tool:runCommand', async (_, { projectRoot, command, cwd, timeout, autoRollbackOnFailure = true } = {}) => {
+    const executionId = nextExecutionId();
+    const risk = scoreCommandRisk(command);
+    const audit = buildAuditMetadata({
+      tool: 'run_command',
+      operation: 'execute',
+      projectRoot,
+      target: command,
+      risk,
+      blocked: risk.blocked,
+    });
+
+    if (risk.blocked) {
+      console.warn(`[code-tools] Blocked high-risk command (${risk.reason}): ${command}`);
+      return errorResult(
+        `Command blocked by risk policy (${risk.reason}).`,
+        'command_blocked',
+        false,
+        { executionId, checkpointId: null, audit }
+      );
+    }
+
+    let checkpointId = null;
     try {
+      checkpointId = await captureCheckpointForCommand(projectRoot, command);
       const result = await runCommand(projectRoot, command, cwd, timeout);
-      if (result?.success) return okResult(result);
-      return errorResult(result?.error || result?.stderr || 'Command failed', 'command_failed', false, result);
+      const payload = { ...result, executionId, checkpointId, audit };
+      if (result?.success) return okResult(payload);
+
+      let rollback = null;
+      if (checkpointId && autoRollbackOnFailure) {
+        rollback = await rollbackCheckpoint(checkpointId);
+      }
+      return errorResult(
+        result?.error || result?.stderr || 'Command failed',
+        'command_failed',
+        false,
+        {
+          ...payload,
+          rollback,
+        }
+      );
     } catch (error) {
-      return errorResult(error, 'command_failed');
+      let rollback = null;
+      if (checkpointId && autoRollbackOnFailure) {
+        rollback = await rollbackCheckpoint(checkpointId).catch(() => null);
+      }
+      return errorResult(error, 'command_failed', false, {
+        executionId,
+        checkpointId,
+        audit,
+        rollback,
+      });
     }
   });
   
   // Apply patch
-  ipcMain.handle('tool:applyPatch', async (_, { projectRoot, patch }) => {
+  ipcMain.handle('tool:applyPatch', async (_, { projectRoot, patch, autoRollbackOnFailure = true } = {}) => {
+    const executionId = nextExecutionId();
+    const patchPath = String(patch?.path || '').trim();
+    const patchOperation = normalizePatchOperation(patch?.operation, Boolean(patch?.newPath));
+    const risk = {
+      level: patchOperation === 'delete' ? 'medium' : 'low',
+      reason: `patch_${patchOperation}`,
+      mutating: true,
+      blocked: false,
+    };
+    const audit = buildAuditMetadata({
+      tool: 'apply_patch',
+      operation: patchOperation,
+      projectRoot,
+      target: patchPath,
+      risk,
+      blocked: false,
+    });
+
+    let checkpointId = null;
     try {
-      return okResult(await applyPatch(projectRoot, patch));
+      const checkpointPaths = [patch?.path];
+      if (patch?.newPath) checkpointPaths.push(patch.newPath);
+      checkpointId = await captureCheckpointForFiles(projectRoot, checkpointPaths, `patch:${patchOperation}`);
+      const patchResult = await applyPatch(projectRoot, patch);
+      return okResult({
+        ...patchResult,
+        executionId,
+        checkpointId,
+        audit,
+      });
     } catch (error) {
-      return errorResult(error, 'patch_failed');
+      let rollback = null;
+      if (checkpointId && autoRollbackOnFailure) {
+        rollback = await rollbackCheckpoint(checkpointId).catch(() => null);
+      }
+      return errorResult(error, 'patch_failed', false, {
+        executionId,
+        checkpointId,
+        audit,
+        rollback,
+      });
+    }
+  });
+
+  ipcMain.handle('tool:createCheckpoint', async (_, { projectRoot, files = [], reason = 'manual_checkpoint' } = {}) => {
+    try {
+      const checkpointId = await captureCheckpointForFiles(projectRoot, files, reason);
+      return okResult({
+        checkpointId,
+        createdAt: new Date().toISOString(),
+      });
+    } catch (error) {
+      return errorResult(error, 'checkpoint_create_failed');
+    }
+  });
+
+  ipcMain.handle('tool:rollbackCheckpoint', async (_, { checkpointId } = {}) => {
+    try {
+      const result = await rollbackCheckpoint(checkpointId);
+      if (!result?.success) {
+        return errorResult(result?.error || 'Rollback failed', 'checkpoint_rollback_failed');
+      }
+      return okResult(result);
+    } catch (error) {
+      return errorResult(error, 'checkpoint_rollback_failed');
     }
   });
   
@@ -675,6 +1001,8 @@ function setupCodeToolsHandlers(ipcMain, mainWindow, store) {
         'tool:searchCode',
         'tool:runCommand',
         'tool:applyPatch',
+        'tool:createCheckpoint',
+        'tool:rollbackCheckpoint',
         'tool:generateDiff',
         'tool:isCommandAllowed',
       ],
@@ -695,4 +1023,6 @@ module.exports = {
   applyPatch,
   generateDiff,
   isCommandAllowed,
+  scoreCommandRisk,
+  rollbackCheckpoint,
 };

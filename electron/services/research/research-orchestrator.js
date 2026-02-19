@@ -1,750 +1,989 @@
+/**
+ * Research Orchestrator - General-purpose deep research engine.
+ *
+ * LLM-driven pipeline:  plan -> search -> read -> analyze  (loop until convergence)
+ * Then generates a final markdown report with citations.
+ *
+ * Keeps: worker pool, task queues, checkpointing, resume, progress emission.
+ * Removed: All FFAS / treatment-program-specific logic.
+ */
+
 const { EventEmitter } = require('events');
 const { v4: uuidv4 } = require('uuid');
 const { searchWeb, fetchPageContent } = require('../web-search-service');
 const {
-  classifySource,
-  mergeSourcePolicy,
   normalizeUrl,
   normalizeDomain,
+  classifySource,
+  mergeSourcePolicy,
+  DEFAULT_SOURCE_POLICY,
 } = require('./research-source-policy');
 const {
-  DEFAULT_STARTER_SCHEMA,
-  normalizeSchema,
-  validateRecordAgainstSchema,
-  extractRecordFromOfficialPage,
-  validateInstructionCompliance,
+  createEvidence,
+  hasValidEvidence,
 } = require('./research-schema');
 
-const PHASES = ['discover', 'official_verify', 'extract_fields', 'evidence_validate', 'persist'];
-const PRIORITY_ORDER = ['persist', 'evidence_validate', 'extract_fields', 'official_verify', 'discover'];
+/* ------------------------------------------------------------------ */
+/*  Constants                                                          */
+/* ------------------------------------------------------------------ */
 
-function sleep(ms) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+const PHASES = ['plan', 'search', 'read', 'analyze'];
+const PRIORITY_ORDER = ['analyze', 'read', 'search', 'plan'];
+const STAGE_IDS = ['intent_compile', 'retrieve', 'verify', 'synthesize', 'gate'];
+const PHASE_TO_STAGE = {
+  plan: 'intent_compile',
+  search: 'retrieve',
+  read: 'verify',
+  analyze: 'synthesize',
+};
 
-function nowIso() {
-  return new Date().toISOString();
-}
+function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
+function nowIso() { return new Date().toISOString(); }
 
 function safeParseJson(input, fallback) {
   if (!input || typeof input !== 'string') return fallback;
-  try {
-    return JSON.parse(input);
-  } catch (_error) {
-    return fallback;
-  }
+  try { return JSON.parse(input); } catch (_e) { return fallback; }
 }
 
 function safeStringify(value, fallback = '{}') {
-  try {
-    return JSON.stringify(value ?? {});
-  } catch (_error) {
-    return fallback;
-  }
+  try { return JSON.stringify(value ?? {}); } catch (_e) { return fallback; }
 }
 
 function normalizeTaskPayload(task = {}) {
   return {
     id: task.id || uuidv4(),
-    phase: task.phase || 'discover',
+    phase: task.phase || 'plan',
     payload: task.payload || {},
     retries: Number(task.retries || 0),
     createdAt: task.createdAt || Date.now(),
   };
 }
 
-const TOKEN_CORRECTIONS = new Map([
-  ['adoelscent', 'adolescent'],
-  ['adolesent', 'adolescent'],
-  ['adolescant', 'adolescent'],
-  ['residental', 'residential'],
-  ['resdiential', 'residential'],
-  ['theraphy', 'therapy'],
-  ['behavorial', 'behavioral'],
-]);
-
-const QUERY_NOISE_TERMS = new Set([
-  'conversational',
-  'criteria',
-  'constraint',
-  'constraints',
-  'clarification',
-  'clarifications',
-  'question',
-  'questions',
-  'instruction',
-  'instructions',
-  'follow',
-  'follows',
-  'following',
-  'prompt',
-  'prompts',
-  'scope',
-  'statewide',
-  'coverage',
-  'find',
-  'all',
-  'need',
-  'needs',
-  'please',
-  'show',
-  'list',
-  'helper',
-  'assistant',
-  'chat',
-  'setup',
-  'project',
-  'research',
-  'discovery',
-  'broad',
-  'ambiguous',
-  'short',
-  'before',
-  'after',
-  'claims',
-  'pages',
-  'websites',
-]);
-
-const FOLLOW_UP_TITLE_BLOCKLIST = [
-  'best',
-  'top',
-  'directory',
-  'directories',
-  'review',
-  'reviews',
-  'pricing',
-  'compare',
-  'comparison',
-  'troubled teen',
-  'psychology today',
-  'mytroubledteen',
-  'rehab centers',
-];
-
-function normalizeTopicToken(token = '') {
-  const cleaned = String(token || '').toLowerCase().trim();
-  if (!cleaned) return '';
-  return TOKEN_CORRECTIONS.get(cleaned) || cleaned;
+function compactText(text = '', maxLen = 240) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  return s.length <= maxLen ? s : `${s.slice(0, maxLen - 3)}...`;
 }
 
-function extractKeywords(text = '', limit = 8) {
-  const words = String(text || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]+/g, ' ')
-    .split(/\s+/)
-    .map((word) => normalizeTopicToken(word))
-    .filter((word) => word.length >= 5)
-    .filter((word) => !['about', 'their', 'there', 'which', 'where', 'official', 'program', 'service', 'information', 'website'].includes(word))
-    .filter((word) => !QUERY_NOISE_TERMS.has(word));
-  const seen = new Set();
-  const picked = [];
-  for (const word of words) {
-    if (seen.has(word)) continue;
-    seen.add(word);
-    picked.push(word);
-    if (picked.length >= limit) break;
-  }
-  return picked;
+function clampMultilineText(text = '', maxLen = 3000) {
+  const s = String(text || '').replace(/\r/g, '').trim();
+  if (!s) return '';
+  return s.length <= maxLen ? s : `${s.slice(0, maxLen - 3)}...`;
 }
 
-function extractLocationHint(text = '') {
-  const raw = String(text || '');
-  const lowered = raw.toLowerCase();
-  const explicitCodes = new Set(extractExplicitStateCodes(raw));
-  const matchedStates = [];
-
-  for (const [stateName, code] of US_STATE_ALIASES) {
-    const codeToken = String(code || '').toLowerCase();
-    if (containsToken(lowered, stateName) || explicitCodes.has(codeToken)) {
-      matchedStates.push(stateName);
-    }
-  }
-  if (matchedStates.length > 0) {
-    return matchedStates[matchedStates.length - 1];
-  }
-
-  const match = raw.match(/\b(?:in|across|within|near)\s+([A-Za-z][A-Za-z\s-]{2,40})(?:[,.]|$)/i);
-  if (!match) return '';
-  return String(match[1] || '')
-    .trim()
-    .replace(/\s+/g, ' ')
-    .replace(/^(the\s+state\s+of\s+)/i, '');
-}
-
-const GENERIC_DISCOVERY_TERMS = [
-  'official source',
-  'primary source',
-  'documentation',
-  'reference page',
-  'technical report',
-];
-
-function pickCareLevelSearchTerms(text = '') {
-  const keywords = extractKeywords(text, 8);
-  if (keywords.length === 0) {
-    return GENERIC_DISCOVERY_TERMS;
-  }
-  return Array.from(new Set(
-    keywords
-      .slice(0, 5)
-      .map((keyword) => `${keyword} overview`)
-  ));
-}
-
-function normalizeSearchQuery(query = '') {
-  const tokens = String(query || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]+/g, ' ')
-    .split(/\s+/)
-    .map((token) => normalizeTopicToken(token))
+function normalizeStringArray(value) {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((item) => String(item || '').trim())
     .filter(Boolean);
-  if (tokens.length === 0) return '';
-  const words = [];
-  for (const token of tokens) {
-    if (QUERY_NOISE_TERMS.has(token)) continue;
-    words.push(token);
+}
+
+function normalizeProjectContext(input = {}) {
+  const source = input && typeof input === 'object' ? input : {};
+  return {
+    permanentInstructions: clampMultilineText(source.permanentInstructions || '', 4000),
+    runInstructions: clampMultilineText(source.runInstructions || '', 3000),
+    conversationDigest: clampMultilineText(source.conversationDigest || '', 7000),
+    documentDigest: clampMultilineText(source.documentDigest || '', 7000),
+    linkedConversations: normalizeStringArray(source.linkedConversations || []),
+    linkedDocuments: normalizeStringArray(source.linkedDocuments || []),
+  };
+}
+
+function mergeProjectContextValues(primary = {}, fallback = {}) {
+  const preferred = normalizeProjectContext(primary);
+  const backup = normalizeProjectContext(fallback);
+  return {
+    permanentInstructions: preferred.permanentInstructions || backup.permanentInstructions,
+    runInstructions: preferred.runInstructions || backup.runInstructions,
+    conversationDigest: preferred.conversationDigest || backup.conversationDigest,
+    documentDigest: preferred.documentDigest || backup.documentDigest,
+    linkedConversations: preferred.linkedConversations.length > 0 ? preferred.linkedConversations : backup.linkedConversations,
+    linkedDocuments: preferred.linkedDocuments.length > 0 ? preferred.linkedDocuments : backup.linkedDocuments,
+  };
+}
+
+function buildProjectContextMeta(projectContext = {}) {
+  const context = normalizeProjectContext(projectContext);
+  return {
+    hasPermanentInstructions: Boolean(context.permanentInstructions),
+    hasRunInstructions: Boolean(context.runInstructions),
+    hasConversationDigest: Boolean(context.conversationDigest),
+    hasDocumentDigest: Boolean(context.documentDigest),
+    linkedConversations: context.linkedConversations.length,
+    linkedDocuments: context.linkedDocuments.length,
+  };
+}
+
+function buildProjectContextSection(projectContext = {}, options = {}) {
+  const context = normalizeProjectContext(projectContext);
+  const {
+    includeDigests = false,
+    digestChars = 1200,
+  } = options || {};
+
+  const lines = [];
+  if (context.permanentInstructions) {
+    lines.push('Project permanent instructions:');
+    lines.push(context.permanentInstructions);
   }
-  return words.join(' ').replace(/\s+/g, ' ').trim();
-}
-
-function extractScopedInstructionHints(runInstructions = '') {
-  const lines = String(runInstructions || '')
-    .split('\n')
-    .map((line) => String(line || '').trim())
-    .filter(Boolean);
-  const scopedLines = lines.filter((line) => {
-    const lowered = line.toLowerCase();
-    return lowered.startsWith('- geography:')
-      || lowered.startsWith('- timeframe:')
-      || lowered.startsWith('- entity focus:')
-      || lowered.startsWith('- constraints:')
-      || lowered.startsWith('- additional notes:')
-      || lowered.startsWith('- topic:')
-      || lowered.startsWith('- include:')
-      || lowered.startsWith('- exclude:');
-  });
-  return scopedLines.join(' ');
-}
-
-function cleanFollowUpTitle(title = '') {
-  let cleaned = String(title || '')
-    .replace(/<[^>]*>/g, ' ')
-    .replace(/\([^)]*\)/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-  if (!cleaned) return '';
-  if (cleaned.includes(' - ')) cleaned = cleaned.split(' - ')[0].trim();
-  if (cleaned.includes(' | ')) cleaned = cleaned.split(' | ')[0].trim();
-
-  const lowered = cleaned.toLowerCase();
-  if (FOLLOW_UP_TITLE_BLOCKLIST.some((term) => lowered.includes(term))) return '';
-  if (/\b\d{2,}\b/.test(lowered) && /\b(best|top)\b/.test(lowered)) return '';
-
-  const words = cleaned.split(/\s+/);
-  if (words.length < 2 || words.length > 10) return '';
-  if (/\b(in|near)\s+[A-Za-z][A-Za-z\s-]{2,40}$/i.test(cleaned)) {
-    cleaned = cleaned.replace(/\b(in|near)\s+[A-Za-z][A-Za-z\s-]{2,40}$/i, '').trim();
+  if (context.runInstructions) {
+    if (lines.length > 0) lines.push('');
+    lines.push('Run-specific instructions:');
+    lines.push(context.runInstructions);
   }
-  return cleaned;
+  if (includeDigests && context.conversationDigest) {
+    if (lines.length > 0) lines.push('');
+    lines.push('Linked conversation context digest:');
+    lines.push(clampMultilineText(context.conversationDigest, digestChars));
+  }
+  if (includeDigests && context.documentDigest) {
+    if (lines.length > 0) lines.push('');
+    lines.push('Linked document context digest:');
+    lines.push(clampMultilineText(context.documentDigest, digestChars));
+  }
+
+  const linkedSummary = [];
+  if (context.linkedConversations.length > 0) linkedSummary.push(`${context.linkedConversations.length} linked conversation(s)`);
+  if (context.linkedDocuments.length > 0) linkedSummary.push(`${context.linkedDocuments.length} linked document(s)`);
+  if (linkedSummary.length > 0) {
+    if (lines.length > 0) lines.push('');
+    lines.push(`Context scope: ${linkedSummary.join(', ')}.`);
+  }
+
+  if (lines.length === 0) return '';
+
+  return [
+    'Project context and constraints:',
+    '---',
+    ...lines,
+    '---',
+  ].join('\n');
 }
 
-function buildOfficialFollowUpQuery({ title = '', objective = '', locationHint = '' } = {}) {
-  const entity = cleanFollowUpTitle(title);
-  if (!entity) return '';
-  const location = String(locationHint || extractLocationHint(objective) || '').trim();
-  const parts = [entity];
-  if (location) parts.push(`in ${location}`);
-  parts.push('official website');
-  return normalizeSearchQuery(parts.join(' '));
-}
+/* ------------------------------------------------------------------ */
+/*  Depth presets                                                      */
+/* ------------------------------------------------------------------ */
 
-function buildDomainProgramPhrase(term = '') {
-  const token = normalizeTopicToken(term);
-  if (!token) return '';
-  if (token.length < 3) return '';
-  if (['official', 'source', 'website', 'websites', 'page', 'pages'].includes(token)) return '';
-  return `${token} topic`;
-}
-
-const RESEARCH_DEPTH_PRESETS = {
+const DEPTH_PRESETS = {
+  quick: {
+    maxQueries: 8,
+    maxSourcesRead: 12,
+    maxRuntimeMinutes: 5,
+    maxFollowUpDepth: 1,
+    convergenceThreshold: 3,
+    topResultsPerQuery: 5,
+    analyzeMaxContentChars: 6000,
+  },
   standard: {
-    minRuntimeMinutes: 6,
-    minDiscoveredCandidates: 80,
-    minSearchesIssued: 10,
-    minVerifiedRecords: 3,
-    maxSearchResultsPerQuery: 16,
-    maxDiscoverDepth: 2,
-    maxFollowUpsPerQuery: 2,
-    seedQueryLimit: 16,
-    convergenceThreshold: 6,
-    strictTopicMatching: true,
-    minTopicRelevanceScore: 4.5,
+    maxQueries: 20,
+    maxSourcesRead: 30,
+    maxRuntimeMinutes: 15,
+    maxFollowUpDepth: 2,
+    convergenceThreshold: 5,
+    topResultsPerQuery: 8,
+    analyzeMaxContentChars: 10000,
   },
   deep: {
-    minRuntimeMinutes: 20,
-    minDiscoveredCandidates: 300,
-    minSearchesIssued: 30,
-    minVerifiedRecords: 6,
-    maxSearchResultsPerQuery: 24,
-    maxDiscoverDepth: 4,
-    maxFollowUpsPerQuery: 4,
-    seedQueryLimit: 30,
-    convergenceThreshold: 10,
-    strictTopicMatching: true,
-    minTopicRelevanceScore: 5.2,
-  },
-  exhaustive: {
-    minRuntimeMinutes: 45,
-    minDiscoveredCandidates: 800,
-    minSearchesIssued: 60,
-    minVerifiedRecords: 10,
-    maxSearchResultsPerQuery: 32,
-    maxDiscoverDepth: 5,
-    maxFollowUpsPerQuery: 6,
-    seedQueryLimit: 48,
-    convergenceThreshold: 14,
-    strictTopicMatching: true,
-    minTopicRelevanceScore: 5.6,
+    maxQueries: 50,
+    maxSourcesRead: 80,
+    maxRuntimeMinutes: 45,
+    maxFollowUpDepth: 4,
+    convergenceThreshold: 8,
+    topResultsPerQuery: 12,
+    analyzeMaxContentChars: 15000,
   },
 };
 
-const DEFAULT_DEPTH_PRESET = 'deep';
-
-const TOPIC_STOPWORDS = new Set([
-  'about', 'after', 'again', 'against', 'all', 'also', 'among', 'and', 'any', 'are', 'because', 'been',
-  'being', 'between', 'both', 'build', 'can', 'cannot', 'care', 'collect', 'create', 'data', 'database',
-  'details', 'does', 'each', 'every', 'find', 'for', 'from', 'have', 'help', 'into', 'just', 'like', 'many',
-  'more', 'most', 'need', 'official', 'only', 'options', 'other', 'our', 'please', 'program', 'programs',
-  'project', 'record', 'records', 'research', 'services', 'should', 'that', 'the', 'their', 'them', 'there',
-  'these', 'they', 'this', 'those', 'through', 'what', 'when', 'where', 'which', 'with', 'within', 'without',
-  'would', 'your', 'website', 'websites', 'page', 'pages', 'instruction', 'instructions', 'constraint',
-  'constraints', 'criteria', 'clarify', 'clarification', 'question', 'questions', 'conversation',
-  'conversational', 'assistant', 'setup', 'scope', 'statewide', 'coverage', 'broad', 'short', 'ambiguous',
-  'before', 'afterward', 'follow', 'following', 'prompt', 'prompts', 'claim', 'claims',
-]);
-
-const TOPIC_DOMAIN_TERMS = [
-  'api',
-  'documentation',
-  'specification',
-  'framework',
-  'platform',
-  'policy',
-  'regulation',
-  'guideline',
-  'report',
-  'dataset',
-  'announcement',
-  'release',
-  'pricing',
-  'roadmap',
-  'standard',
-  'benchmark',
-  'whitepaper',
-];
-
-const TOPIC_EXCLUDE_TERMS = [];
-
-const US_STATE_ALIASES = [
-  ['alabama', 'al'],
-  ['alaska', 'ak'],
-  ['arizona', 'az'],
-  ['arkansas', 'ar'],
-  ['california', 'ca'],
-  ['colorado', 'co'],
-  ['connecticut', 'ct'],
-  ['delaware', 'de'],
-  ['florida', 'fl'],
-  ['georgia', 'ga'],
-  ['hawaii', 'hi'],
-  ['idaho', 'id'],
-  ['illinois', 'il'],
-  ['indiana', 'in'],
-  ['iowa', 'ia'],
-  ['kansas', 'ks'],
-  ['kentucky', 'ky'],
-  ['louisiana', 'la'],
-  ['maine', 'me'],
-  ['maryland', 'md'],
-  ['massachusetts', 'ma'],
-  ['michigan', 'mi'],
-  ['minnesota', 'mn'],
-  ['mississippi', 'ms'],
-  ['missouri', 'mo'],
-  ['montana', 'mt'],
-  ['nebraska', 'ne'],
-  ['nevada', 'nv'],
-  ['new hampshire', 'nh'],
-  ['new jersey', 'nj'],
-  ['new mexico', 'nm'],
-  ['new york', 'ny'],
-  ['north carolina', 'nc'],
-  ['north dakota', 'nd'],
-  ['ohio', 'oh'],
-  ['oklahoma', 'ok'],
-  ['oregon', 'or'],
-  ['pennsylvania', 'pa'],
-  ['rhode island', 'ri'],
-  ['south carolina', 'sc'],
-  ['south dakota', 'sd'],
-  ['tennessee', 'tn'],
-  ['texas', 'tx'],
-  ['utah', 'ut'],
-  ['vermont', 'vt'],
-  ['virginia', 'va'],
-  ['washington', 'wa'],
-  ['west virginia', 'wv'],
-  ['wisconsin', 'wi'],
-  ['wyoming', 'wy'],
-  ['district of columbia', 'dc'],
-];
-
-function extractExplicitStateCodes(text = '') {
-  return (String(text || '').match(/\b[A-Z]{2}\b/g) || [])
-    .map((code) => code.toLowerCase());
-}
-
-function clampInt(value, fallback, min, max) {
-  const numeric = Number(value);
-  if (!Number.isFinite(numeric)) return fallback;
-  return Math.max(min, Math.min(max, Math.floor(numeric)));
-}
-
-function normalizeDepthPreset(input) {
-  const value = String(input || '').trim().toLowerCase();
-  if (value && RESEARCH_DEPTH_PRESETS[value]) return value;
-  return DEFAULT_DEPTH_PRESET;
-}
-
-function normalizeResearchSettings(rawSettings = {}) {
-  const preset = normalizeDepthPreset(rawSettings?.depthPreset);
-  const base = RESEARCH_DEPTH_PRESETS[preset];
-  const providerOrder = Array.isArray(rawSettings?.searchProviderOrder)
-    ? rawSettings.searchProviderOrder
-    : String(rawSettings?.searchProviderOrder || '')
-      .split(/[,|]/)
-      .map((item) => String(item || '').trim().toLowerCase())
-      .filter(Boolean);
+function resolveSettings(input = {}) {
+  const presetKey = String(input.depth || input.preset || 'standard').toLowerCase();
+  const preset = DEPTH_PRESETS[presetKey] || DEPTH_PRESETS.standard;
   return {
-    ...base,
-    depthPreset: preset,
-    strictTopicMatching: rawSettings?.strictTopicMatching !== false,
-    minRuntimeMinutes: clampInt(rawSettings?.minRuntimeMinutes, base.minRuntimeMinutes, 1, 720),
-    minDiscoveredCandidates: clampInt(rawSettings?.minDiscoveredCandidates, base.minDiscoveredCandidates, 10, 50000),
-    minSearchesIssued: clampInt(rawSettings?.minSearchesIssued, base.minSearchesIssued, 1, 20000),
-    minVerifiedRecords: clampInt(rawSettings?.minVerifiedRecords, base.minVerifiedRecords, 0, 10000),
-    maxSearchResultsPerQuery: clampInt(rawSettings?.maxSearchResultsPerQuery, base.maxSearchResultsPerQuery, 5, 120),
-    maxDiscoverDepth: clampInt(rawSettings?.maxDiscoverDepth, base.maxDiscoverDepth, 1, 12),
-    maxFollowUpsPerQuery: clampInt(rawSettings?.maxFollowUpsPerQuery, base.maxFollowUpsPerQuery, 0, 12),
-    seedQueryLimit: clampInt(rawSettings?.seedQueryLimit, base.seedQueryLimit, 5, 80),
-    convergenceThreshold: clampInt(rawSettings?.convergenceThreshold, base.convergenceThreshold, 3, 40),
-    minTopicRelevanceScore: Math.max(1, Math.min(20, Number(rawSettings?.minTopicRelevanceScore || base.minTopicRelevanceScore))),
-    enableFinalSynthesis: rawSettings?.enableFinalSynthesis !== false,
-    synthesisRecordLimit: clampInt(rawSettings?.synthesisRecordLimit, 120, 20, 400),
-    searchProviderOrder: Array.from(new Set(providerOrder)).filter((provider) =>
-      ['brave', 'serper', 'searxng', 'bing', 'duckduckgo'].includes(provider)
-    ),
-    searxngUrl: String(rawSettings?.searxngUrl || '').trim(),
+    ...preset,
+    depth: presetKey,
+    maxQueries: Number(input.maxQueries || preset.maxQueries),
+    maxSourcesRead: Number(input.maxSourcesRead || preset.maxSourcesRead),
+    maxRuntimeMinutes: Number(input.maxRuntimeMinutes || preset.maxRuntimeMinutes),
+    maxFollowUpDepth: Number(input.maxFollowUpDepth || preset.maxFollowUpDepth),
+    convergenceThreshold: Number(input.convergenceThreshold || preset.convergenceThreshold),
+    topResultsPerQuery: Number(input.topResultsPerQuery || preset.topResultsPerQuery),
+    analyzeMaxContentChars: Number(input.analyzeMaxContentChars || preset.analyzeMaxContentChars),
+    providerOrder: input.providerOrder || null,
+    searxngUrl: input.searxngUrl || '',
   };
 }
 
-function escapeRegex(value = '') {
-  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-function tokenizeText(input = '', { minLen = 3, limit = 40 } = {}) {
-  const words = String(input || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]+/g, ' ')
-    .split(/\s+/)
-    .map((word) => normalizeTopicToken(word.trim()))
-    .filter((word) => word.length >= minLen)
-    .filter((word) => !TOPIC_STOPWORDS.has(word))
-    .filter((word) => !QUERY_NOISE_TERMS.has(word));
-  const seen = new Set();
-  const output = [];
-  for (const word of words) {
-    if (seen.has(word)) continue;
-    seen.add(word);
-    output.push(word);
-    if (output.length >= limit) break;
-  }
-  return output;
-}
-
-function containsToken(haystack = '', token = '') {
-  const text = String(haystack || '').toLowerCase();
-  const needle = String(token || '').toLowerCase().trim();
-  if (!text || !needle) return false;
-  const parts = needle
-    .split(/\s+/)
-    .map((item) => item.trim())
-    .filter(Boolean);
-  if (parts.length === 0) return false;
-  if (parts.length === 1) {
-    return new RegExp(`\\b${escapeRegex(parts[0])}\\b`, 'i').test(text);
-  }
-  const pattern = parts.map((part) => escapeRegex(part)).join('[\\s\\-_\\/]+');
-  return new RegExp(`\\b${pattern}\\b`, 'i').test(text);
-}
-
-function extractStateTokens(text = '') {
-  const raw = String(text || '');
-  const haystack = raw.toLowerCase();
-  const explicitCodes = new Set(extractExplicitStateCodes(raw));
-  const tokens = new Set();
-  for (const [stateName, code] of US_STATE_ALIASES) {
-    const codeToken = String(code || '').toLowerCase();
-    if (containsToken(haystack, stateName) || explicitCodes.has(codeToken)) {
-      tokens.add(stateName);
-      tokens.add(codeToken);
-    }
-  }
-  return Array.from(tokens);
-}
-
-function buildTopicProfile({ objective = '', runInstructions = '', promptSnapshot = {} } = {}) {
-  const objectiveText = String(objective || '').trim();
-  const instructionsText = [
-    String(runInstructions || ''),
-    String(promptSnapshot?.permanentInstructions || ''),
-  ].join(' ');
-  const locationHint = extractLocationHint(objectiveText) || extractLocationHint(instructionsText);
-  const objectiveTokens = tokenizeText(objectiveText, { minLen: 3, limit: 26 });
-  const instructionTokens = tokenizeText(instructionsText, { minLen: 4, limit: 16 });
-  const combinedTokens = Array.from(new Set([...objectiveTokens, ...instructionTokens]));
-  const seededDomainTerms = Array.from(new Set(
-    TOPIC_DOMAIN_TERMS.filter((term) => containsToken(combinedTokens.join(' '), term))
-  ));
-  const inferredDomainTerms = Array.from(new Set(
-    [...objectiveTokens, ...instructionTokens]
-      .map((token) => normalizeTopicToken(token))
-      .filter((token) => token.length >= 4)
-      .filter((token) => !QUERY_NOISE_TERMS.has(token))
-  ));
-  const effectiveDomainTerms = Array.from(new Set([...seededDomainTerms, ...inferredDomainTerms])).slice(0, 20);
-  const locationTokens = Array.from(new Set([
-    ...extractStateTokens(`${objectiveText} ${instructionsText}`),
-    ...tokenizeText(locationHint, { minLen: 2, limit: 8 }),
-  ]));
-
-  return {
-    objectiveText,
-    locationHint: locationHint || '',
-    objectiveTokens,
-    instructionTokens,
-    locationTokens,
-    domainTerms: effectiveDomainTerms,
-    broadTerms: combinedTokens,
-    excludeTerms: TOPIC_EXCLUDE_TERMS,
-  };
-}
-
-function scoreTopicRelevance(candidate = {}, topicProfile = {}, settings = {}) {
-  const title = String(candidate.title || '').trim();
-  const snippet = String(candidate.snippet || '').trim();
-  const url = String(candidate.url || '').trim();
-  const content = String(candidate.content || '').trim();
-  const haystack = [title, snippet, url, content].filter(Boolean).join(' ').toLowerCase();
-
-  const objectiveMatches = (topicProfile.objectiveTokens || []).filter((token) => containsToken(haystack, token));
-  const domainMatches = (topicProfile.domainTerms || []).filter((token) => containsToken(haystack, token));
-  const locationMatches = (topicProfile.locationTokens || []).filter((token) => containsToken(haystack, token));
-  const excludeMatches = (topicProfile.excludeTerms || []).filter((token) => containsToken(haystack, token));
-
-  let score = 0;
-  score += Math.min(objectiveMatches.length, 10) * 1.2;
-  score += Math.min(domainMatches.length, 8) * 2.4;
-  score += Math.min(locationMatches.length, 4) * 1.8;
-  score -= Math.min(excludeMatches.length, 4) * 3.5;
-
-  const hasDomainIntent = domainMatches.length > 0;
-  const hasObjectiveSignal = objectiveMatches.length > 0 || locationMatches.length > 0;
-  const strictTopicMatching = settings?.strictTopicMatching !== false;
-  const domainTermCount = Array.isArray(topicProfile?.domainTerms) ? topicProfile.domainTerms.length : 0;
-  const requireDomainIntent = strictTopicMatching && domainTermCount > 0;
-  const minScore = Number(settings?.minTopicRelevanceScore || 4.5);
-
-  let isRelevant = score >= minScore;
-  if (strictTopicMatching) {
-    if (requireDomainIntent && !hasDomainIntent) isRelevant = false;
-    if (!hasObjectiveSignal) isRelevant = false;
-  }
-  if (excludeMatches.length > 0 && (!requireDomainIntent || !hasDomainIntent)) {
-    isRelevant = false;
-  }
-
-  return {
-    isRelevant,
-    score: Number(score.toFixed(2)),
-    objectiveMatches,
-    domainMatches,
-    locationMatches,
-    excludeMatches,
-    reason: isRelevant
-      ? 'topic_relevant'
-      : excludeMatches.length > 0
-        ? 'excluded_off_topic'
-        : 'insufficient_topic_relevance',
-  };
-}
-
-function humanizeReason(reason = '') {
-  const text = String(reason || '').trim();
-  if (!text) return '';
-  return text
-    .replace(/^retry_\d+:/, '')
-    .replace(/[_-]+/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function formatPhaseLabel(phase = '') {
-  const value = String(phase || '').trim();
-  if (!value) return 'Task';
-  if (value === 'official_verify') return 'Official Verify';
-  if (value === 'extract_fields') return 'Extract Fields';
-  if (value === 'evidence_validate') return 'Evidence Validate';
-  return value
-    .split('_')
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
-    .join(' ');
-}
+/* ------------------------------------------------------------------ */
+/*  Stats skeleton                                                     */
+/* ------------------------------------------------------------------ */
 
 function buildStatsSkeleton() {
   return {
-    searchesIssued: 0,
     discoveredCandidates: 0,
-    verifiedOfficialCandidates: 0,
-    pagesFetched: 0,
-    extractedRecords: 0,
-    validatedRecords: 0,
     verifiedSaved: 0,
-    rejectedBlocked: 0,
     rejectedNonOfficial: 0,
+    rejectedBlocked: 0,
     rejectedIrrelevant: 0,
-    deduped: 0,
+    droppedFindings: 0,
+    skippedReads: 0,
+    searchesIssued: 0,
+    resultsFound: 0,
+    sourcesRead: 0,
+    sourcesFailed: 0,
+    analyzeCalls: 0,
+    findingsExtracted: 0,
+    followUpQueriesGenerated: 0,
     errors: 0,
     lastError: null,
   };
 }
 
-function truncateText(input = '', maxLen = 240) {
-  const text = String(input || '').replace(/\s+/g, ' ').trim();
-  if (!text) return '';
-  if (text.length <= maxLen) return text;
-  return `${text.slice(0, Math.max(0, maxLen - 3))}...`;
+const QUERY_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'from', 'into', 'about', 'that', 'this', 'those', 'these', 'their',
+  'there', 'where', 'when', 'what', 'which', 'using', 'used', 'use', 'find', 'verify', 'collect',
+  'enough', 'detail', 'both', 'across', 'latest', 'information', 'official', 'source', 'sources',
+  'truth', 'page', 'pages', 'website', 'websites', 'program', 'programs', 'research',
+]);
+
+const QUERY_NOISE_PHRASES = [
+  'source of truth',
+  'collect enough detail',
+  'family-facing write-ups',
+  'clinical dossier records',
+  'use official program websites',
+  'official pages',
+];
+
+const NON_OFFICIAL_REFERENCE_DOMAINS = [
+  'wikipedia.org',
+  'wikidata.org',
+  'wikivoyage.org',
+  'britannica.com',
+  'fandom.com',
+];
+
+const GEORGIA_COUNTRY_CUES = [
+  'country of georgia',
+  'republic of georgia',
+  'georgian language',
+  'caucasus',
+  'tbilisi',
+  'black sea',
+  'eurasia',
+];
+
+const GEORGIA_US_CUES = [
+  'georgia',
+  'atlanta',
+  'savannah',
+  'augusta',
+  'macon',
+  'county',
+  'state',
+  'usa',
+  'united',
+  'states',
+  'ga',
+];
+
+const HEALTHCARE_PROGRAM_TERMS = [
+  'residential',
+  'treatment',
+  'program',
+  'programs',
+  'therapy',
+  'clinical',
+  'behavioral',
+  'mental',
+  'health',
+  'adolescent',
+  'adolescents',
+  'teen',
+  'teens',
+  'youth',
+  'facility',
+  'facilities',
+  'family',
+  'families',
+];
+
+function tokenizeTerms(text = '', minLen = 2) {
+  return String(text || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= minLen);
 }
 
-function firstDefinedField(record = {}, keys = []) {
-  for (const key of keys) {
-    const value = record?.[key];
-    if (Array.isArray(value)) {
-      const joined = value.map((item) => String(item || '').trim()).filter(Boolean).join(', ');
-      if (joined) return joined;
+function toTokenSet(text = '', minLen = 2) {
+  return new Set(tokenizeTerms(text, minLen));
+}
+
+function hasAnyToken(tokenSet, terms = []) {
+  if (!(tokenSet instanceof Set) || tokenSet.size === 0) return false;
+  if (!Array.isArray(terms) || terms.length === 0) return false;
+  for (const term of terms) {
+    const normalized = String(term || '').toLowerCase().trim();
+    if (!normalized) continue;
+    if (tokenSet.has(normalized)) return true;
+  }
+  return false;
+}
+
+function countKeywordOverlap(tokenSet, keywords = []) {
+  if (!(tokenSet instanceof Set) || tokenSet.size === 0) return 0;
+  if (!Array.isArray(keywords) || keywords.length === 0) return 0;
+  const tokenList = Array.from(tokenSet);
+  let overlap = 0;
+  for (const keyword of keywords) {
+    const normalized = String(keyword || '').toLowerCase().trim();
+    if (!normalized) continue;
+    if (tokenSet.has(normalized)) {
+      overlap += 1;
       continue;
     }
-    const text = String(value || '').trim();
-    if (text) return text;
-  }
-  return '';
-}
-
-function buildFallbackSynthesisMarkdown({ runState, records = [], goals = null } = {}) {
-  const stats = runState?.stats || {};
-  const goalProgress = goals || runState?.goalProgress || null;
-  const lines = [];
-  lines.push('# Final Research Synthesis');
-  lines.push('');
-  lines.push('## Objective');
-  lines.push(String(runState?.objective || 'Not provided'));
-  lines.push('');
-  lines.push('## Coverage Metrics');
-  lines.push(`- Discovered candidates: ${Number(stats.discoveredCandidates || 0)}`);
-  lines.push(`- Searches issued: ${Number(stats.searchesIssued || 0)}`);
-  lines.push(`- Verified records saved: ${Number(stats.verifiedSaved || 0)}`);
-  lines.push(`- Rejected (non-official): ${Number(stats.rejectedNonOfficial || 0)}`);
-  lines.push(`- Rejected (blocked): ${Number(stats.rejectedBlocked || 0)}`);
-  lines.push(`- Rejected (irrelevant): ${Number(stats.rejectedIrrelevant || 0)}`);
-  if (goalProgress?.current?.elapsedMinutes !== undefined) {
-    lines.push(`- Runtime minutes: ${Math.floor(Number(goalProgress.current.elapsedMinutes || 0))}`);
-  }
-  lines.push('');
-  lines.push(`## Verified Records (${records.length})`);
-  if (records.length === 0) {
-    lines.push('- None');
-  } else {
-    for (const item of records) {
-      const record = item.record || {};
-      const name = String(record.name || item.canonicalKey || item.canonical_key || item.id || 'Unnamed record').trim();
-      const url = String(record.official_url || item.verifiedOfficialUrl || item.verified_official_url || '').trim() || 'Not stated on official site';
-      const location = firstDefinedField(record, ['city_state', 'location', 'city']) || [
-        String(record.city || '').trim(),
-        String(record.state || '').trim(),
-      ].filter(Boolean).join(', ') || 'Not stated on official site';
-      const summary = firstDefinedField(record, ['summary', 'description', 'focus', 'program_description']) || 'Unknown from provided sources';
-      const keyDetails = firstDefinedField(record, ['category', 'status', 'services', 'level_of_care', 'notes']);
-      lines.push(`- **${name}**`);
-      lines.push(`  - Source URL: ${url}`);
-      lines.push(`  - Location: ${location}`);
-      lines.push(`  - Summary: ${truncateText(summary, 220)}`);
-      if (keyDetails) lines.push(`  - Key details: ${truncateText(keyDetails, 180)}`);
+    // Handle light morphology drift (for example: "postgre" vs "postgresql").
+    if (normalized.length >= 5) {
+      const fuzzyMatch = tokenList.some((token) => (
+        token.startsWith(normalized) || normalized.startsWith(token)
+      ));
+      if (fuzzyMatch) overlap += 1;
     }
   }
+  return overlap;
+}
+
+function containsAnyPhrase(text = '', phrases = []) {
+  const haystack = String(text || '').toLowerCase();
+  if (!haystack) return false;
+  for (const phrase of phrases) {
+    const needle = String(phrase || '').toLowerCase().trim();
+    if (!needle) continue;
+    if (haystack.includes(needle)) return true;
+  }
+  return false;
+}
+
+function extractKeywords(text = '', limit = 14) {
+  const keywords = [];
+  const seen = new Set();
+  for (const token of tokenizeTerms(text, 3)) {
+    if (QUERY_STOPWORDS.has(token)) continue;
+    const normalized = token;
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    keywords.push(normalized);
+    if (keywords.length >= limit) break;
+  }
+  return keywords;
+}
+
+function isLikelyNonOfficialReferenceDomain(domain = '') {
+  const normalized = normalizeDomain(domain);
+  if (!normalized) return false;
+  return NON_OFFICIAL_REFERENCE_DOMAINS.some((candidate) => {
+    return normalized === candidate || normalized.endsWith(`.${candidate}`);
+  });
+}
+
+function buildIntentProfile(question = '', projectContext = {}, sourcePolicy = {}) {
+  const project = normalizeProjectContext(projectContext);
+  const contextText = [project.permanentInstructions, project.runInstructions]
+    .filter(Boolean)
+    .join('\n');
+  const fullText = `${String(question || '')}\n${contextText}`.toLowerCase();
+  const mode = String(sourcePolicy?.mode || '').toLowerCase();
+
+  const requiresOfficial = Boolean(sourcePolicy?.requireOfficial)
+    || mode.includes('official')
+    || /\bofficial\b/.test(fullText)
+    || /\bsource of truth\b/.test(fullText)
+    || /\bverify\b|\bverified\b/.test(fullText);
+
+  const focusTerms = HEALTHCARE_PROGRAM_TERMS.filter((term) => fullText.includes(term));
+  const questionKeywords = extractKeywords(question, 16);
+  const minimumKeywordOverlap = questionKeywords.length >= 4 ? 1 : 0;
+  const georgiaMentioned = /\bgeorgia\b/.test(fullText);
+  const hasClinicalContext = hasAnyToken(toTokenSet(fullText, 2), HEALTHCARE_PROGRAM_TERMS);
+  const georgiaCountryIntent = containsAnyPhrase(fullText, GEORGIA_COUNTRY_CUES);
+  const usGeorgiaIntent = georgiaMentioned && hasClinicalContext && !georgiaCountryIntent;
+
+  return {
+    requiresOfficial,
+    questionKeywords,
+    minimumKeywordOverlap,
+    focusTerms: Array.from(new Set(focusTerms)),
+    usGeorgiaIntent,
+  };
+}
+
+function isRelevantToIntent(text = '', intent = {}) {
+  const raw = String(text || '').trim();
+  if (!raw) return false;
+  const lower = raw.toLowerCase();
+  const tokens = toTokenSet(lower, 2);
+
+  if (intent.usGeorgiaIntent) {
+    const hasCountryCue = containsAnyPhrase(lower, GEORGIA_COUNTRY_CUES);
+    const hasUsCue = hasAnyToken(tokens, GEORGIA_US_CUES);
+    const hasProgramCue = hasAnyToken(tokens, HEALTHCARE_PROGRAM_TERMS);
+    if (hasCountryCue && !hasUsCue && !hasProgramCue) {
+      return false;
+    }
+  }
+
+  if (Array.isArray(intent.focusTerms) && intent.focusTerms.length > 0) {
+    if (!hasAnyToken(tokens, intent.focusTerms)) {
+      return false;
+    }
+  }
+
+  const overlap = countKeywordOverlap(tokens, intent.questionKeywords || []);
+  if (Number(intent.minimumKeywordOverlap || 0) > 0 && overlap < intent.minimumKeywordOverlap) {
+    return false;
+  }
+
+  return true;
+}
+
+function applyIntentToQuery(rawQuery = '', intent = {}) {
+  let query = String(rawQuery || '').replace(/\s+/g, ' ').trim();
+  if (!query) return '';
+
+  for (const phrase of QUERY_NOISE_PHRASES) {
+    const pattern = new RegExp(phrase, 'ig');
+    query = query.replace(pattern, ' ');
+  }
+  query = query.replace(/\s+/g, ' ').trim();
+  if (!query) return '';
+
+  const lower = query.toLowerCase();
+  if (intent.requiresOfficial && !/\bofficial\b|\bprimary source\b|\bsource of truth\b|\bwebsite\b/.test(lower)) {
+    query = `${query} official website`;
+  }
+
+  if (intent.usGeorgiaIntent && /\bgeorgia\b/i.test(query) && !/\bgeorgia state\b|\bunited states\b|\busa\b|\bga\b/i.test(lower)) {
+    query = `${query} Georgia state United States`;
+  }
+  if (intent.usGeorgiaIntent) {
+    if (!/-country/i.test(query)) query = `${query} -country`;
+    if (!/-tbilisi/i.test(query)) query = `${query} -Tbilisi`;
+    if (!/-caucasus/i.test(query)) query = `${query} -Caucasus`;
+  }
+
+  if (Array.isArray(intent.focusTerms) && intent.focusTerms.length > 0) {
+    const queryTokens = toTokenSet(query, 2);
+    if (!hasAnyToken(queryTokens, intent.focusTerms)) {
+      query = `${query} ${intent.focusTerms.slice(0, 3).join(' ')}`;
+    }
+  }
+
+  return query.replace(/\s+/g, ' ').trim();
+}
+
+function normalizeQueryCandidate(query = '', maxLen = 180) {
+  const compact = String(query || '')
+    .replace(/[\r\n\t]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/^["'`]+|["'`]+$/g, '')
+    .trim();
+  if (!compact) return '';
+  if (compact.length <= maxLen) return compact;
+  const clipped = compact.slice(0, maxLen);
+  return clipped.replace(/\s+\S*$/, '').trim() || clipped.trim();
+}
+
+function buildCoreQuestionQuery(question = '', intent = {}) {
+  const raw = String(question || '').trim();
+  if (!raw) return '';
+  const firstSentence = raw.split(/[.?!\n]/).map((item) => item.trim()).find(Boolean) || raw;
+  const tokens = tokenizeTerms(firstSentence, 2);
+  const picked = [];
+  const seen = new Set();
+  for (const token of tokens) {
+    if (QUERY_STOPWORDS.has(token)) continue;
+    if (seen.has(token)) continue;
+    seen.add(token);
+    picked.push(token);
+    if (picked.length >= 12) break;
+  }
+  let base = picked.join(' ').trim() || firstSentence;
+  if (intent.usGeorgiaIntent && /\bgeorgia\b/i.test(base) && !/\bstate\b|\busa\b|\bunited states\b/i.test(base)) {
+    base = `${base} georgia state united states`;
+  }
+  return normalizeQueryCandidate(base, 120);
+}
+
+function scoreFindingRelevance(text = '', intent = {}) {
+  const raw = String(text || '').trim();
+  if (!raw) return 0;
+  const lower = raw.toLowerCase();
+  const tokens = toTokenSet(lower, 2);
+  let score = 0.25;
+
+  if (isRelevantToIntent(raw, intent)) score += 0.45;
+
+  const overlap = countKeywordOverlap(tokens, intent.questionKeywords || []);
+  const keywordTarget = Math.max(1, Number(intent.minimumKeywordOverlap || 0));
+  score += Math.min(0.2, (overlap / keywordTarget) * 0.1);
+
+  if (Array.isArray(intent.focusTerms) && intent.focusTerms.length > 0) {
+    if (hasAnyToken(tokens, intent.focusTerms)) score += 0.1;
+  }
+
+  return Math.max(0, Math.min(1, Number(score.toFixed(2))));
+}
+
+function buildStageStatus() {
+  const stageStatus = {};
+  for (const stageId of STAGE_IDS) {
+    stageStatus[stageId] = {
+      stageId,
+      status: 'pending', // pending | running | completed | failed | blocked
+      pass: null,
+      attempts: 0,
+      updatedAt: null,
+      reason: '',
+    };
+  }
+  return stageStatus;
+}
+
+function ensureStageStatusShape(input = {}) {
+  const next = buildStageStatus();
+  if (!input || typeof input !== 'object') return next;
+  for (const stageId of STAGE_IDS) {
+    const candidate = input[stageId];
+    if (!candidate || typeof candidate !== 'object') continue;
+    next[stageId] = {
+      stageId,
+      status: String(candidate.status || 'pending'),
+      pass: typeof candidate.pass === 'boolean' ? candidate.pass : null,
+      attempts: Math.max(0, Number(candidate.attempts || 0)),
+      updatedAt: candidate.updatedAt || null,
+      reason: String(candidate.reason || ''),
+    };
+  }
+  return next;
+}
+
+function scoreRunRelevance(findings = []) {
+  if (!Array.isArray(findings) || findings.length === 0) return 0;
+  const values = findings
+    .map((finding) => Number(finding?.relevanceScore || 0))
+    .filter((value) => Number.isFinite(value) && value > 0);
+  if (values.length === 0) return 0;
+  const total = values.reduce((acc, value) => acc + value, 0);
+  return Number((total / values.length).toFixed(2));
+}
+
+function buildJurisdictionTokenSet(jurisdiction = '') {
+  return new Set(
+    String(jurisdiction || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, ' ')
+      .split(/\s+/)
+      .map((token) => token.trim())
+      .filter((token) => token.length >= 2)
+  );
+}
+
+function scoreJurisdictionMatch(runState = {}) {
+  const jurisdiction = String(runState.jurisdiction || '').trim().toLowerCase();
+  const findings = Array.isArray(runState.findings) ? runState.findings : [];
+  if (!jurisdiction || jurisdiction === 'auto') {
+    if (runState.intentProfile?.usGeorgiaIntent) {
+      const total = findings.length;
+      if (total === 0) return 0;
+      let hits = 0;
+      for (const finding of findings) {
+        const text = String(finding?.text || '').toLowerCase();
+        const hasUsGeorgiaCue = /\bgeorgia\b/.test(text) && /\bstate\b|\batlanta\b|\bunited states\b|\busa\b/.test(text);
+        const hasCountryCue = /\bcaucasus\b|\btbilisi\b|\bblack sea\b/.test(text);
+        if (hasUsGeorgiaCue && !hasCountryCue) hits += 1;
+      }
+      return Number((hits / total).toFixed(2));
+    }
+    return null;
+  }
+
+  const jurisdictionTokens = buildJurisdictionTokenSet(jurisdiction);
+  if (jurisdictionTokens.size === 0 || findings.length === 0) return 0;
+
+  let matched = 0;
+  for (const finding of findings) {
+    const tokens = toTokenSet(String(finding?.text || ''), 2);
+    const hasMatch = Array.from(jurisdictionTokens).some((token) => tokens.has(token));
+    if (hasMatch) matched += 1;
+  }
+  return Number((matched / findings.length).toFixed(2));
+}
+
+function buildQualityGate(runState = {}, quality = null) {
+  const metrics = quality || buildRunQuality(runState);
+  const stageStatus = ensureStageStatusShape(runState.stageStatus || {});
+  const stageFailures = STAGE_IDS
+    .map((stageId) => stageStatus[stageId])
+    .filter((stage) => stage && stage.pass === false)
+    .map((stage) => stage.stageId);
+
+  const reasons = [];
+  if ((metrics.score || 0) < 70) reasons.push('quality_score_below_threshold');
+  if (Array.isArray(metrics.issues) && metrics.issues.length > 0) reasons.push(...metrics.issues);
+  if (stageFailures.length > 0) reasons.push(...stageFailures.map((item) => `stage_failed:${item}`));
+
+  return {
+    passed: reasons.length === 0,
+    score: Number(metrics.score || 0),
+    threshold: 70,
+    reasons,
+    stageStatus,
+  };
+}
+
+function buildIntentAndAssumptions(question = '', intent = '', jurisdiction = '') {
+  const assumptions = [];
+  const normalizedIntent = String(intent || '').trim() || String(question || '').trim();
+  const normalizedJurisdiction = String(jurisdiction || '').trim() || 'auto';
+
+  const lowerQuestion = String(question || '').toLowerCase();
+  const mentionsGeorgia = /\bgeorgia\b/.test(lowerQuestion);
+  const mentionsUs = /\busa\b|\bunited states\b|\bstate\b|\batlanta\b/.test(lowerQuestion);
+  const mentionsCountry = /\bcountry\b|\bcaucasus\b|\btbilisi\b|\bblack sea\b/.test(lowerQuestion);
+
+  if (mentionsGeorgia && !mentionsUs && !mentionsCountry && normalizedJurisdiction === 'auto') {
+    assumptions.push({
+      code: 'ambiguous_georgia_disambiguated_to_us_state',
+      text: 'Interpreted "Georgia" as Georgia state, United States due to program/clinical context.',
+      createdAt: nowIso(),
+    });
+  }
+
+  if (normalizedJurisdiction === 'auto') {
+    assumptions.push({
+      code: 'jurisdiction_auto_resolution',
+      text: 'Jurisdiction resolved automatically from the research objective and context.',
+      createdAt: nowIso(),
+    });
+  }
+
+  return {
+    intent: normalizedIntent,
+    jurisdiction: normalizedJurisdiction,
+    assumptions,
+  };
+}
+
+function buildRunQuality(runState = {}) {
+  const state = runState || {};
+  const stats = state.stats || {};
+  const sources = Array.isArray(state.sourcesRead) ? state.sourcesRead : [];
+  const findings = Array.isArray(state.findings) ? state.findings : [];
+  const sourceCount = sources.length;
+  const findingCount = findings.length;
+  const officialSources = sources.filter((source) => source.isOfficial).length;
+  const trustedSources = sources.filter((source) => ['authoritative', 'secondary', 'high', 'standard'].includes(String(source.sourceTier || ''))).length;
+  const citedFindings = findings.filter((finding) => String(finding.sourceUrl || '').trim().length > 0).length;
+  const rejectedTotal = Number(stats.rejectedBlocked || 0) + Number(stats.rejectedNonOfficial || 0) + Number(stats.rejectedIrrelevant || 0);
+  const reviewedTotal = sourceCount + rejectedTotal;
+  const rejectionRate = reviewedTotal > 0 ? rejectedTotal / reviewedTotal : 0;
+  const officialRatio = sourceCount > 0 ? officialSources / sourceCount : 0;
+  const trustedRatio = sourceCount > 0 ? trustedSources / sourceCount : 0;
+  const citationCoverage = findingCount > 0 ? citedFindings / findingCount : 0;
+
+  let score = 100;
+  score -= Math.round(rejectionRate * 35);
+  score += Math.round(trustedRatio * 12);
+  score += Math.round(citationCoverage * 8);
+  if (state.sourcePolicy?.requireOfficial) {
+    score += Math.round(officialRatio * 10);
+  }
+  if (sourceCount < 3) score -= 12;
+  if (findingCount === 0) score -= 20;
+  score = Math.max(0, Math.min(100, score));
+
+  const grade = score >= 85 ? 'A' : score >= 70 ? 'B' : score >= 55 ? 'C' : score >= 40 ? 'D' : 'F';
+  const issues = [];
+  if (state.sourcePolicy?.requireOfficial && officialRatio < 0.35) issues.push('low_official_source_ratio');
+  if (rejectionRate > 0.6) issues.push('high_rejection_rate');
+  if (citationCoverage < 0.7 && findingCount > 0) issues.push('low_citation_coverage');
+  if ((state.policyViolations || []).length > 0) issues.push('policy_violations_detected');
+  if (findingCount === 0) issues.push('no_findings');
+
+  return {
+    score,
+    grade,
+    sourceCount,
+    findingCount,
+    officialSources,
+    trustedSources,
+    citationCoverage: Number(citationCoverage.toFixed(2)),
+    rejectionRate: Number(rejectionRate.toFixed(2)),
+    issues,
+  };
+}
+
+function tuneQueriesForIntent(queries = [], intent = {}, maxCount = 20) {
+  const output = [];
+  const seen = new Set();
+  for (const item of queries) {
+    const tuned = normalizeQueryCandidate(applyIntentToQuery(item, intent), 180);
+    if (!tuned) continue;
+    if (tuned.length < 3) continue;
+    const key = tuned.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(tuned);
+    if (output.length >= maxCount) break;
+  }
+  return output;
+}
+
+/* ------------------------------------------------------------------ */
+/*  LLM prompt builders                                                */
+/* ------------------------------------------------------------------ */
+
+function buildPlanPrompt(question, projectContext = {}) {
+  const contextSection = buildProjectContextSection(projectContext, { includeDigests: true, digestChars: 1500 });
+  const lines = [
+    'You are a research assistant. Your job is to generate search queries that will help answer a research question thoroughly.',
+    '',
+    `Research question: "${question}"`,
+  ];
+  if (contextSection) {
+    lines.push('');
+    lines.push(contextSection);
+    lines.push('');
+    lines.push('Use the project context above as hard guidance when forming queries.');
+  }
   lines.push('');
-  lines.push('## Notes');
-  lines.push('- This synthesis was generated from verified record rows and official-source evidence gates.');
-  lines.push('- For missing fields, use "Unknown from provided sources" and do not infer beyond source data.');
+  lines.push('Generate 8-15 diverse web search queries that will help answer this question comprehensively.');
+  lines.push('Cover different angles, sub-topics, and perspectives.');
+  lines.push('Keep each query concise (4-14 words), specific, and disambiguated when geography/entity names are ambiguous.');
+  lines.push('Prioritize first-party or official pages over encyclopedic summaries.');
+  lines.push('Output ONLY a JSON array of query strings, nothing else.');
+  lines.push('');
+  lines.push('Example output:');
+  lines.push('["query one", "query two", "query three"]');
   return lines.join('\n');
 }
 
-function buildIntermediateSummaryText({ runState, recentRecords = [] } = {}) {
-  const stats = runState?.stats || {};
-  const goal = runState?.goalProgress || null;
-  const lines = [];
-  lines.push('Progress update');
-  lines.push(`- Searches issued: ${Number(stats.searchesIssued || 0)}`);
-  lines.push(`- Candidates discovered: ${Number(stats.discoveredCandidates || 0)}`);
-  lines.push(`- Official pages fetched: ${Number(stats.pagesFetched || 0)}`);
-  lines.push(`- Verified records saved: ${Number(stats.verifiedSaved || 0)}`);
-  if (goal?.current?.elapsedMinutes !== undefined) {
-    lines.push(`- Runtime: ${Math.floor(Number(goal.current.elapsedMinutes || 0))} minutes`);
+function buildAnalyzePrompt(pageContent, question, existingFindingsCount, projectContext = {}) {
+  const content = compactText(pageContent, 12000);
+  const contextSection = buildProjectContextSection(projectContext, { includeDigests: false });
+  const lines = [
+    'You are a research analyst. Extract key findings from the page content below that are relevant to the research question.',
+    '',
+    `Research question: "${question}"`,
+    `Findings collected so far: ${existingFindingsCount}`,
+  ];
+  if (contextSection) {
+    lines.push('');
+    lines.push(contextSection);
+    lines.push('');
+    lines.push('Follow these project instructions while extracting findings.');
   }
-  if (Array.isArray(recentRecords) && recentRecords.length > 0) {
-    lines.push('- Most recent verified records:');
-    for (const row of recentRecords.slice(0, 4)) {
-      const record = row.record || {};
-      const name = String(record.name || row.canonicalKey || row.canonical_key || '').trim() || 'Unnamed record';
-      const location = [String(record.city || '').trim(), String(record.state || '').trim()].filter(Boolean).join(', ');
-      const url = String(record.official_url || row.verifiedOfficialUrl || row.verified_official_url || '').trim();
-      const parts = [name];
-      if (location) parts.push(location);
-      if (url) parts.push(url);
-      lines.push(`  - ${parts.join(' | ')}`);
-    }
-  }
+  lines.push('');
+  lines.push('Page content:');
+  lines.push('---');
+  lines.push(content);
+  lines.push('---');
+  lines.push('');
+  lines.push('Extract relevant findings and suggest follow-up search queries for knowledge gaps.');
+  lines.push('Output ONLY valid JSON in this exact format:');
+  lines.push('{');
+  lines.push('  "findings": [{"text": "key finding text", "category": "fact"}],');
+  lines.push('  "followUpQueries": ["follow-up query if gaps exist"]');
+  lines.push('}');
+  lines.push('');
+  lines.push('Categories: fact, statistic, opinion, definition, comparison, example, recommendation');
+  lines.push('If the page is not relevant, return: {"findings": [], "followUpQueries": []}');
+  lines.push('Keep each finding concise (1-2 sentences). Include 0-3 follow-up queries only if there are clear gaps.');
   return lines.join('\n');
 }
+
+function buildProgressSummary(question, findings, sourcesCount, searchesCount, projectContext = {}) {
+  const topFindings = findings.slice(-6).map((f) => `- ${compactText(f.text, 120)}`).join('\n');
+  const contextSection = buildProjectContextSection(projectContext, { includeDigests: false });
+  const lines = [
+    'You are a research assistant providing a brief progress update.',
+    '',
+    `Research question: "${question}"`,
+    `Sources read: ${sourcesCount}`,
+    `Searches issued: ${searchesCount}`,
+    `Findings so far: ${findings.length}`,
+  ];
+  if (contextSection) {
+    lines.push('');
+    lines.push(contextSection);
+  }
+  lines.push('');
+  lines.push('Recent findings:');
+  lines.push(topFindings || '(none yet)');
+  lines.push('');
+  lines.push('Write a 2-3 sentence progress summary of what has been found so far and what is still being investigated.');
+  lines.push('Be conversational and informative. Output only the summary text, nothing else.');
+  return lines.join('\n');
+}
+
+function buildReportPrompt(question, findings, projectContext = {}) {
+  const findingRows = findings.map((f, i) => {
+    const src = f.sourceDomain ? ` [Source: ${f.sourceDomain}]` : '';
+    return `${i + 1}. ${f.text}${src}`;
+  }).join('\n');
+  const contextSection = buildProjectContextSection(projectContext, { includeDigests: true, digestChars: 1800 });
+
+  const lines = [
+    'You are a research analyst writing a comprehensive research report.',
+    '',
+    `Research question: "${question}"`,
+  ];
+  if (contextSection) {
+    lines.push('');
+    lines.push(contextSection);
+    lines.push('');
+    lines.push('Treat project instructions as constraints while synthesizing the report.');
+  }
+  lines.push('');
+  lines.push(`Key findings from ${findings.length} sources:`);
+  lines.push(findingRows || '(no findings collected)');
+  lines.push('');
+  lines.push('Write a comprehensive research report in markdown format with these sections:');
+  lines.push('# Research Report');
+  lines.push('## Executive Summary');
+  lines.push('(2-3 paragraph overview of key conclusions)');
+  lines.push('## Key Findings');
+  lines.push('(Detailed findings organized by theme, with inline source citations like [Source: domain.com])');
+  lines.push('## Analysis');
+  lines.push('(Synthesis and interpretation of findings)');
+  lines.push('## Gaps and Limitations');
+  lines.push('(What could not be determined, areas needing further research)');
+  lines.push('## Sources');
+  lines.push('(List all unique source URLs referenced)');
+  lines.push('');
+  lines.push('Use the findings data above. Do not invent information. Cite sources inline.');
+  lines.push('If findings are insufficient, state that clearly rather than fabricating content.');
+  return lines.join('\n');
+}
+
+/* ------------------------------------------------------------------ */
+/*  LLM output parsers                                                 */
+/* ------------------------------------------------------------------ */
+
+function extractJsonFromText(text) {
+  const raw = String(text || '').trim();
+  // Try direct parse first
+  const direct = safeParseJson(raw, null);
+  if (direct) return direct;
+  // Try extracting from markdown code block
+  const codeBlock = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
+  if (codeBlock) {
+    const parsed = safeParseJson(codeBlock[1].trim(), null);
+    if (parsed) return parsed;
+  }
+  // Try finding first { or [
+  const bracketStart = raw.indexOf('[');
+  const braceStart = raw.indexOf('{');
+  let start = -1;
+  if (bracketStart >= 0 && (braceStart < 0 || bracketStart < braceStart)) {
+    start = bracketStart;
+  } else if (braceStart >= 0) {
+    start = braceStart;
+  }
+  if (start >= 0) {
+    const isArray = raw[start] === '[';
+    const closeChar = isArray ? ']' : '}';
+    let depth = 0;
+    for (let i = start; i < raw.length; i++) {
+      if (raw[i] === raw[start]) depth++;
+      if (raw[i] === closeChar) depth--;
+      if (depth === 0) {
+        const candidate = raw.slice(start, i + 1);
+        const parsed = safeParseJson(candidate, null);
+        if (parsed) return parsed;
+        break;
+      }
+    }
+  }
+  return null;
+}
+
+function parseQueriesFromLLM(text) {
+  const parsed = extractJsonFromText(text);
+  if (Array.isArray(parsed)) {
+    return parsed.map((item) => String(item || '').trim()).filter((q) => q.length >= 3);
+  }
+  if (parsed && Array.isArray(parsed.queries)) {
+    return parsed.queries.map((item) => String(item || '').trim()).filter((q) => q.length >= 3);
+  }
+  // Fallback: extract quoted strings
+  const matches = String(text || '').match(/"([^"]{3,120})"/g) || [];
+  return matches.map((m) => m.replace(/"/g, '').trim()).filter((q) => q.length >= 3);
+}
+
+function parseAnalysisFromLLM(text) {
+  const parsed = extractJsonFromText(text);
+  const result = { findings: [], followUpQueries: [] };
+  if (!parsed) return result;
+
+  if (Array.isArray(parsed.findings)) {
+    for (const item of parsed.findings) {
+      const txt = String(item?.text || item || '').trim();
+      if (txt.length < 5) continue;
+      result.findings.push({
+        text: txt,
+        category: String(item?.category || 'fact').toLowerCase(),
+      });
+    }
+  }
+  if (Array.isArray(parsed.followUpQueries)) {
+    result.followUpQueries = parsed.followUpQueries
+      .map((q) => String(q || '').trim())
+      .filter((q) => q.length >= 3)
+      .slice(0, 3);
+  }
+  return result;
+}
+
+/* ------------------------------------------------------------------ */
+/*  Activity event formatting                                          */
+/* ------------------------------------------------------------------ */
+
+function formatPhaseLabel(phase) {
+  const labels = {
+    plan: 'Plan',
+    search: 'Search',
+    read: 'Read',
+    analyze: 'Analyze',
+    synthesis: 'Synthesis',
+    progress: 'Progress',
+  };
+  return labels[phase] || 'Task';
+}
+
+/* ------------------------------------------------------------------ */
+/*  ResearchOrchestrator class                                         */
+/* ------------------------------------------------------------------ */
 
 class ResearchOrchestrator extends EventEmitter {
-  constructor({ db, saveDatabase, progressSink, synthesisGenerator, extractionGenerator, progressSummaryGenerator } = {}) {
+  constructor({ db, saveDatabase, progressSink, llmCall } = {}) {
     super();
     this.db = db;
     this.saveDatabase = typeof saveDatabase === 'function' ? saveDatabase : () => {};
     this.progressSink = typeof progressSink === 'function' ? progressSink : null;
-    this.synthesisGenerator = typeof synthesisGenerator === 'function' ? synthesisGenerator : null;
-    this.extractionGenerator = typeof extractionGenerator === 'function' ? extractionGenerator : null;
-    this.progressSummaryGenerator = typeof progressSummaryGenerator === 'function' ? progressSummaryGenerator : null;
-    this.defaultWorkerCount = 4;
-    this.maxTaskRetries = 3;
-    this.convergenceThreshold = 5;
+    this.llmCall = typeof llmCall === 'function' ? llmCall : null;
+    this.defaultWorkerCount = 3;
+    this.maxTaskRetries = 2;
     this.monitorIntervalMs = 4000;
     this.checkpointIntervalMs = 30000;
     this.stallTimeoutMs = 120000;
     this.maxStallRecoveries = 3;
+    this.progressSummaryIntervalMs = 60000;
     this.runs = new Map();
   }
+
+  /* -- DB helpers --------------------------------------------------- */
 
   query(sql, params = []) {
     if (!this.db) return [];
@@ -752,13 +991,9 @@ class ResearchOrchestrator extends EventEmitter {
     try {
       stmt.bind(params);
       const rows = [];
-      while (stmt.step()) {
-        rows.push(stmt.getAsObject());
-      }
+      while (stmt.step()) rows.push(stmt.getAsObject());
       return rows;
-    } finally {
-      stmt.free();
-    }
+    } finally { stmt.free(); }
   }
 
   queryOne(sql, params = []) {
@@ -771,554 +1006,450 @@ class ResearchOrchestrator extends EventEmitter {
     this.db.run(sql, params);
   }
 
-  buildSeedQueries({
-    objective = '',
-    runInstructions = '',
-    promptSnapshot = {},
-    researchSettings = normalizeResearchSettings(),
-    topicProfile = null,
-  }) {
-    const objectiveText = String(objective || '').trim();
-    const normalizedObjective = normalizeSearchQuery(objectiveText);
-    const queries = [];
-    const settings = normalizeResearchSettings(researchSettings);
-    const profile = topicProfile || buildTopicProfile({
-      objective,
-      runInstructions,
-      promptSnapshot,
-    });
-    const scopedHintText = extractScopedInstructionHints(runInstructions);
-    const searchContext = `${objective} ${scopedHintText}`.trim();
-    const locationHint = String(profile.locationHint || extractLocationHint(objectiveText) || '').trim();
-    const locationTokenSet = new Set(
-      (profile.locationTokens || []).map((token) => normalizeTopicToken(token))
-    );
-    const objectiveTokens = (profile.objectiveTokens || [])
-      .map((token) => normalizeTopicToken(token))
-      .filter((token) => !locationTokenSet.has(token))
-      .filter((token) => !QUERY_NOISE_TERMS.has(token))
-      .slice(0, 10);
-    const domainTerms = (profile.domainTerms || [])
-      .map((token) => normalizeTopicToken(token))
-      .filter((token) => !QUERY_NOISE_TERMS.has(token))
-      .slice(0, 8);
-
-    const focusPhrases = [];
-    if (objectiveTokens.length >= 2) {
-      focusPhrases.push(objectiveTokens.slice(0, 2).join(' '));
-    }
-    if (objectiveTokens.length >= 4) {
-      focusPhrases.push(objectiveTokens.slice(0, 4).join(' '));
-    }
-    for (const term of pickCareLevelSearchTerms(searchContext).slice(0, 4)) {
-      focusPhrases.push(term);
-    }
-    const intents = ['official source', 'primary source', 'documentation', 'overview', 'contact'];
-    const objectiveAlreadyScoped = locationHint
-      ? containsToken(normalizedObjective, locationHint)
-      : false;
-
-    const objectiveWordCount = normalizedObjective.split(/\s+/).filter(Boolean).length;
-    if (normalizedObjective && objectiveWordCount >= 3 && objectiveWordCount <= 30) {
-      queries.push(normalizedObjective);
-      for (const intent of intents) {
-        queries.push(`${normalizedObjective} ${intent}`);
-      }
-      if (locationHint && !objectiveAlreadyScoped) {
-        queries.push(`${normalizedObjective} in ${locationHint}`);
-        queries.push(`${normalizedObjective} in ${locationHint} official source`);
-      }
-    }
-
-    for (const phrase of Array.from(new Set(focusPhrases))) {
-      for (const intent of intents) {
-        queries.push(`${phrase} ${intent}`);
-        if (locationHint) {
-          queries.push(`${phrase} in ${locationHint} ${intent}`);
-        }
-      }
-    }
-
-    for (const domainTerm of domainTerms) {
-      const domainPhrase = buildDomainProgramPhrase(domainTerm);
-      if (!domainPhrase) continue;
-      for (const intent of intents) {
-        queries.push(`${domainPhrase} ${intent}`);
-        if (locationHint) {
-          queries.push(`${domainPhrase} in ${locationHint} ${intent}`);
-        }
-      }
-    }
-
-    if (locationHint && objectiveTokens.length > 0 && !objectiveAlreadyScoped) {
-      const focusPhrase = objectiveTokens.slice(0, 5).join(' ');
-      queries.push(`${focusPhrase} in ${locationHint}`);
-      queries.push(`${focusPhrase} in ${locationHint} official source`);
-    }
-
-    const hardSeedCap = Math.min(48, Math.max(8, Number(settings.seedQueryLimit || 24)));
-    return Array.from(new Set(
-      queries
-        .map((item) => normalizeSearchQuery(item))
-        .filter(Boolean)
-        .filter((query) => query.split(/\s+/).length >= 3)
-    )).slice(0, hardSeedCap);
-  }
-
-  buildConvergenceQuery(runState) {
-    const objective = String(runState.objective || '').trim();
-    if (!objective) return '';
-
-    const profile = runState.topicProfile || {};
-    const locationHint = String(profile.locationHint || extractLocationHint(objective) || '').trim();
-    const seen = runState.discoverQueriesSeen || new Set();
-    const settings = runState.researchSettings || normalizeResearchSettings();
-    const domainTerms = Array.isArray(profile.domainTerms) && profile.domainTerms.length > 0
-      ? profile.domainTerms.map((term) => normalizeTopicToken(term))
-      : (profile.objectiveTokens || []).map((term) => normalizeTopicToken(term)).slice(0, 6);
-
-    const seededCandidates = this.buildSeedQueries({
-      objective,
-      runInstructions: runState.runInstructions || '',
-      promptSnapshot: runState.promptSnapshot || {},
-      researchSettings: {
-        ...settings,
-        seedQueryLimit: Math.min(64, Math.max(12, Number(settings.seedQueryLimit || 24))),
-      },
-      topicProfile: profile,
-    }).filter((query) => !seen.has(String(query).trim().toLowerCase()));
-
-    const cursor = Number(runState.queryCursor || 0);
-    if (seededCandidates.length > 0) {
-      const query = seededCandidates[cursor % seededCandidates.length];
-      runState.queryCursor = cursor + 1;
-      return query;
-    }
-
-    const refreshIntents = ['official source', 'primary source', 'documentation', 'overview', 'contact'];
-    const scopedHintText = extractScopedInstructionHints(runState.runInstructions || '');
-    const searchContext = `${objective} ${scopedHintText}`.trim();
-    const focusTerms = Array.from(new Set([
-      ...pickCareLevelSearchTerms(searchContext).slice(0, 4),
-      ...(profile.objectiveTokens || [])
-        .map((token) => normalizeTopicToken(token))
-        .filter((token) => token.length >= 3)
-        .slice(0, 6),
-    ]));
-    const fallbackCandidates = [];
-
-    const normalizedObjective = normalizeSearchQuery(objective);
-    const objectiveAlreadyScoped = locationHint
-      ? containsToken(normalizedObjective, locationHint)
-      : false;
-    if (normalizedObjective) {
-      fallbackCandidates.push(`${normalizedObjective} official source`);
-      fallbackCandidates.push(`${normalizedObjective} primary source`);
-      fallbackCandidates.push(`${normalizedObjective} documentation`);
-      fallbackCandidates.push(`${normalizedObjective} contact`);
-      if (locationHint && !objectiveAlreadyScoped) {
-        fallbackCandidates.push(`${normalizedObjective} in ${locationHint} official source`);
-      }
-    }
-
-    for (const careTerm of focusTerms) {
-      for (const intent of refreshIntents) {
-        fallbackCandidates.push(`${careTerm} ${intent}`);
-        if (locationHint) fallbackCandidates.push(`${careTerm} in ${locationHint} ${intent}`);
-      }
-    }
-
-    for (const domainTerm of domainTerms.slice(0, 5)) {
-      const domainPhrase = buildDomainProgramPhrase(domainTerm);
-      if (!domainPhrase) continue;
-      fallbackCandidates.push(`${domainPhrase} official source`);
-      fallbackCandidates.push(`${domainPhrase} documentation`);
-      if (locationHint) fallbackCandidates.push(`${domainPhrase} in ${locationHint} official source`);
-    }
-
-    const uniqueFallback = Array.from(new Set(
-      fallbackCandidates
-        .map((query) => normalizeSearchQuery(query))
-        .filter(Boolean)
-        .filter((query) => query.split(/\s+/).length >= 3)
-    ));
-
-    for (let offset = 0; offset < uniqueFallback.length; offset += 1) {
-      const candidate = uniqueFallback[(cursor + offset) % uniqueFallback.length];
-      if (!seen.has(String(candidate).toLowerCase())) {
-        runState.queryCursor = cursor + offset + 1;
-        return candidate;
-      }
-    }
-
-    runState.queryCursor = cursor + 1;
-    return normalizeSearchQuery(`${objective} primary source`);
-  }
-
-  getGoalProgress(runState) {
-    const settings = runState.researchSettings || normalizeResearchSettings();
-    const elapsedMs = Math.max(0, Date.now() - Number(runState.runStartedAtMs || Date.now()));
-    const elapsedMinutes = elapsedMs / 60000;
-    const stats = runState.stats || buildStatsSkeleton();
-    const goals = {
-      minRuntimeMinutes: Number(settings.minRuntimeMinutes || 0),
-      minDiscoveredCandidates: Number(settings.minDiscoveredCandidates || 0),
-      minSearchesIssued: Number(settings.minSearchesIssued || 0),
-      minVerifiedRecords: Number(settings.minVerifiedRecords || 0),
-    };
-    const current = {
-      elapsedMinutes,
-      discoveredCandidates: Number(stats.discoveredCandidates || 0),
-      searchesIssued: Number(stats.searchesIssued || 0),
-      verifiedRecords: Number(stats.verifiedSaved || 0),
-    };
-    const reached = {
-      runtime: current.elapsedMinutes >= goals.minRuntimeMinutes,
-      discovered: current.discoveredCandidates >= goals.minDiscoveredCandidates,
-      searches: current.searchesIssued >= goals.minSearchesIssued,
-      verified: current.verifiedRecords >= goals.minVerifiedRecords,
-    };
-    return {
-      goals,
-      current,
-      reached,
-      allReached: reached.runtime && reached.discovered && reached.searches && reached.verified,
-    };
-  }
-
-  runMeetsCompletionGoals(runState) {
-    const progress = this.getGoalProgress(runState);
-    return progress.allReached;
-  }
+  /* -- State management --------------------------------------------- */
 
   ensureRunState(runState) {
     if (!runState.queues) {
-      runState.queues = {
-        discover: [],
-        official_verify: [],
-        extract_fields: [],
-        evidence_validate: [],
-        persist: [],
-      };
+      runState.queues = { plan: [], search: [], read: [], analyze: [] };
+    }
+    for (const phase of PHASES) {
+      if (!Array.isArray(runState.queues[phase])) runState.queues[phase] = [];
     }
     if (!runState.workerStatus) runState.workerStatus = new Map();
-    if (!runState.discoverQueriesSeen) runState.discoverQueriesSeen = new Set();
-    if (!runState.candidateUrlsSeen) runState.candidateUrlsSeen = new Set();
-    if (!runState.convergenceCount) runState.convergenceCount = 0;
+    if (!runState.queriesSeen) runState.queriesSeen = new Set();
+    if (!runState.urlsSeen) runState.urlsSeen = new Set();
+    if (!Number.isFinite(runState.convergenceCount)) runState.convergenceCount = 0;
     if (!runState.stats) runState.stats = buildStatsSkeleton();
-    if (!runState.researchSettings) {
-      runState.researchSettings = normalizeResearchSettings(
-        runState?.promptSnapshot?.researchSettings || {}
-      );
+    if (!runState.settings) runState.settings = resolveSettings(runState.settings || {});
+    runState.sourcePolicy = mergeSourcePolicy(DEFAULT_SOURCE_POLICY, runState.sourcePolicy || {});
+    runState.projectContext = normalizeProjectContext(runState.projectContext || {});
+    if (!runState.intentProfile || typeof runState.intentProfile !== 'object') {
+      runState.intentProfile = buildIntentProfile(runState.question || '', runState.projectContext, runState.sourcePolicy);
+    }
+    if (!runState.stageStatus || typeof runState.stageStatus !== 'object') {
+      runState.stageStatus = buildStageStatus();
     } else {
-      runState.researchSettings = normalizeResearchSettings(runState.researchSettings);
+      runState.stageStatus = ensureStageStatusShape(runState.stageStatus);
     }
-    if (!runState.topicProfile) {
-      runState.topicProfile = buildTopicProfile({
-        objective: runState.objective,
-        runInstructions: runState.runInstructions,
-        promptSnapshot: runState.promptSnapshot || {},
-      });
-    }
-    if (!Number.isFinite(Number(runState.queryCursor))) runState.queryCursor = 0;
-    if (!Number.isFinite(Number(runState.runStartedAtMs))) runState.runStartedAtMs = Date.now();
-    if (!Number.isFinite(Number(runState.searchFailureStreak))) runState.searchFailureStreak = 0;
-    if (!Number.isFinite(Number(runState.searchBackoffUntil))) runState.searchBackoffUntil = 0;
-    if (!Number.isFinite(Number(runState.lastProgressSummaryAt))) runState.lastProgressSummaryAt = 0;
-    if (!Number.isFinite(Number(runState.lastProgressSummarySearches))) runState.lastProgressSummarySearches = 0;
-    if (!Number.isFinite(Number(runState.lastProgressSummaryVerified))) runState.lastProgressSummaryVerified = 0;
-    if (!runState.intermediateSummary) {
-      runState.intermediateSummary = runState?.promptSnapshot?.intermediateSummary || null;
-    }
-    if (!runState.lastSavedCount) runState.lastSavedCount = Number(runState.stats.verifiedSaved || 0);
-    if (!runState.lastActivityAt) runState.lastActivityAt = Date.now();
-    if (!runState.lastCheckpointAt) runState.lastCheckpointAt = 0;
-    if (!runState.stallRecoveries) runState.stallRecoveries = 0;
+    if (!Array.isArray(runState.assumptions)) runState.assumptions = [];
+    if (!Array.isArray(runState.policyViolations)) runState.policyViolations = [];
+    if (!Array.isArray(runState.steeringEvents)) runState.steeringEvents = [];
+    runState.intent = String(runState.intent || '').trim() || String(runState.question || '').trim();
+    runState.jurisdiction = String(runState.jurisdiction || '').trim() || 'auto';
+    if (!Array.isArray(runState.findings)) runState.findings = [];
+    if (!Array.isArray(runState.sourcesRead)) runState.sourcesRead = [];
+    if (!Number.isFinite(runState.runStartedAtMs)) runState.runStartedAtMs = Date.now();
+    if (!Number.isFinite(runState.lastActivityAt)) runState.lastActivityAt = Date.now();
+    if (!Number.isFinite(runState.lastCheckpointAt)) runState.lastCheckpointAt = 0;
+    if (!Number.isFinite(runState.lastProgressSummaryAt)) runState.lastProgressSummaryAt = 0;
+    if (!Number.isFinite(runState.stallRecoveries)) runState.stallRecoveries = 0;
     if (!runState.workerLoops) runState.workerLoops = [];
     if (!Array.isArray(runState.activityLog)) runState.activityLog = [];
-    if (!Number.isFinite(Number(runState.activitySeq))) runState.activitySeq = Number(runState.activityLog.length || 0);
-    if (!runState.finalSynthesis) {
-      runState.finalSynthesis = runState?.promptSnapshot?.finalSynthesis || null;
-    }
-    if (runState.domainTally instanceof Map) {
-      // Keep as-is.
-    } else if (runState.domainTally && typeof runState.domainTally === 'object') {
+    if (!Number.isFinite(runState.activitySeq)) runState.activitySeq = runState.activityLog.length || 0;
+    if (!runState.report) runState.report = runState.report || null;
+    if (!runState.progressSummaries) runState.progressSummaries = runState.progressSummaries || [];
+    if (!runState.createdAt) runState.createdAt = nowIso();
+    if (runState.domainTally instanceof Map) { /* ok */ }
+    else if (runState.domainTally && typeof runState.domainTally === 'object') {
       runState.domainTally = new Map(Object.entries(runState.domainTally));
     } else {
       runState.domainTally = new Map();
     }
+    if (!runState.taskKeys) runState.taskKeys = new Set();
+    if (!runState.stepKeys) runState.stepKeys = new Set();
+    if (runState.persistedFindingKeys instanceof Set) { /* ok */ }
+    else if (Array.isArray(runState.persistedFindingKeys)) {
+      runState.persistedFindingKeys = new Set(runState.persistedFindingKeys);
+    } else {
+      runState.persistedFindingKeys = new Set();
+    }
     return runState;
   }
 
-  isTaskPayloadCompliant(phase, payload = {}) {
-    if (phase === 'discover') {
-      const query = String(payload.query || '').toLowerCase();
-      if (!query.trim()) return false;
-      const blockedPhrases = [
-        'ignore previous instructions',
-        'ignore all instructions',
-        'system prompt',
-        'jailbreak',
-      ];
-      return !blockedPhrases.some((phrase) => query.includes(phrase));
-    }
-    if (phase === 'persist') {
-      return payload && typeof payload.record === 'object' && String(payload.canonicalKey || '').trim().length > 0;
-    }
-    return true;
-  }
+  /* -- Queue management --------------------------------------------- */
 
   enqueueTask(runState, phase, payload = {}, dedupeKey = '') {
     if (!PHASES.includes(phase)) return false;
-    if (!this.isTaskPayloadCompliant(phase, payload)) return false;
     const state = this.ensureRunState(runState);
-    if (phase === 'discover') {
-      const normalizedQuery = normalizeSearchQuery(payload.query || '');
-      payload.query = normalizedQuery || String(payload.query || '').replace(/\s+/g, ' ').trim();
-      const queryKey = String(payload.query || '').trim().toLowerCase();
-      if (!queryKey) return false;
-      if (state.discoverQueriesSeen.has(queryKey)) return false;
-      state.discoverQueriesSeen.add(queryKey);
+    const settings = state.settings;
+    const stepKey = String(payload.stepKey || dedupeKey || '').trim();
+
+    // Enforce limits
+    if (phase === 'search') {
+      const query = String(payload.query || '').replace(/\s+/g, ' ').trim();
+      if (!query || query.length < 3) return false;
+      const key = query.toLowerCase();
+      if (state.queriesSeen.has(key)) return false;
+      if (state.stats.searchesIssued >= settings.maxQueries) return false;
+      state.queriesSeen.add(key);
+      payload.query = query;
     }
-    if (phase === 'official_verify') {
-      const urlKey = normalizeUrl(payload?.candidate?.url || payload?.url || '');
-      if (!urlKey) return false;
-      if (state.candidateUrlsSeen.has(urlKey)) return false;
-      state.candidateUrlsSeen.add(urlKey);
+    if (phase === 'read') {
+      const url = normalizeUrl(payload.url || '');
+      if (!url) return false;
+      if (state.urlsSeen.has(url)) return false;
+      if (state.stats.sourcesRead >= settings.maxSourcesRead) return false;
+      state.urlsSeen.add(url);
+      payload.url = url;
     }
-    if (dedupeKey) {
+    if (stepKey) {
+      const key = `${phase}:${stepKey}`;
+      if (state.stepKeys.has(key)) return false;
+      state.stepKeys.add(key);
+      payload.stepKey = stepKey;
+    } else if (dedupeKey) {
       const key = `${phase}:${dedupeKey}`;
-      state.taskKeys = state.taskKeys || new Set();
       if (state.taskKeys.has(key)) return false;
       state.taskKeys.add(key);
     }
 
-    state.queues[phase].push(normalizeTaskPayload({
-      phase,
-      payload,
-    }));
-    state.lastActivityAt = Date.now();
+    state.queues[phase].push(normalizeTaskPayload({ phase, payload }));
+    // New work should reset convergence streak so runs do not end prematurely.
+    state.convergenceCount = 0;
     return true;
   }
 
   dequeueTask(runState) {
+    const state = this.ensureRunState(runState);
     for (const phase of PRIORITY_ORDER) {
-      const queue = runState.queues[phase];
-      if (Array.isArray(queue) && queue.length > 0) {
-        return queue.shift();
-      }
+      const queue = state.queues[phase];
+      if (queue && queue.length > 0) return queue.shift();
     }
     return null;
   }
 
   queueSize(runState) {
-    return PHASES.reduce((sum, phase) => sum + (runState.queues?.[phase]?.length || 0), 0);
+    let total = 0;
+    for (const phase of PHASES) total += (runState.queues?.[phase]?.length || 0);
+    return total;
   }
 
-  incrementDomainTally(runState, domain, count = 1) {
+  setStageState(runState, stageId, patch = {}) {
+    if (!stageId || !STAGE_IDS.includes(stageId)) return;
     const state = this.ensureRunState(runState);
-    const normalizedDomain = normalizeDomain(domain || '');
-    if (!normalizedDomain) return;
-    const existing = Number(state.domainTally.get(normalizedDomain) || 0);
-    state.domainTally.set(normalizedDomain, existing + Math.max(1, Number(count || 1)));
+    const current = state.stageStatus?.[stageId] || {
+      stageId,
+      status: 'pending',
+      pass: null,
+      attempts: 0,
+      updatedAt: null,
+      reason: '',
+    };
+    const next = {
+      ...current,
+      ...patch,
+      stageId,
+      updatedAt: nowIso(),
+    };
+    if (patch.status === 'running') {
+      next.attempts = Math.max(1, Number(current.attempts || 0) + 1);
+    } else if (!Number.isFinite(Number(next.attempts))) {
+      next.attempts = Number(current.attempts || 0);
+    }
+    state.stageStatus[stageId] = next;
   }
 
-  recordDomainCandidates(runState, candidates = []) {
-    for (const candidate of candidates || []) {
-      const domain = normalizeDomain(candidate?.url || '');
-      if (domain) this.incrementDomainTally(runState, domain, 1);
+  addAssumptions(runState, assumptions = []) {
+    if (!Array.isArray(assumptions) || assumptions.length === 0) return;
+    const state = this.ensureRunState(runState);
+    const seen = new Set(state.assumptions.map((item) => String(item?.code || item?.text || '').trim()));
+    for (const entry of assumptions) {
+      const code = String(entry?.code || '').trim();
+      const text = String(entry?.text || '').trim();
+      const key = code || text;
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      state.assumptions.push({
+        code: code || 'assumption',
+        text: text || code,
+        createdAt: entry?.createdAt || nowIso(),
+      });
+    }
+    if (state.assumptions.length > 40) {
+      state.assumptions.splice(0, state.assumptions.length - 40);
     }
   }
 
-  buildTaskActivityEvent({ task, status = 'completed', output = null, error = null, workerId = '' } = {}) {
-    const phase = String(task?.phase || '').trim();
-    const payload = task?.payload || {};
+  recordPolicyViolation(runState, violation = {}) {
+    const state = this.ensureRunState(runState);
+    const payload = {
+      id: uuidv4(),
+      code: String(violation.code || 'policy_violation').trim(),
+      reason: String(violation.reason || '').trim(),
+      domain: normalizeDomain(violation.domain || ''),
+      url: normalizeUrl(violation.url || ''),
+      phase: String(violation.phase || '').trim(),
+      stageId: String(violation.stageId || '').trim(),
+      at: nowIso(),
+    };
+    state.policyViolations.push(payload);
+    if (state.policyViolations.length > 250) {
+      state.policyViolations.splice(0, state.policyViolations.length - 250);
+    }
+  }
+
+  /* -- Domain tally ------------------------------------------------- */
+
+  incrementDomainTally(runState, domain, count = 1) {
+    if (!domain) return;
+    const d = normalizeDomain(domain);
+    if (!d) return;
+    const current = runState.domainTally?.get(d) || 0;
+    runState.domainTally.set(d, current + count);
+  }
+
+  buildFindingCanonicalKey(text = '') {
+    const normalized = String(text || '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+    return normalized.slice(0, 120) || `finding_${uuidv4().slice(0, 8)}`;
+  }
+
+  persistFindingRecord(runState, finding = {}) {
+    const state = this.ensureRunState(runState);
+    const text = String(finding.text || '').trim();
+    if (!text) return;
+
+    const sourceUrl = normalizeUrl(finding.sourceUrl || finding.source_url || '');
+    const canonicalKey = this.buildFindingCanonicalKey(text);
+    const dedupeKey = `${canonicalKey}:${sourceUrl || 'no_source'}`;
+    if (state.persistedFindingKeys.has(dedupeKey)) return;
+    state.persistedFindingKeys.add(dedupeKey);
+
+    const now = nowIso();
+    const recordId = uuidv4();
+    const sourceDomain = normalizeDomain(finding.sourceDomain || sourceUrl || '');
+    const sourceTitle = String(finding.sourceTitle || '').trim();
+    const category = String(finding.category || 'fact').trim() || 'fact';
+    const isOfficial = finding.isOfficial ? 1 : 0;
+    const findingId = String(finding.id || '').trim();
+    const typedEvidence = createEvidence({
+      quote: String(finding.quote || text).trim().slice(0, 1200),
+      sourceUrl,
+      sourceTitle,
+      sourceDomain,
+      capturedAt: now,
+      supportsFindingIds: findingId ? [findingId] : [],
+      isOfficial: Boolean(isOfficial),
+    });
+
+    const recordPayload = {
+      name: compactText(text, 90),
+      summary: text,
+      category,
+      official_url: sourceUrl,
+      source_url: sourceUrl,
+      source_domain: sourceDomain,
+      source_title: sourceTitle,
+      added_at: now,
+      evidence: hasValidEvidence([typedEvidence]) ? [typedEvidence] : [],
+    };
+
+    this.run(
+      `INSERT INTO research_records (id, project_id, run_id, canonical_key, record_json, verified_official_url, verified_at, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        recordId,
+        state.projectId,
+        state.id,
+        canonicalKey,
+        safeStringify(recordPayload),
+        isOfficial ? sourceUrl : null,
+        isOfficial ? now : null,
+        now,
+        now,
+      ]
+    );
+
+    if (sourceUrl) {
+      this.run(
+        `INSERT INTO research_evidence (id, record_id, field_key, claim_text, source_url, source_domain, source_title, excerpt_text, is_official, fetched_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          uuidv4(),
+          recordId,
+          'summary',
+          text,
+          sourceUrl,
+          sourceDomain,
+          sourceTitle,
+          typedEvidence.quote || compactText(text, 280),
+          isOfficial,
+          now,
+        ]
+      );
+    }
+
+    if (isOfficial) {
+      state.stats.verifiedSaved += 1;
+    }
+  }
+
+  /* -- Activity tracking -------------------------------------------- */
+
+  buildTaskActivityEvent({ task, status, output, error, workerId }) {
+    const phase = task?.phase || 'task';
+    const stageId = PHASE_TO_STAGE[phase] || null;
     const event = {
       id: uuidv4(),
       at: nowIso(),
       phase,
+      stageId,
       phaseLabel: formatPhaseLabel(phase),
-      status,
-      workerId: workerId || '',
-      taskId: task?.id || '',
+      status: String(status || 'started').toLowerCase(),
+      workerId: workerId || null,
+      taskId: task?.id || null,
+      summary: '',
+      details: '',
       query: '',
       url: '',
       domain: '',
-      summary: '',
-      details: '',
-      output: output || null,
-      error: error ? String(error) : '',
     };
-    const failureDetails = humanizeReason(error || '');
 
-    if (phase === 'discover') {
-      event.query = String(payload.query || output?.query || '').trim();
-      if (status === 'started') {
-        event.summary = event.query
-          ? `Searching for "${event.query}"`
-          : 'Running discovery search';
-      } else if (status === 'completed') {
-        event.summary = `Found ${Number(output?.found || 0)} results, queued ${Number(output?.queued || 0)} official checks`;
-        const domains = Array.isArray(output?.topDomains)
-          ? output.topDomains.map((item) => String(item.domain || '').trim()).filter(Boolean).slice(0, 4)
-          : [];
-        event.details = domains.length > 0
-          ? `Top domains: ${domains.join(', ')}`
-          : `Skipped off-topic: ${Number(output?.skippedIrrelevant || 0)}`;
-      } else if (status === 'skipped') {
-        event.summary = `Discovery skipped: ${humanizeReason(output?.reason || '') || 'not needed'}`;
-      } else if (status === 'failed') {
-        event.summary = `Discovery failed for "${event.query || 'query'}"`;
-        event.details = failureDetails;
-      } else if (status === 'blocked') {
-        event.summary = `Discovery blocked: ${humanizeReason(output?.reason || '') || 'policy gate'}`;
+    if (phase === 'plan') {
+      if (status === 'started') event.summary = 'Generating search plan from research question...';
+      else if (status === 'completed') event.summary = `Generated ${output?.queriesGenerated || 0} search queries`;
+      else if (status === 'failed') event.summary = `Plan generation failed: ${String(error || '').slice(0, 80)}`;
+    } else if (phase === 'search') {
+      event.query = String(task.payload?.query || '').slice(0, 100);
+      if (status === 'started') event.summary = `Searching: "${event.query}"`;
+      else if (status === 'completed') {
+        event.summary = `Found ${output?.found || 0} results, queued ${output?.queued || 0}`;
+        const detailBits = [];
+        if (output?.provider) detailBits.push(`Provider: ${output.provider}`);
+        if (Number(output?.rejected || 0) > 0) detailBits.push(`Rejected: ${output.rejected}`);
+        event.details = detailBits.join(' | ');
       }
-      return event;
-    }
-
-    if (phase === 'official_verify') {
-      const candidateUrl = String(payload?.candidate?.url || output?.url || output?.candidateUrl || '').trim();
-      event.url = normalizeUrl(candidateUrl) || candidateUrl;
+      else if (status === 'failed') event.summary = `Search failed: ${String(error || '').slice(0, 80)}`;
+    } else if (phase === 'read') {
+      event.url = String(task.payload?.url || '').slice(0, 120);
       event.domain = normalizeDomain(event.url);
-      if (status === 'started') {
-        event.summary = event.domain
-          ? `Verifying official source: ${event.domain}`
-          : 'Verifying official source';
-      } else if (status === 'completed') {
-        event.summary = output?.verifiedOfficial
-          ? `Official page verified${event.domain ? ` (${event.domain})` : ''}`
-          : 'Official verification completed';
-        if (output?.queuedExtract === false) {
-          event.details = 'Skipped extraction because candidate was already queued earlier.';
-        }
-      } else if (status === 'skipped') {
-        event.summary = `Skipped source${event.domain ? ` (${event.domain})` : ''}`;
-        event.details = humanizeReason(output?.reason || 'not official');
-      } else if (status === 'blocked') {
-        event.summary = `Blocked source${event.domain ? ` (${event.domain})` : ''}`;
-        event.details = humanizeReason(output?.reason || 'empty official page');
-      } else if (status === 'failed') {
-        event.summary = `Official verify failed${event.domain ? ` (${event.domain})` : ''}`;
-        event.details = failureDetails;
+      if (status === 'started') event.summary = event.domain ? `Reading ${event.domain}...` : 'Reading source...';
+      else if (status === 'completed') event.summary = `Read ${output?.contentLength || 0} chars from ${event.domain || 'source'}`;
+      else if (status === 'skipped') event.summary = `Skipped: ${output?.reason || 'insufficient content'}`;
+      else if (status === 'failed') event.summary = `Read failed: ${String(error || '').slice(0, 80)}`;
+    } else if (phase === 'analyze') {
+      event.domain = normalizeDomain(task.payload?.url || '');
+      if (status === 'started') event.summary = event.domain ? `Analyzing ${event.domain}...` : 'Analyzing source content...';
+      else if (status === 'completed') {
+        event.summary = `Extracted ${output?.findingsExtracted || 0} findings`;
+        const detailBits = [];
+        if (output?.followUpQueries > 0) detailBits.push(`${output.followUpQueries} follow-up queries queued`);
+        if (output?.droppedFindings > 0) detailBits.push(`${output.droppedFindings} findings dropped`);
+        event.details = detailBits.join(' | ');
       }
-      return event;
+      else if (status === 'failed') event.summary = `Analysis failed: ${String(error || '').slice(0, 80)}`;
+    } else if (phase === 'synthesis') {
+      if (status === 'started') event.summary = 'Generating final research report...';
+      else if (status === 'completed') event.summary = 'Research report generated successfully';
+      else if (status === 'failed') event.summary = `Report generation failed: ${String(error || '').slice(0, 80)}`;
+    } else if (phase === 'progress') {
+      event.summary = String(output?.text || 'Progress update').slice(0, 300);
     }
 
-    if (phase === 'extract_fields') {
-      const pageUrl = String(payload?.page?.url || '').trim();
-      event.url = normalizeUrl(pageUrl) || pageUrl;
-      event.domain = normalizeDomain(event.url);
-      if (status === 'started') {
-        event.summary = event.domain
-          ? `Extracting fields from ${event.domain}`
-          : 'Extracting schema fields';
-      } else if (status === 'completed') {
-        event.summary = `Extracted ${Number(output?.extracted || 0)} fields`;
-        const details = [];
-        if (output?.canonicalKey) details.push(`Key: ${output.canonicalKey}`);
-        if (output?.extractionMode) details.push(`Mode: ${output.extractionMode}`);
-        if (output?.extractionModel) details.push(`Model: ${output.extractionModel}`);
-        event.details = details.join(' | ');
-      } else if (status === 'blocked') {
-        event.summary = `Extraction blocked: ${humanizeReason(output?.reason || '') || 'missing canonical key'}`;
-      } else if (status === 'failed') {
-        event.summary = 'Field extraction failed';
-        event.details = failureDetails;
-      }
-      return event;
-    }
-
-    if (phase === 'evidence_validate') {
-      if (status === 'started') {
-        event.summary = 'Validating required field evidence';
-      } else if (status === 'completed') {
-        event.summary = 'Evidence validated and ready to persist';
-        event.details = output?.canonicalKey ? `Key: ${output.canonicalKey}` : '';
-      } else if (status === 'blocked') {
-        event.summary = `Evidence gate blocked record`;
-        const missing = Array.isArray(output?.missingOfficialEvidence) ? output.missingOfficialEvidence.join(', ') : '';
-        event.details = missing || humanizeReason(output?.reason || '');
-      } else if (status === 'failed') {
-        event.summary = 'Evidence validation failed';
-        event.details = failureDetails;
-      }
-      return event;
-    }
-
-    if (phase === 'persist') {
-      event.url = normalizeUrl(payload?.verifiedOfficialUrl || payload?.record?.official_url || '') || '';
-      event.domain = normalizeDomain(event.url);
-      if (status === 'started') {
-        event.summary = 'Saving verified record';
-      } else if (status === 'completed') {
-        event.summary = output?.deduped
-          ? 'Updated existing record with fresher evidence'
-          : 'Saved new verified record';
-        const evidenceCount = Number(output?.evidenceCount || 0);
-        event.details = `Evidence items: ${evidenceCount}`;
-      } else if (status === 'blocked') {
-        event.summary = 'Record blocked before save';
-        event.details = humanizeReason(output?.reason || 'topic mismatch');
-      } else if (status === 'failed') {
-        event.summary = 'Persist step failed';
-        event.details = failureDetails;
-      }
-      return event;
-    }
-
-    event.summary = `${formatPhaseLabel(phase)} ${status}`;
     return event;
   }
 
-  pushActivity(runState, event = null) {
+  pushActivity(runState, event) {
     if (!event) return;
     const state = this.ensureRunState(runState);
-    state.activitySeq = Number(state.activitySeq || 0) + 1;
-    const entry = {
-      seq: state.activitySeq,
-      ...event,
-    };
+    state.activitySeq = (state.activitySeq || 0) + 1;
+    const entry = { seq: state.activitySeq, ...event };
     if (!entry.at) entry.at = nowIso();
     state.activityLog.push(entry);
-    if (state.activityLog.length > 600) {
-      state.activityLog.splice(0, state.activityLog.length - 600);
+    if (state.activityLog.length > 500) {
+      state.activityLog.splice(0, state.activityLog.length - 500);
     }
     if (entry.domain) this.incrementDomainTally(state, entry.domain, 1);
   }
+
+  /* -- Progress / snapshots ----------------------------------------- */
 
   buildRunSnapshot(runState) {
     const state = this.ensureRunState(runState);
     const queueByPhase = {};
     for (const phase of PHASES) queueByPhase[phase] = state.queues?.[phase]?.length || 0;
     const workerStatus = Array.from(state.workerStatus.values());
-    const activeWorkers = workerStatus.filter((worker) => worker.status === 'busy').length;
+    const activeWorkers = workerStatus.filter((w) => w.status === 'busy').length;
     const goalProgress = this.getGoalProgress(state);
-    const convergenceThreshold = Number(state.researchSettings?.convergenceThreshold || this.convergenceThreshold);
     const domainStats = Array.from(state.domainTally.entries())
-      .map(([domain, count]) => ({ domain, count: Number(count || 0) }))
+      .map(([domain, count]) => ({ domain, count }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 16);
-    const recentActivity = (state.activityLog || []).slice(-160);
+    const recentActivity = (state.activityLog || []).slice(-120);
+    const recentFindings = (state.findings || []).slice(-20).map((f) => ({
+      id: f.id,
+      text: compactText(f.text, 200),
+      sourceUrl: f.sourceUrl || '',
+      sourceDomain: f.sourceDomain || '',
+      category: f.category || 'fact',
+      relevanceScore: Number(f.relevanceScore || 0),
+      sourceTier: f.sourceTier || '',
+      sourceQuality: Number(f.sourceQuality || 0),
+      isOfficial: Boolean(f.isOfficial),
+    }));
+    const quality = buildRunQuality(state);
+    const stageStatus = ensureStageStatusShape(state.stageStatus || {});
+    const relevanceScore = scoreRunRelevance(state.findings || []);
+    const jurisdictionMatch = scoreJurisdictionMatch(state);
+    const qualityGate = buildQualityGate(state, quality);
+    const stageOrder = STAGE_IDS
+      .map((stageId) => stageStatus[stageId])
+      .filter(Boolean);
+    const activeStage = stageOrder.find((item) => item.status === 'running')
+      || stageOrder.find((item) => item.pass === null && item.status !== 'completed')
+      || stageOrder[stageOrder.length - 1]
+      || null;
 
     return {
       id: state.id,
       projectId: state.projectId,
       status: state.status,
-      objective: state.objective,
+      question: state.question,
+      intent: state.intent || state.question,
+      jurisdiction: state.jurisdiction || 'auto',
       workerCount: state.workerCount,
       activeWorkers,
       workers: workerStatus,
       queueByPhase,
       queueSize: this.queueSize(state),
       convergenceCount: state.convergenceCount,
-      convergenceThreshold,
+      convergenceThreshold: state.settings?.convergenceThreshold || 5,
       stats: { ...state.stats },
-      researchSettings: { ...state.researchSettings },
+      settings: { ...state.settings },
+      sourcePolicy: { ...(state.sourcePolicy || DEFAULT_SOURCE_POLICY) },
+      contextMeta: buildProjectContextMeta(state.projectContext),
+      quality,
+      qualityGate,
+      relevanceScore,
+      jurisdictionMatch,
+      assumptions: (state.assumptions || []).slice(-40),
+      policyViolations: (state.policyViolations || []).slice(-120),
+      stageStatus,
+      stageOrder,
+      stageId: activeStage?.stageId || null,
       goalProgress,
       recentActivity,
+      recentFindings,
       domainStats,
-      intermediateSummary: state.intermediateSummary || state.promptSnapshot?.intermediateSummary || null,
-      finalSynthesis: state.finalSynthesis || state.promptSnapshot?.finalSynthesis || null,
+      totalFindings: state.findings?.length || 0,
+      totalSources: state.sourcesRead?.length || 0,
+      sourcesRead: (state.sourcesRead || []).slice(-50).map((s) => ({
+        url: s.url || '',
+        title: s.title || '',
+        domain: s.domain || '',
+        contentLength: s.contentLength || 0,
+        isOfficial: Boolean(s.isOfficial),
+        sourceTier: s.sourceTier || '',
+        sourceQuality: Number(s.sourceQuality || 0),
+        sourceReason: s.sourceReason || '',
+        query: s.query || '',
+        depth: Number(s.depth || 0),
+      })),
+      report: state.report || null,
+      progressSummaries: state.progressSummaries || [],
+      createdAt: state.createdAt || null,
       updatedAt: Date.now(),
     };
   }
@@ -1332,396 +1463,82 @@ class ResearchOrchestrator extends EventEmitter {
     this.emit('progress', payload);
   }
 
+  getGoalProgress(runState) {
+    const settings = runState.settings || resolveSettings();
+    const elapsedMs = Math.max(0, Date.now() - Number(runState.runStartedAtMs || Date.now()));
+    const elapsedMinutes = elapsedMs / 60000;
+    const stats = runState.stats || buildStatsSkeleton();
+    const goals = {
+      maxQueries: settings.maxQueries,
+      maxSourcesRead: settings.maxSourcesRead,
+      maxRuntimeMinutes: settings.maxRuntimeMinutes,
+    };
+    const current = {
+      elapsedMinutes,
+      searchesIssued: stats.searchesIssued || 0,
+      sourcesRead: stats.sourcesRead || 0,
+      findings: (runState.findings || []).length,
+    };
+    return { goals, current };
+  }
+
+  isRuntimeExceeded(runState) {
+    const settings = runState.settings || resolveSettings();
+    const elapsed = (Date.now() - Number(runState.runStartedAtMs || Date.now())) / 60000;
+    return elapsed >= settings.maxRuntimeMinutes;
+  }
+
+  /* -- DB persistence ----------------------------------------------- */
+
   persistRunHeartbeat(runState) {
     this.run(
-      `UPDATE research_runs
-       SET status = ?, stats_json = ?, convergence_count = ?, updated_at = ?
-       WHERE id = ?`,
-      [
-        runState.status,
-        safeStringify(runState.stats),
-        Number(runState.convergenceCount || 0),
-        nowIso(),
-        runState.id,
-      ]
+      `UPDATE research_runs SET status = ?, stats_json = ?, convergence_count = ?, updated_at = ? WHERE id = ?`,
+      [runState.status, safeStringify(runState.stats), runState.convergenceCount || 0, nowIso(), runState.id]
     );
     this.saveDatabase();
-  }
-
-  persistPromptSnapshot(runState) {
-    const snapshot = {
-      ...(runState?.promptSnapshot && typeof runState.promptSnapshot === 'object' ? runState.promptSnapshot : {}),
-      intermediateSummary: runState?.intermediateSummary || runState?.promptSnapshot?.intermediateSummary || null,
-      finalSynthesis: runState?.finalSynthesis || runState?.promptSnapshot?.finalSynthesis || null,
-    };
-    runState.promptSnapshot = snapshot;
-    this.run(
-      `UPDATE research_runs
-       SET prompt_snapshot_json = ?, updated_at = ?
-       WHERE id = ?`,
-      [
-        safeStringify(snapshot),
-        nowIso(),
-        runState.id,
-      ]
-    );
-    this.saveDatabase();
-  }
-
-  listRunRecordsForSynthesis(runState) {
-    const settings = runState?.researchSettings || normalizeResearchSettings();
-    const limit = Math.max(20, Math.min(400, Number(settings.synthesisRecordLimit || 120)));
-    const rows = this.query(
-      `SELECT id, canonical_key, record_json, verified_official_url, verified_at, updated_at
-       FROM research_records
-       WHERE project_id = ? AND run_id = ?
-       ORDER BY verified_at DESC, updated_at DESC
-       LIMIT ?`,
-      [runState.projectId, runState.id, limit]
-    );
-    return rows.map((row) => ({
-      id: row.id,
-      canonicalKey: row.canonical_key,
-      verifiedOfficialUrl: row.verified_official_url,
-      verifiedAt: row.verified_at,
-      record: safeParseJson(row.record_json, {}),
-    }));
-  }
-
-  buildSynthesisPrompt(runState, records = []) {
-    const stats = runState?.stats || {};
-    const objective = String(runState?.objective || '').trim();
-    const runInstructions = String(runState?.runInstructions || '').trim();
-    const policyNotes = String(runState?.promptSnapshot?.permanentInstructions || '').trim();
-    const guidance = [
-      'You are preparing a final synthesis for a deep-research run.',
-      'Use ONLY the provided dataset rows.',
-      'Do not invent records, fields, or claims.',
-      'If a fact is missing in dataset rows, state "Unknown from provided sources".',
-      'Cite a source URL in each record bullet.',
-      'Return markdown only.',
-    ].join('\n');
-
-    const recordRows = records.map((item, index) => {
-      const record = item.record || {};
-      const name = String(record.name || item.canonicalKey || `Record ${index + 1}`).trim();
-      const sourceUrl = String(record.official_url || item.verifiedOfficialUrl || '').trim() || 'Unknown from provided sources';
-      const location = [
-        String(record.city || '').trim(),
-        String(record.state || '').trim(),
-      ].filter(Boolean).join(', ') || firstDefinedField(record, ['location']) || 'Unknown from provided sources';
-      const summary = firstDefinedField(record, ['summary', 'description', 'focus', 'program_description']) || 'Unknown from provided sources';
-      const keyDetails = firstDefinedField(record, ['category', 'status', 'services', 'level_of_care', 'notes']) || 'Unknown from provided sources';
-      return [
-        `#${index + 1}`,
-        `name: ${truncateText(name, 120)}`,
-        `source_url: ${sourceUrl}`,
-        `location: ${truncateText(location, 100)}`,
-        `summary: ${truncateText(summary, 180)}`,
-        `key_details: ${truncateText(keyDetails, 140)}`,
-      ].join(' | ');
-    }).join('\n');
-
-    const sections = [
-      guidance,
-      '',
-      'Output format:',
-      '1) # Final Research Synthesis',
-      '2) ## Scope and Method',
-      '3) ## Coverage Metrics',
-      '4) ## Verified Record List',
-      '5) ## Gaps and Unknowns',
-      '6) ## Recommended Follow-up Queries',
-      '',
-      `Objective: ${objective || 'Not provided'}`,
-      `Run instructions: ${truncateText(runInstructions, 1200) || 'Not provided'}`,
-      `Policy notes: ${truncateText(policyNotes, 1000) || 'Not provided'}`,
-      '',
-      'Metrics:',
-      `- discovered_candidates: ${Number(stats.discoveredCandidates || 0)}`,
-      `- searches_issued: ${Number(stats.searchesIssued || 0)}`,
-      `- verified_saved: ${Number(stats.verifiedSaved || 0)}`,
-      `- rejected_non_official: ${Number(stats.rejectedNonOfficial || 0)}`,
-      `- rejected_blocked: ${Number(stats.rejectedBlocked || 0)}`,
-      `- rejected_irrelevant: ${Number(stats.rejectedIrrelevant || 0)}`,
-      '',
-      `Dataset rows (${records.length}):`,
-      recordRows || 'None',
-    ];
-    return sections.join('\n');
-  }
-
-  async generateFinalSynthesis(runState) {
-    const state = this.ensureRunState(runState);
-    const settings = state.researchSettings || normalizeResearchSettings();
-    if (settings.enableFinalSynthesis === false) {
-      state.finalSynthesis = {
-        status: 'skipped',
-        reason: 'disabled',
-        generatedAt: nowIso(),
-        recordCount: 0,
-      };
-      this.persistPromptSnapshot(state);
-      return state.finalSynthesis;
-    }
-    if (state.finalSynthesis?.status === 'completed' && String(state.finalSynthesis.text || '').trim()) {
-      return state.finalSynthesis;
-    }
-
-    const records = this.listRunRecordsForSynthesis(state);
-    const synthesisStart = nowIso();
-    state.finalSynthesis = {
-      status: 'running',
-      startedAt: synthesisStart,
-      recordCount: records.length,
-    };
-    this.persistPromptSnapshot(state);
-    this.pushActivity(state, {
-      id: uuidv4(),
-      at: synthesisStart,
-      phase: 'synthesis',
-      phaseLabel: 'Synthesis',
-      status: 'started',
-      summary: `Compiling final synthesis from ${records.length} verified record${records.length === 1 ? '' : 's'}.`,
-      details: '',
-    });
-    this.emitProgress(state, true);
-
-    const goalProgress = this.getGoalProgress(state);
-    const fallbackText = buildFallbackSynthesisMarkdown({
-      runState: state,
-      records,
-      goals: goalProgress,
-    });
-
-    if (records.length === 0) {
-      state.finalSynthesis = {
-        status: 'completed',
-        mode: 'fallback',
-        text: fallbackText,
-        generatedAt: nowIso(),
-        recordCount: 0,
-      };
-      this.persistPromptSnapshot(state);
-      this.pushActivity(state, {
-        id: uuidv4(),
-        at: nowIso(),
-        phase: 'synthesis',
-        phaseLabel: 'Synthesis',
-        status: 'completed',
-        summary: 'Final synthesis generated (no verified records to summarize).',
-        details: '',
-      });
-      this.emitProgress(state, true);
-      return state.finalSynthesis;
-    }
-
-    const prompt = this.buildSynthesisPrompt(state, records);
-    try {
-      if (!this.synthesisGenerator) throw new Error('synthesis_generator_unavailable');
-      const result = await this.synthesisGenerator({
-        runState: state,
-        records,
-        prompt,
-      });
-      const text = String(result?.text || '').trim();
-      if (!text) throw new Error('empty_synthesis_output');
-      state.finalSynthesis = {
-        status: 'completed',
-        mode: 'llm',
-        model: String(result?.model || '').trim() || null,
-        text,
-        generatedAt: nowIso(),
-        recordCount: records.length,
-      };
-    } catch (error) {
-      state.finalSynthesis = {
-        status: 'completed',
-        mode: 'fallback',
-        model: null,
-        text: fallbackText,
-        generatedAt: nowIso(),
-        recordCount: records.length,
-        warning: String(error?.message || error || 'synthesis_failed'),
-      };
-    }
-
-    this.persistPromptSnapshot(state);
-    this.pushActivity(state, {
-      id: uuidv4(),
-      at: nowIso(),
-      phase: 'synthesis',
-      phaseLabel: 'Synthesis',
-      status: 'completed',
-      summary: state.finalSynthesis.mode === 'llm'
-        ? 'Final synthesis generated with model summary pass.'
-        : 'Final synthesis generated using deterministic fallback.',
-      details: state.finalSynthesis.warning
-        ? `Fallback reason: ${state.finalSynthesis.warning}`
-        : `Mode: ${state.finalSynthesis.mode || 'unknown'}`,
-    });
-    this.emitProgress(state, true);
-    return state.finalSynthesis;
-  }
-
-  listRecentRunRecords(runState, limit = 4) {
-    const safeLimit = Math.max(1, Math.min(12, Number(limit || 4)));
-    const rows = this.query(
-      `SELECT canonical_key, record_json, verified_official_url, verified_at
-       FROM research_records
-       WHERE project_id = ? AND run_id = ?
-       ORDER BY verified_at DESC
-       LIMIT ?`,
-      [runState.projectId, runState.id, safeLimit]
-    );
-    return rows.map((row) => ({
-      canonicalKey: row.canonical_key,
-      verifiedOfficialUrl: row.verified_official_url,
-      verifiedAt: row.verified_at,
-      record: safeParseJson(row.record_json, {}),
-    }));
-  }
-
-  buildProgressSummaryPrompt(runState, recentRecords = []) {
-    const stats = runState?.stats || {};
-    const goalProgress = this.getGoalProgress(runState);
-    const recordsDigest = recentRecords.map((item, index) => {
-      const record = item.record || {};
-      const name = String(record.name || item.canonicalKey || `Record ${index + 1}`).trim();
-      const location = [String(record.city || '').trim(), String(record.state || '').trim()].filter(Boolean).join(', ');
-      const url = String(record.official_url || item.verifiedOfficialUrl || '').trim();
-      return `#${index + 1} ${name}${location ? ` | ${location}` : ''}${url ? ` | ${url}` : ''}`;
-    }).join('\n');
-
-    return [
-      'You are a research coordinator giving a brief in-run status update.',
-      'Return 4 to 7 concise bullet points in plain language.',
-      'Do not claim completion unless the run is complete.',
-      'If no verified records exist yet, explicitly say that and mention next search focus.',
-      '',
-      `Objective: ${String(runState?.objective || '').trim()}`,
-      `Run instructions: ${truncateText(String(runState?.runInstructions || '').trim(), 1000) || 'Not provided'}`,
-      '',
-      `Stats: searches=${Number(stats.searchesIssued || 0)}, discovered=${Number(stats.discoveredCandidates || 0)}, verified=${Number(stats.verifiedSaved || 0)}, rejected_non_official=${Number(stats.rejectedNonOfficial || 0)}, rejected_irrelevant=${Number(stats.rejectedIrrelevant || 0)}`,
-      `Runtime minutes: ${Math.floor(Number(goalProgress?.current?.elapsedMinutes || 0))}`,
-      '',
-      `Recent verified records (${recentRecords.length}):`,
-      recordsDigest || 'None',
-    ].join('\n');
-  }
-
-  async maybeGenerateProgressSummary(runState, { force = false } = {}) {
-    const state = this.ensureRunState(runState);
-    if (state.status !== 'running') return null;
-    const now = Date.now();
-    const lastAt = Number(state.lastProgressSummaryAt || 0);
-    const summaryIntervalMs = 90000;
-    const searches = Number(state.stats.searchesIssued || 0);
-    const verified = Number(state.stats.verifiedSaved || 0);
-    const lastSearches = Number(state.lastProgressSummarySearches || 0);
-    const lastVerified = Number(state.lastProgressSummaryVerified || 0);
-
-    const changedEnough = (verified > lastVerified) || (searches - lastSearches >= 12);
-    if (!force && !changedEnough && (now - lastAt) < summaryIntervalMs) {
-      return null;
-    }
-
-    const recentRecords = this.listRecentRunRecords(state, 4);
-    let summaryText = '';
-    let summaryModel = '';
-    if (this.progressSummaryGenerator) {
-      try {
-        const prompt = this.buildProgressSummaryPrompt(state, recentRecords);
-        const llm = await this.progressSummaryGenerator({
-          runState: state,
-          recentRecords,
-          prompt,
-        });
-        summaryText = String(llm?.text || '').trim();
-        summaryModel = String(llm?.model || '').trim();
-      } catch (_error) {
-        summaryText = '';
-      }
-    }
-    if (!summaryText) {
-      summaryText = buildIntermediateSummaryText({
-        runState: {
-          ...state,
-          goalProgress: this.getGoalProgress(state),
-        },
-        recentRecords,
-      });
-    }
-    summaryText = String(summaryText || '').trim();
-    if (!summaryText) return null;
-
-    state.intermediateSummary = {
-      text: summaryText,
-      model: summaryModel || null,
-      generatedAt: nowIso(),
-      searchesIssued: searches,
-      verifiedSaved: verified,
-    };
-    state.lastProgressSummaryAt = now;
-    state.lastProgressSummarySearches = searches;
-    state.lastProgressSummaryVerified = verified;
-    state.promptSnapshot = {
-      ...(state.promptSnapshot && typeof state.promptSnapshot === 'object' ? state.promptSnapshot : {}),
-      intermediateSummary: state.intermediateSummary,
-    };
-
-    this.pushActivity(state, {
-      id: uuidv4(),
-      at: state.intermediateSummary.generatedAt,
-      phase: 'synthesis',
-      phaseLabel: 'Update',
-      status: 'completed',
-      summary: 'Progress update generated.',
-      details: summaryText,
-    });
-    return state.intermediateSummary;
   }
 
   persistCheckpoint(runState) {
     const queuePayload = {};
     for (const phase of PHASES) {
-      queuePayload[phase] = (runState.queues?.[phase] || []).map((task) => ({
-        id: task.id,
-        phase: task.phase,
-        payload: task.payload,
-        retries: task.retries,
-        createdAt: task.createdAt,
+      queuePayload[phase] = (runState.queues?.[phase] || []).map((t) => ({
+        id: t.id, phase: t.phase, payload: t.payload, retries: t.retries, createdAt: t.createdAt,
       }));
     }
     const statePayload = {
       status: runState.status,
-      objective: runState.objective,
-      runInstructions: runState.runInstructions,
+      question: runState.question,
+      intent: runState.intent || runState.question,
+      jurisdiction: runState.jurisdiction || 'auto',
       workerCount: runState.workerCount,
-      researchSettings: runState.researchSettings || normalizeResearchSettings(),
-      topicProfile: runState.topicProfile || null,
+      settings: runState.settings,
+      sourcePolicy: runState.sourcePolicy,
+      projectContext: runState.projectContext,
+      intentProfile: runState.intentProfile,
+      stageStatus: ensureStageStatusShape(runState.stageStatus || {}),
+      assumptions: (runState.assumptions || []).slice(-80),
+      policyViolations: (runState.policyViolations || []).slice(-250),
+      steeringEvents: (runState.steeringEvents || []).slice(-120),
+      quality: buildRunQuality(runState),
       stats: runState.stats,
       convergenceCount: runState.convergenceCount,
-      lastSavedCount: runState.lastSavedCount,
-      queryCursor: Number(runState.queryCursor || 0),
-      runStartedAtMs: Number(runState.runStartedAtMs || Date.now()),
-      searchFailureStreak: Number(runState.searchFailureStreak || 0),
-      searchBackoffUntil: Number(runState.searchBackoffUntil || 0),
-      lastProgressSummaryAt: Number(runState.lastProgressSummaryAt || 0),
-      lastProgressSummarySearches: Number(runState.lastProgressSummarySearches || 0),
-      lastProgressSummaryVerified: Number(runState.lastProgressSummaryVerified || 0),
-      discoverQueriesSeen: Array.from(runState.discoverQueriesSeen || []),
-      candidateUrlsSeen: Array.from(runState.candidateUrlsSeen || []),
-      activitySeq: Number(runState.activitySeq || 0),
-      activityLog: Array.isArray(runState.activityLog) ? runState.activityLog.slice(-500) : [],
+      findings: (runState.findings || []).slice(-200),
+      sourcesRead: (runState.sourcesRead || []).slice(-100),
+      runStartedAtMs: runState.runStartedAtMs,
+      queriesSeen: Array.from(runState.queriesSeen || []),
+      urlsSeen: Array.from(runState.urlsSeen || []),
+      taskKeys: Array.from(runState.taskKeys || []),
+      stepKeys: Array.from(runState.stepKeys || []),
+      activitySeq: runState.activitySeq || 0,
+      activityLog: (runState.activityLog || []).slice(-400),
       domainTally: Object.fromEntries(runState.domainTally instanceof Map ? runState.domainTally.entries() : []),
-      intermediateSummary: runState.intermediateSummary || null,
-      finalSynthesis: runState.finalSynthesis || null,
+      persistedFindingKeys: Array.from(runState.persistedFindingKeys || []),
+      report: runState.report || null,
+      progressSummaries: runState.progressSummaries || [],
       savedAt: nowIso(),
     };
     this.run(
-      `INSERT INTO research_checkpoints (id, run_id, queue_json, state_json, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
+      `INSERT INTO research_checkpoints (id, run_id, queue_json, state_json, created_at) VALUES (?, ?, ?, ?, ?)`,
       [uuidv4(), runState.id, safeStringify(queuePayload), safeStringify(statePayload), nowIso()]
     );
     runState.lastCheckpointAt = Date.now();
@@ -1731,612 +1548,762 @@ class ResearchOrchestrator extends EventEmitter {
   updateTaskRow(runState, task, status, output = null, error = null, workerId = null) {
     if (!task.taskRowInserted) {
       this.run(
-        `INSERT INTO research_tasks
-          (id, run_id, worker_id, phase, status, input_json, output_json, error, started_at, ended_at)
+        `INSERT INTO research_tasks (id, run_id, worker_id, phase, status, input_json, output_json, error, started_at, ended_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          task.id,
-          runState.id,
-          workerId || 'worker',
-          task.phase,
-          status,
-          safeStringify(task.payload),
-          output ? safeStringify(output) : null,
-          error || null,
-          status === 'running' ? nowIso() : null,
-          ['completed', 'failed', 'blocked', 'skipped'].includes(status) ? nowIso() : null,
-        ]
+        [task.id, runState.id, workerId || 'worker', task.phase, status,
+         safeStringify(task.payload), output ? safeStringify(output) : null, error || null,
+         status === 'running' ? nowIso() : null,
+         ['completed', 'failed', 'blocked', 'skipped'].includes(status) ? nowIso() : null]
       );
       task.taskRowInserted = true;
     } else {
       this.run(
-        `UPDATE research_tasks
-         SET status = ?, output_json = ?, error = ?, ended_at = ?, worker_id = ?
-         WHERE id = ?`,
-        [
-          status,
-          output ? safeStringify(output) : null,
-          error || null,
-          ['completed', 'failed', 'blocked', 'skipped'].includes(status) ? nowIso() : null,
-          workerId || 'worker',
-          task.id,
-        ]
+        `UPDATE research_tasks SET status = ?, output_json = ?, error = ?, ended_at = ?, worker_id = ? WHERE id = ?`,
+        [status, output ? safeStringify(output) : null, error || null,
+         ['completed', 'failed', 'blocked', 'skipped'].includes(status) ? nowIso() : null,
+         workerId || 'worker', task.id]
       );
     }
   }
 
-  async executeDiscover(runState, task) {
+  /* -- Phase executors ---------------------------------------------- */
+
+  async executePlan(runState, _task) {
+    const question = String(runState.question || '').trim();
+    if (!question) return { skipped: true, reason: 'empty_question' };
+    this.setStageState(runState, 'intent_compile', { status: 'running', pass: null, reason: '' });
+    const sourcePolicy = mergeSourcePolicy(DEFAULT_SOURCE_POLICY, runState.sourcePolicy || {});
+    runState.sourcePolicy = sourcePolicy;
+    const compiled = buildIntentAndAssumptions(
+      question,
+      runState.intent || question,
+      runState.jurisdiction || 'auto'
+    );
+    runState.intent = compiled.intent;
+    runState.jurisdiction = compiled.jurisdiction;
+    this.addAssumptions(runState, compiled.assumptions);
+    const intent = buildIntentProfile(question, runState.projectContext, sourcePolicy);
+    runState.intentProfile = intent;
+
+    if (this.llmCall) {
+      const prompt = buildPlanPrompt(question, runState.projectContext);
+      try {
+        const result = await this.llmCall({ prompt, maxTokens: 1200 });
+        const queries = parseQueriesFromLLM(result?.text || '');
+        if (queries.length > 0) {
+          const settings = runState.settings || resolveSettings();
+          const tuned = tuneQueriesForIntent(queries, intent, settings.maxQueries);
+          const finalQueries = tuned.length > 0
+            ? tuned
+            : this.generateFallbackQueries(question, intent).slice(0, settings.maxQueries);
+          for (const query of finalQueries) {
+            this.enqueueTask(runState, 'search', { query, depth: 0 });
+          }
+          this.setStageState(runState, 'intent_compile', {
+            status: 'completed',
+            pass: true,
+            reason: tuned.length > 0 ? 'llm_plan_generated' : 'fallback_plan_generated',
+          });
+          return {
+            queriesGenerated: finalQueries.length,
+            queries: finalQueries,
+            mode: tuned.length > 0 ? 'llm' : 'fallback',
+            stageId: 'intent_compile',
+          };
+        }
+      } catch (err) {
+        // Fall through to fallback query generation
+        runState.stats.errors += 1;
+        runState.stats.lastError = `plan_llm_failed: ${err.message || err}`;
+      }
+    }
+
+    // Fallback: generate basic queries from the question itself
+    const fallbackQueries = this.generateFallbackQueries(question, intent);
+    for (const query of fallbackQueries) {
+      this.enqueueTask(runState, 'search', { query, depth: 0 });
+    }
+    this.setStageState(runState, 'intent_compile', {
+      status: 'completed',
+      pass: fallbackQueries.length > 0,
+      reason: fallbackQueries.length > 0 ? 'fallback_plan_generated' : 'no_queries_generated',
+    });
+    return { queriesGenerated: fallbackQueries.length, queries: fallbackQueries, mode: 'fallback', stageId: 'intent_compile' };
+  }
+
+  generateFallbackQueries(question, intent = {}) {
+    const q = buildCoreQuestionQuery(question, intent);
+    if (!q) return [];
+    const queries = [
+      q,
+      `${q} official website`,
+      `${q} admissions`,
+      `${q} program details`,
+      `${q} contact information`,
+      `${q} accreditation`,
+      `${q} licensing`,
+      `${q} outcomes`,
+    ];
+    if (intent.usGeorgiaIntent) {
+      queries.push(`${q} georgia state united states`);
+      queries.push(`${q} atlanta georgia`);
+    }
+    return tuneQueriesForIntent(queries, intent, 12);
+  }
+
+  async executeSearch(runState, task) {
     const query = String(task.payload?.query || '').trim();
     if (!query) return { skipped: true, reason: 'empty_query' };
-    const settings = runState.researchSettings || normalizeResearchSettings();
-    const taskDepth = Number(task.payload?.depth || 0);
-    if (taskDepth > Number(settings.maxDiscoverDepth || 2)) {
-      return { skipped: true, reason: 'max_discovery_depth_reached', query, depth: taskDepth };
+    this.setStageState(runState, 'retrieve', { status: 'running', pass: null, reason: '' });
+    const settings = runState.settings || resolveSettings();
+    const depth = Number(task.payload?.depth || 0);
+    if (depth > settings.maxFollowUpDepth) {
+      return { skipped: true, reason: 'max_depth_exceeded' };
     }
 
-    const result = await searchWeb(query, {
-      maxResults: Number(settings.maxSearchResultsPerQuery || 20),
-      timeout: 9000,
-      providerOrder: settings.searchProviderOrder,
-      searxngUrl: settings.searxngUrl,
-    });
+    const searchOpts = {
+      maxResults: settings.topResultsPerQuery,
+      timeout: 16000,
+    };
+    if (settings.providerOrder) searchOpts.providerOrder = settings.providerOrder;
+    if (settings.searxngUrl) searchOpts.searxngUrl = settings.searxngUrl;
+
+    const result = await searchWeb(query, searchOpts);
     const entries = Array.isArray(result?.results) ? result.results : [];
-    const searchError = String(result?.error || '').trim();
-    if (entries.length === 0 && searchError) {
-      runState.searchFailureStreak = Number(runState.searchFailureStreak || 0) + 1;
-      if (/\b(403|429)\b/.test(searchError) || /socket|tls|timeout|network|econn|hang up|reset/i.test(searchError)) {
-        const unitMs = /\b(403|429)\b/.test(searchError) ? 3000 : 1500;
-        const backoffMs = Math.min(/\b(403|429)\b/.test(searchError) ? 60000 : 20000, unitMs * runState.searchFailureStreak);
-        runState.searchBackoffUntil = Date.now() + backoffMs;
-      }
-    } else {
-      runState.searchFailureStreak = 0;
-      runState.searchBackoffUntil = 0;
-    }
-    const domainCounts = new Map();
-    let queued = 0;
-    let followUps = 0;
-    let skippedIrrelevant = 0;
-    let queuedFocusedFollowUps = 0;
-
     runState.stats.searchesIssued += 1;
+    runState.stats.resultsFound += entries.length;
     runState.stats.discoveredCandidates += entries.length;
 
-    for (const candidate of entries) {
-      const relevance = scoreTopicRelevance({
-        title: candidate?.title || '',
-        snippet: candidate?.snippet || '',
-        url: candidate?.url || '',
-      }, runState.topicProfile, settings);
-      if (!relevance.isRelevant) {
-        runState.stats.rejectedIrrelevant += 1;
-        skippedIrrelevant += 1;
+    let queued = 0;
+    let rejected = 0;
+    const sourcePolicy = mergeSourcePolicy(DEFAULT_SOURCE_POLICY, runState.sourcePolicy || {});
+    const intent = runState.intentProfile || buildIntentProfile(runState.question, runState.projectContext, sourcePolicy);
+    runState.intentProfile = intent;
+    for (const entry of entries) {
+      const sourceDecision = classifySource({ url: entry.url || '' }, sourcePolicy);
+      if (sourceDecision.isRejected) {
+        runState.stats.rejectedBlocked += 1;
+        rejected += 1;
+        this.recordPolicyViolation(runState, {
+          code: sourceDecision.reason || 'source_rejected',
+          reason: sourceDecision.reason || 'source_rejected',
+          url: entry.url || '',
+          domain: sourceDecision.domain || '',
+          phase: 'search',
+          stageId: 'retrieve',
+        });
         continue;
       }
 
-      const normalized = normalizeUrl(candidate?.url || '');
-      if (!normalized) continue;
-      const domain = normalizeDomain(normalized);
-      if (domain) {
-        domainCounts.set(domain, Number(domainCounts.get(domain) || 0) + 1);
-        this.incrementDomainTally(runState, domain, 1);
+      if (intent.requiresOfficial && isLikelyNonOfficialReferenceDomain(sourceDecision.domain)) {
+        runState.stats.rejectedNonOfficial += 1;
+        rejected += 1;
+        this.recordPolicyViolation(runState, {
+          code: 'non_official_reference_domain',
+          reason: 'non_official_reference_domain',
+          url: entry.url || '',
+          domain: sourceDecision.domain || '',
+          phase: 'search',
+          stageId: 'retrieve',
+        });
+        continue;
       }
-      const enqueued = this.enqueueTask(runState, 'official_verify', {
-        query,
-        depth: taskDepth,
-        relevance,
-        candidate: {
-          title: String(candidate.title || '').trim(),
-          url: normalized,
-          snippet: String(candidate.snippet || '').trim(),
-        },
-      }, normalized);
-      if (enqueued) queued += 1;
 
-      const classification = classifySource(candidate, runState.sourcePolicy);
-      const canExpand = followUps < Number(settings.maxFollowUpsPerQuery || 0)
-        && taskDepth < Number(settings.maxDiscoverDepth || 2);
-      if (!classification.isOfficial && canExpand) {
-        const title = String(candidate.title || '').trim();
-        if (title) {
-          const followUp = buildOfficialFollowUpQuery({
-            title,
-            objective: runState.objective,
-            locationHint: runState.topicProfile?.locationHint || '',
-          });
-          if (followUp && this.enqueueTask(runState, 'discover', { query: followUp, depth: taskDepth + 1 })) {
-            followUps += 1;
-            queuedFocusedFollowUps += 1;
-          }
-        }
+      if (sourcePolicy.allowedDomains?.length > 0 && !sourceDecision.isOfficial) {
+        runState.stats.rejectedNonOfficial += 1;
+        rejected += 1;
+        this.recordPolicyViolation(runState, {
+          code: 'allowlist_only',
+          reason: 'allowlist_only',
+          url: entry.url || '',
+          domain: sourceDecision.domain || '',
+          phase: 'search',
+          stageId: 'retrieve',
+        });
+        continue;
       }
+
+      if (sourcePolicy.requireOfficial && !sourceDecision.isOfficial && sourceDecision.tier === 'tertiary') {
+        runState.stats.rejectedNonOfficial += 1;
+        rejected += 1;
+        this.recordPolicyViolation(runState, {
+          code: 'official_required_non_authoritative',
+          reason: 'official_required_non_authoritative',
+          url: entry.url || '',
+          domain: sourceDecision.domain || '',
+          phase: 'search',
+          stageId: 'retrieve',
+        });
+        continue;
+      }
+
+      const resultPreview = `${entry.title || ''}\n${entry.snippet || ''}\n${entry.url || ''}`;
+      const isPreviewRelevant = isRelevantToIntent(resultPreview, intent);
+      const deferToReadStage = intent.requiresOfficial && sourceDecision.isOfficial;
+      if (!isPreviewRelevant && !deferToReadStage) {
+        runState.stats.rejectedIrrelevant += 1;
+        rejected += 1;
+        continue;
+      }
+
+      const url = sourceDecision.normalizedUrl || normalizeUrl(entry.url || '');
+      if (!url) continue;
+      const domain = sourceDecision.domain || normalizeDomain(url);
+      if (domain) this.incrementDomainTally(runState, domain, 1);
+
+      const enqueued = this.enqueueTask(runState, 'read', {
+        url,
+        title: String(entry.title || '').trim(),
+        snippet: String(entry.snippet || '').trim(),
+        query,
+        depth,
+        isOfficial: Boolean(sourceDecision.isOfficial),
+        sourceTier: sourceDecision.tier || 'standard',
+        sourceQuality: Number(sourceDecision.quality || 0),
+        sourceReason: sourceDecision.reason || '',
+      }, url);
+      if (enqueued) queued += 1;
     }
 
-    const topDomains = Array.from(domainCounts.entries())
-      .map(([domain, count]) => ({ domain, count }))
-      .sort((a, b) => b.count - a.count)
-      .slice(0, 8);
+    this.setStageState(runState, 'retrieve', {
+      status: 'completed',
+      pass: queued > 0 || entries.length > 0,
+      reason: queued > 0 ? 'queued_read_tasks' : (entries.length > 0 ? 'results_found_no_queue' : 'no_results'),
+    });
 
     return {
       query,
       found: entries.length,
       queued,
-      followUps,
-      skippedIrrelevant,
-      queuedFocusedFollowUps,
-      topDomains,
-      tookMs: Number(result?.took || 0),
+      rejected,
+      provider: result?.provider || null,
       error: result?.error || null,
-      failureStreak: Number(runState.searchFailureStreak || 0),
-      backoffUntil: Number(runState.searchBackoffUntil || 0),
+      stageId: 'retrieve',
     };
   }
 
-  async executeOfficialVerify(runState, task) {
-    const settings = runState.researchSettings || normalizeResearchSettings();
-    const candidate = task.payload?.candidate || {};
-    const classification = classifySource(candidate, runState.sourcePolicy);
-    if (classification?.domain) {
-      this.incrementDomainTally(runState, classification.domain, 1);
-    }
-    if (!classification.isOfficial) {
+  async executeRead(runState, task) {
+    const url = String(task.payload?.url || '').trim();
+    if (!url) return { skipped: true, reason: 'no_url' };
+    this.setStageState(runState, 'verify', { status: 'running', pass: null, reason: '' });
+    const settings = runState.settings || resolveSettings();
+    const sourcePolicy = mergeSourcePolicy(DEFAULT_SOURCE_POLICY, runState.sourcePolicy || {});
+    const intent = runState.intentProfile || buildIntentProfile(runState.question, runState.projectContext, sourcePolicy);
+    runState.intentProfile = intent;
+    const domain = normalizeDomain(url);
+
+    if (intent.requiresOfficial && isLikelyNonOfficialReferenceDomain(domain)) {
       runState.stats.rejectedNonOfficial += 1;
-      if (Number(task.payload?.depth || 0) < Number(settings.maxDiscoverDepth || 2)) {
-        const title = String(candidate.title || '').trim();
-        if (title) {
-          const followUp = buildOfficialFollowUpQuery({
-            title,
-            objective: runState.objective,
-            locationHint: runState.topicProfile?.locationHint || '',
-          });
-          if (followUp) {
-            this.enqueueTask(runState, 'discover', {
-              query: followUp,
-              depth: Number(task.payload?.depth || 0) + 1,
-            });
-          }
-        }
-      }
-      return {
-        skipped: true,
-        reason: classification.reason || 'not_official',
-        candidateUrl: candidate.url || '',
-      };
+      runState.stats.skippedReads += 1;
+      this.recordPolicyViolation(runState, {
+        code: 'non_official_reference_domain',
+        reason: 'non_official_reference_domain',
+        url,
+        domain,
+        phase: 'read',
+        stageId: 'verify',
+      });
+      this.setStageState(runState, 'verify', {
+        status: 'blocked',
+        pass: false,
+        reason: 'non_official_reference_domain',
+      });
+      return { skipped: true, reason: 'non_official_reference_domain' };
     }
 
-    const page = await fetchPageContent(classification.normalizedUrl, { maxLength: 22000, timeout: 18000 });
-    runState.stats.verifiedOfficialCandidates += 1;
-    runState.stats.pagesFetched += 1;
+    const page = await fetchPageContent(url, {
+      maxLength: settings.analyzeMaxContentChars,
+      timeout: 18000,
+    });
+    runState.stats.sourcesRead += 1;
 
     const content = String(page?.content || '').trim();
-    if (!content && !String(page?.title || '').trim()) {
-      runState.stats.rejectedBlocked += 1;
-      return {
-        blocked: true,
-        reason: 'empty_official_page',
-        url: classification.normalizedUrl,
-      };
-    }
-
-    const contentRelevance = scoreTopicRelevance({
-      title: String(page?.title || candidate?.title || '').trim(),
-      snippet: String(candidate?.snippet || '').trim(),
-      url: classification.normalizedUrl,
-      content: content.slice(0, 7000),
-    }, runState.topicProfile, settings);
-    if (!contentRelevance.isRelevant) {
+    if (content.length < 100) {
+      runState.stats.sourcesFailed += 1;
       runState.stats.rejectedIrrelevant += 1;
-      return {
-        skipped: true,
-        reason: contentRelevance.reason || 'page_not_topic_relevant',
-        url: classification.normalizedUrl,
-        relevanceScore: contentRelevance.score,
-      };
-    }
-
-    const queued = this.enqueueTask(runState, 'extract_fields', {
-      page: {
-        url: classification.normalizedUrl,
-        title: String(page?.title || candidate.title || '').trim(),
-        content,
-      },
-      source: classification,
-      relevance: contentRelevance,
-    }, classification.normalizedUrl);
-
-    return {
-      verifiedOfficial: true,
-      url: classification.normalizedUrl,
-      queuedExtract: queued,
-    };
-  }
-
-  async executeExtractFields(runState, task) {
-    const page = task.payload?.page || {};
-    const extraction = await extractRecordFromOfficialPage({
-      page,
-      schema: runState.schema,
-      extractionGenerator: this.extractionGenerator,
-      objective: runState.objective,
-      runInstructions: runState.runInstructions,
-      topicProfile: runState.topicProfile || null,
-    });
-
-    const canonicalKey = extraction.canonicalKey;
-    if (!canonicalKey) {
-      runState.stats.rejectedBlocked += 1;
-      return { blocked: true, reason: 'missing_canonical_key', pageUrl: page.url || '' };
-    }
-
-    if (!extraction.record.official_url) {
-      extraction.record.official_url = normalizeUrl(page.url || '') || '';
-    }
-
-    runState.stats.extractedRecords += 1;
-    const queued = this.enqueueTask(runState, 'evidence_validate', {
-      canonicalKey,
-      record: extraction.record,
-      evidence: extraction.evidence || [],
-      verifiedOfficialUrl: normalizeUrl(page.url || ''),
-      pageTitle: page.title || '',
-    }, canonicalKey);
-
-    return {
-      extracted: Object.keys(extraction.record || {}).length,
-      canonicalKey,
-      queuedValidate: queued,
-      extractionMode: extraction.extractionMode || 'heuristic',
-      extractionModel: extraction.extractionModel || '',
-    };
-  }
-
-  async executeEvidenceValidate(runState, task) {
-    const schema = runState.schema;
-    const recordInput = task.payload?.record || {};
-    const evidenceInput = Array.isArray(task.payload?.evidence) ? task.payload.evidence : [];
-    const validation = validateRecordAgainstSchema(recordInput, schema);
-    if (!validation.valid) {
-      runState.stats.rejectedBlocked += 1;
-      return {
-        blocked: true,
-        reason: 'missing_required_fields',
-        missingRequired: validation.missingRequired,
-      };
-    }
-
-    const evidenceByField = new Map();
-    for (const item of evidenceInput) {
-      const key = String(item.field_key || '').trim();
-      if (!key) continue;
-      const list = evidenceByField.get(key) || [];
-      list.push({
-        ...item,
-        source_url: normalizeUrl(item.source_url || task.payload?.verifiedOfficialUrl || ''),
-        source_domain: normalizeDomain(item.source_domain || ''),
-        is_official: item.is_official !== false,
+      runState.stats.skippedReads += 1;
+      this.setStageState(runState, 'verify', {
+        status: 'completed',
+        pass: false,
+        reason: 'insufficient_content',
       });
-      evidenceByField.set(key, list);
+      return { skipped: true, reason: 'insufficient_content', contentLength: content.length };
     }
 
-    const missingOfficialEvidence = [];
-    for (const field of schema) {
-      if (!field.required) continue;
-      const claims = evidenceByField.get(field.key) || [];
-      const hasOfficial = claims.some((claim) =>
-        claim.is_official === true &&
-        String(claim.claim_text || '').trim().length > 0 &&
-        String(claim.source_url || '').trim().length > 0
-      );
-      if (!hasOfficial) missingOfficialEvidence.push(field.key);
-    }
-    if (missingOfficialEvidence.length > 0) {
-      runState.stats.rejectedBlocked += 1;
-      return {
-        blocked: true,
-        reason: 'missing_official_evidence',
-        missingOfficialEvidence,
-      };
-    }
-
-    const compliance = validateInstructionCompliance({
-      record: validation.normalizedRecord,
-      evidence: evidenceInput,
-      schema,
-    });
-    if (!compliance.compliant) {
-      runState.stats.rejectedBlocked += 1;
-      return {
-        blocked: true,
-        reason: 'instruction_compliance_failed',
-        violations: compliance.violations,
-      };
-    }
-
-    runState.stats.validatedRecords += 1;
-    const queued = this.enqueueTask(runState, 'persist', {
-      canonicalKey: task.payload.canonicalKey,
-      verifiedOfficialUrl: normalizeUrl(task.payload.verifiedOfficialUrl || ''),
-      record: validation.normalizedRecord,
-      evidence: evidenceInput,
-    }, task.payload.canonicalKey);
-
-    return {
-      validated: true,
-      queuedPersist: queued,
-      canonicalKey: task.payload.canonicalKey,
-    };
-  }
-
-  async executePersist(runState, task) {
-    const canonicalKey = String(task.payload?.canonicalKey || '').trim();
-    const record = task.payload?.record || {};
-    const evidence = Array.isArray(task.payload?.evidence) ? task.payload.evidence : [];
-    const settings = runState.researchSettings || normalizeResearchSettings();
-    if (!canonicalKey) {
-      runState.stats.rejectedBlocked += 1;
-      return { blocked: true, reason: 'missing_canonical_key' };
-    }
-
-    // Last safety gate: prevent off-topic records from ever being persisted.
-    const recordRelevance = scoreTopicRelevance({
-      title: String(record.name || '').trim(),
-      snippet: String(record.summary || record.description || record.programDescription || '').trim(),
-      url: normalizeUrl(record.official_url || task.payload?.verifiedOfficialUrl || ''),
-      content: evidence
-        .map((item) => String(item.claim_text || item.excerpt_text || '').trim())
-        .filter(Boolean)
-        .join(' ')
-        .slice(0, 6000),
-    }, runState.topicProfile, settings);
-    if (!recordRelevance.isRelevant) {
+    const relevanceText = [
+      task.payload?.title || '',
+      task.payload?.snippet || '',
+      page?.title || '',
+      content.slice(0, 6000),
+    ].join('\n');
+    if (!isRelevantToIntent(relevanceText, intent)) {
       runState.stats.rejectedIrrelevant += 1;
-      return {
-        blocked: true,
-        reason: recordRelevance.reason || 'record_not_topic_relevant',
-        relevanceScore: recordRelevance.score,
+      runState.stats.skippedReads += 1;
+      this.setStageState(runState, 'verify', {
+        status: 'completed',
+        pass: false,
+        reason: 'off_topic_content',
+      });
+      return { skipped: true, reason: 'off_topic_content' };
+    }
+
+    const evidenceQuote = compactText(content.slice(0, 900), 420);
+    runState.sourcesRead.push({
+      url,
+      title: String(page?.title || task.payload?.title || '').trim(),
+      domain,
+      contentLength: content.length,
+      readAt: nowIso(),
+      rendered: Boolean(page?.rendered),
+      isOfficial: Boolean(task.payload?.isOfficial),
+      sourceTier: String(task.payload?.sourceTier || ''),
+      sourceQuality: Number(task.payload?.sourceQuality || 0),
+      sourceReason: String(task.payload?.sourceReason || ''),
+      query: String(task.payload?.query || ''),
+      depth: Number(task.payload?.depth || 0),
+      evidenceQuote,
+    });
+
+    this.enqueueTask(runState, 'analyze', {
+      url,
+      title: String(page?.title || task.payload?.title || '').trim(),
+      content,
+      domain,
+      depth: Number(task.payload?.depth || 0),
+      isOfficial: Boolean(task.payload?.isOfficial),
+    });
+
+    this.setStageState(runState, 'verify', {
+      status: 'completed',
+      pass: true,
+      reason: 'source_verified',
+    });
+
+    return {
+      contentLength: content.length,
+      title: page?.title || '',
+      rendered: Boolean(page?.rendered),
+      stageId: 'verify',
+    };
+  }
+
+  async executeAnalyze(runState, task) {
+    const content = String(task.payload?.content || '').trim();
+    const question = String(runState.question || '').trim();
+    if (!content || !question) return { skipped: true, reason: 'missing_content_or_question' };
+    this.setStageState(runState, 'synthesize', { status: 'running', pass: null, reason: '' });
+
+    const settings = runState.settings || resolveSettings();
+    const sourcePolicy = mergeSourcePolicy(DEFAULT_SOURCE_POLICY, runState.sourcePolicy || {});
+    const intent = runState.intentProfile || buildIntentProfile(question, runState.projectContext, sourcePolicy);
+    runState.intentProfile = intent;
+    const trimmedContent = content.slice(0, settings.analyzeMaxContentChars);
+
+    if (!this.llmCall) {
+      // No LLM available - store the source as a finding based on snippet
+      const snippet = compactText(task.payload?.snippet || content, 300);
+      let extractedCount = 0;
+      if (snippet && isRelevantToIntent(snippet, intent)) {
+        const evidence = createEvidence({
+          quote: snippet,
+          sourceUrl: task.payload?.url || '',
+          sourceTitle: task.payload?.title || '',
+          sourceDomain: task.payload?.domain || '',
+          supportsFindingIds: [],
+          isOfficial: Boolean(task.payload?.isOfficial),
+        });
+        const finding = {
+          id: uuidv4(),
+          text: snippet,
+          sourceUrl: task.payload?.url || '',
+          sourceTitle: task.payload?.title || '',
+          sourceDomain: task.payload?.domain || '',
+          category: 'fact',
+          isOfficial: Boolean(task.payload?.isOfficial),
+          sourceTier: String(task.payload?.sourceTier || ''),
+          sourceQuality: Number(task.payload?.sourceQuality || 0),
+          relevanceScore: scoreFindingRelevance(snippet, intent),
+          addedAt: nowIso(),
+          evidence: evidence.quote && evidence.sourceUrl ? [evidence] : [],
+        };
+        if (hasValidEvidence(finding.evidence)) {
+          finding.evidence[0].supportsFindingIds = [finding.id];
+          runState.findings.push(finding);
+          this.persistFindingRecord(runState, finding);
+          runState.stats.findingsExtracted += 1;
+          extractedCount = 1;
+        } else {
+          runState.stats.droppedFindings += 1;
+        }
+      } else if (snippet) {
+        runState.stats.droppedFindings += 1;
+      }
+      this.setStageState(runState, 'synthesize', {
+        status: 'completed',
+        pass: extractedCount > 0,
+        reason: extractedCount > 0 ? 'deterministic_finding_added' : 'no_evidence_backed_findings',
+      });
+      return { findingsExtracted: extractedCount, mode: 'no_llm' };
+    }
+
+    const prompt = buildAnalyzePrompt(trimmedContent, question, runState.findings.length, runState.projectContext);
+    const result = await this.llmCall({ prompt, maxTokens: 1500 });
+    const parsed = parseAnalysisFromLLM(result?.text || '');
+    runState.stats.analyzeCalls += 1;
+
+    let acceptedFindings = 0;
+    let droppedFindings = 0;
+    for (const finding of parsed.findings) {
+      if (!isRelevantToIntent(finding.text, intent)) {
+        runState.stats.rejectedIrrelevant += 1;
+        runState.stats.droppedFindings += 1;
+        droppedFindings += 1;
+        continue;
+      }
+      const relevanceScore = scoreFindingRelevance(finding.text, intent);
+      if (relevanceScore < 0.45) {
+        runState.stats.droppedFindings += 1;
+        droppedFindings += 1;
+        continue;
+      }
+      const normalizedFinding = {
+        id: uuidv4(),
+        text: finding.text,
+        sourceUrl: task.payload?.url || '',
+        sourceTitle: task.payload?.title || '',
+        sourceDomain: task.payload?.domain || '',
+        category: finding.category || 'fact',
+        isOfficial: Boolean(task.payload?.isOfficial),
+        sourceTier: String(task.payload?.sourceTier || ''),
+        sourceQuality: Number(task.payload?.sourceQuality || 0),
+        relevanceScore,
+        addedAt: nowIso(),
+        evidence: [createEvidence({
+          quote: compactText(finding.text, 500),
+          sourceUrl: task.payload?.url || '',
+          sourceTitle: task.payload?.title || '',
+          sourceDomain: task.payload?.domain || '',
+          supportsFindingIds: [],
+          isOfficial: Boolean(task.payload?.isOfficial),
+        })],
+      };
+      if (!hasValidEvidence(normalizedFinding.evidence)) {
+        runState.stats.droppedFindings += 1;
+        droppedFindings += 1;
+        continue;
+      }
+      normalizedFinding.evidence[0].supportsFindingIds = [normalizedFinding.id];
+      runState.findings.push(normalizedFinding);
+      this.persistFindingRecord(runState, normalizedFinding);
+      runState.stats.findingsExtracted += 1;
+      acceptedFindings += 1;
+    }
+
+    // Enqueue follow-up queries
+    const depth = Number(task.payload?.depth || 0);
+    let queuedFollowUp = 0;
+    if (depth < settings.maxFollowUpDepth) {
+      const tunedFollowUp = tuneQueriesForIntent(parsed.followUpQueries, intent, 3);
+      for (const query of tunedFollowUp) {
+        if (!isRelevantToIntent(query, intent)) continue;
+        this.enqueueTask(runState, 'search', { query, depth: depth + 1, stepKey: `followup:${query.toLowerCase()}` });
+        runState.stats.followUpQueriesGenerated += 1;
+        queuedFollowUp += 1;
+      }
+    }
+
+    this.setStageState(runState, 'synthesize', {
+      status: 'completed',
+      pass: acceptedFindings > 0,
+      reason: acceptedFindings > 0 ? 'evidence_backed_findings_added' : 'no_evidence_backed_findings',
+    });
+
+    return {
+      findingsExtracted: acceptedFindings,
+      droppedFindings,
+      followUpQueries: queuedFollowUp,
+      stageId: 'synthesize',
+    };
+  }
+
+  /* -- Progress summaries ------------------------------------------- */
+
+  async maybeEmitProgressSummary(runState) {
+    const now = Date.now();
+    if (now - (runState.lastProgressSummaryAt || 0) < this.progressSummaryIntervalMs) return;
+    if (!this.llmCall) return;
+    if (runState.findings.length === 0) return;
+
+    runState.lastProgressSummaryAt = now;
+    try {
+      const prompt = buildProgressSummary(
+        runState.question,
+        runState.findings,
+        runState.sourcesRead.length,
+        runState.stats.searchesIssued,
+        runState.projectContext,
+      );
+      const result = await this.llmCall({ prompt, maxTokens: 400 });
+      const text = String(result?.text || '').trim();
+      if (text) {
+        runState.progressSummaries.push({ text, at: nowIso(), findingsCount: runState.findings.length });
+        this.pushActivity(runState, {
+          id: uuidv4(),
+          at: nowIso(),
+          phase: 'progress',
+          phaseLabel: 'Progress',
+          status: 'completed',
+          summary: text,
+        });
+        this.emitProgress(runState, true);
+      }
+    } catch (_err) {
+      // Non-fatal - just skip this progress summary
+    }
+  }
+
+  /* -- Final report generation -------------------------------------- */
+
+  async generateReport(runState) {
+    const state = this.ensureRunState(runState);
+    if (state.report?.status === 'completed' && state.report?.text) return state.report;
+
+    state.report = { status: 'running', startedAt: nowIso() };
+    this.pushActivity(state, {
+      id: uuidv4(), at: nowIso(), phase: 'synthesis', phaseLabel: 'Synthesis',
+      status: 'started', summary: `Generating final report from ${state.findings.length} findings...`,
+    });
+    this.emitProgress(state, true);
+
+    // Build fallback report
+    const fallbackText = this.buildFallbackReport(state);
+
+    if (state.findings.length === 0) {
+      state.report = { status: 'completed', mode: 'fallback', text: fallbackText, generatedAt: nowIso(), findingsCount: 0 };
+      this.pushActivity(state, {
+        id: uuidv4(), at: nowIso(), phase: 'synthesis', phaseLabel: 'Synthesis',
+        status: 'completed', summary: 'Report generated (no findings to summarize).',
+      });
+      this.emitProgress(state, true);
+      return state.report;
+    }
+
+    if (!this.llmCall) {
+      state.report = { status: 'completed', mode: 'fallback', text: fallbackText, generatedAt: nowIso(), findingsCount: state.findings.length };
+      this.pushActivity(state, {
+        id: uuidv4(), at: nowIso(), phase: 'synthesis', phaseLabel: 'Synthesis',
+        status: 'completed', summary: 'Report generated (deterministic fallback, no LLM).',
+      });
+      this.emitProgress(state, true);
+      return state.report;
+    }
+
+    try {
+      const prompt = buildReportPrompt(state.question, state.findings, state.projectContext);
+      const result = await this.llmCall({ prompt, maxTokens: 4000 });
+      const text = String(result?.text || '').trim();
+      if (!text) throw new Error('empty_report_output');
+
+      state.report = {
+        status: 'completed',
+        mode: 'llm',
+        model: String(result?.model || '').trim() || null,
+        text,
+        generatedAt: nowIso(),
+        findingsCount: state.findings.length,
+      };
+    } catch (err) {
+      state.report = {
+        status: 'completed',
+        mode: 'fallback',
+        text: fallbackText,
+        generatedAt: nowIso(),
+        findingsCount: state.findings.length,
+        warning: String(err?.message || err || 'report_generation_failed'),
       };
     }
 
-    const existing = this.queryOne(
-      `SELECT id FROM research_records WHERE project_id = ? AND canonical_key = ?`,
-      [runState.projectId, canonicalKey]
-    );
-    const recordId = existing?.id || uuidv4();
-    const verifiedOfficialUrl = normalizeUrl(task.payload?.verifiedOfficialUrl || record.official_url || '');
-
-    if (existing?.id) {
-      this.run(
-        `UPDATE research_records
-         SET run_id = ?, record_json = ?, verified_official_url = ?, verified_at = ?, updated_at = ?
-         WHERE id = ?`,
-        [
-          runState.id,
-          safeStringify(record),
-          verifiedOfficialUrl,
-          nowIso(),
-          nowIso(),
-          recordId,
-        ]
-      );
-      this.run(`DELETE FROM research_evidence WHERE record_id = ?`, [recordId]);
-      runState.stats.deduped += 1;
-    } else {
-      this.run(
-        `INSERT INTO research_records
-          (id, project_id, run_id, canonical_key, record_json, verified_official_url, verified_at, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          recordId,
-          runState.projectId,
-          runState.id,
-          canonicalKey,
-          safeStringify(record),
-          verifiedOfficialUrl,
-          nowIso(),
-          nowIso(),
-          nowIso(),
-        ]
-      );
-      runState.stats.verifiedSaved += 1;
-    }
-
-    for (const item of evidence) {
-      this.run(
-        `INSERT INTO research_evidence
-          (id, record_id, field_key, claim_text, source_url, source_domain, source_title, excerpt_text, is_official, fetched_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [
-          uuidv4(),
-          recordId,
-          String(item.field_key || '').trim(),
-          String(item.claim_text || '').trim(),
-          normalizeUrl(item.source_url || verifiedOfficialUrl),
-          normalizeDomain(item.source_domain || ''),
-          String(item.source_title || '').trim(),
-          String(item.excerpt_text || '').trim(),
-          item.is_official === false ? 0 : 1,
-          item.fetched_at || nowIso(),
-        ]
-      );
-    }
-
-    runState.lastActivityAt = Date.now();
-    this.saveDatabase();
-    return {
-      persisted: true,
-      recordId,
-      deduped: Boolean(existing?.id),
-      evidenceCount: evidence.length,
-    };
+    this.pushActivity(state, {
+      id: uuidv4(), at: nowIso(), phase: 'synthesis', phaseLabel: 'Synthesis',
+      status: 'completed',
+      summary: state.report.mode === 'llm' ? 'Final research report generated.' : 'Report generated using fallback.',
+    });
+    this.emitProgress(state, true);
+    return state.report;
   }
+
+  buildFallbackReport(runState) {
+    const stats = runState.stats || {};
+    const lines = [];
+    lines.push('# Research Report');
+    lines.push('');
+    lines.push('## Research Question');
+    lines.push(String(runState.question || 'Not provided'));
+    lines.push('');
+    lines.push('## Coverage');
+    lines.push(`- Searches issued: ${stats.searchesIssued || 0}`);
+    lines.push(`- Sources read: ${stats.sourcesRead || 0}`);
+    lines.push(`- Findings extracted: ${stats.findingsExtracted || 0}`);
+    lines.push('');
+    lines.push('## Key Findings');
+    if (!runState.findings || runState.findings.length === 0) {
+      lines.push('No findings were extracted during this research run.');
+    } else {
+      const byDomain = new Map();
+      for (const f of runState.findings) {
+        const domain = f.sourceDomain || 'unknown';
+        const list = byDomain.get(domain) || [];
+        list.push(f);
+        byDomain.set(domain, list);
+      }
+      for (const [domain, domainFindings] of byDomain) {
+        lines.push(`\n### From ${domain}`);
+        for (const f of domainFindings) {
+          lines.push(`- ${f.text}`);
+        }
+      }
+    }
+    lines.push('');
+    lines.push('## Sources');
+    const uniqueSources = new Map();
+    for (const s of (runState.sourcesRead || [])) {
+      if (!uniqueSources.has(s.url)) uniqueSources.set(s.url, s);
+    }
+    if (uniqueSources.size === 0) {
+      lines.push('No sources were successfully read.');
+    } else {
+      for (const [url, source] of uniqueSources) {
+        lines.push(`- [${source.title || source.domain || 'Source'}](${url})`);
+      }
+    }
+    return lines.join('\n');
+  }
+
+  /* -- Task dispatcher ---------------------------------------------- */
 
   async executeTask(runState, workerId, task) {
     switch (task.phase) {
-      case 'discover':
-        return this.executeDiscover(runState, task);
-      case 'official_verify':
-        return this.executeOfficialVerify(runState, task);
-      case 'extract_fields':
-        return this.executeExtractFields(runState, task);
-      case 'evidence_validate':
-        return this.executeEvidenceValidate(runState, task);
-      case 'persist':
-        return this.executePersist(runState, task);
-      default:
-        return { skipped: true, reason: 'unknown_phase', phase: task.phase, workerId };
+      case 'plan': return this.executePlan(runState, task);
+      case 'search': return this.executeSearch(runState, task);
+      case 'read': return this.executeRead(runState, task);
+      case 'analyze': return this.executeAnalyze(runState, task);
+      default: return { skipped: true, reason: 'unknown_phase' };
     }
   }
 
+  /* -- Worker loop -------------------------------------------------- */
+
   async workerLoop(runState, workerId) {
     const state = this.ensureRunState(runState);
-    state.workerStatus.set(workerId, {
-      workerId,
-      status: 'idle',
-      phase: null,
-      taskId: null,
-      updatedAt: Date.now(),
-    });
+    state.workerStatus.set(workerId, { workerId, status: 'idle', phase: null, taskId: null, updatedAt: Date.now() });
 
     while (state.status === 'running' || state.status === 'paused') {
       if (state.status === 'paused') {
-        state.workerStatus.set(workerId, {
-          workerId,
-          status: 'paused',
-          phase: null,
-          taskId: null,
-          updatedAt: Date.now(),
-        });
+        state.workerStatus.set(workerId, { workerId, status: 'paused', phase: null, taskId: null, updatedAt: Date.now() });
         await sleep(250);
         continue;
       }
 
       const task = this.dequeueTask(state);
       if (!task) {
-        state.workerStatus.set(workerId, {
-          workerId,
-          status: 'idle',
-          phase: null,
-          taskId: null,
-          updatedAt: Date.now(),
-        });
-        await sleep(220);
+        state.workerStatus.set(workerId, { workerId, status: 'idle', phase: null, taskId: null, updatedAt: Date.now() });
+        await sleep(200);
         continue;
       }
 
-      if (task.phase === 'discover' && Date.now() < Number(state.searchBackoffUntil || 0)) {
-        state.queues.discover.push(task);
-        state.workerStatus.set(workerId, {
-          workerId,
-          status: 'backoff',
-          phase: 'discover',
-          taskId: null,
-          updatedAt: Date.now(),
-        });
-        const waitMs = Math.min(1500, Math.max(250, Number(state.searchBackoffUntil || 0) - Date.now()));
-        await sleep(waitMs);
-        continue;
-      }
-
-      state.activeWorkersCount = Number(state.activeWorkersCount || 0) + 1;
-      state.workerStatus.set(workerId, {
-        workerId,
-        status: 'busy',
-        phase: task.phase,
-        taskId: task.id,
-        updatedAt: Date.now(),
-      });
+      state.workerStatus.set(workerId, { workerId, status: 'busy', phase: task.phase, taskId: task.id, updatedAt: Date.now() });
       this.updateTaskRow(state, task, 'running', null, null, workerId);
-      this.pushActivity(state, this.buildTaskActivityEvent({
-        task,
-        status: 'started',
-        workerId,
-      }));
+      this.pushActivity(state, this.buildTaskActivityEvent({ task, status: 'started', workerId }));
+      this.emitProgress(state);
 
       try {
         const output = await this.executeTask(state, workerId, task);
-        let taskStatus = 'completed';
-        if (output?.blocked) {
-          taskStatus = 'blocked';
-          this.updateTaskRow(state, task, taskStatus, output, null, workerId);
-        } else if (output?.skipped) {
-          taskStatus = 'skipped';
-          this.updateTaskRow(state, task, taskStatus, output, null, workerId);
-        } else {
-          this.updateTaskRow(state, task, taskStatus, output, null, workerId);
+        const taskStatus = output?.blocked ? 'blocked' : output?.skipped ? 'skipped' : 'completed';
+        this.updateTaskRow(state, task, taskStatus, output, null, workerId);
+        this.pushActivity(state, this.buildTaskActivityEvent({ task, status: taskStatus, output, workerId }));
+        const stageId = PHASE_TO_STAGE[task.phase];
+        if (stageId && taskStatus === 'blocked') {
+          this.setStageState(state, stageId, {
+            status: 'blocked',
+            pass: false,
+            reason: String(output?.reason || output?.error || 'blocked'),
+          });
+        } else if (stageId && taskStatus === 'skipped' && output?.reason) {
+          this.setStageState(state, stageId, {
+            status: 'completed',
+            pass: false,
+            reason: String(output.reason),
+          });
         }
-        this.pushActivity(state, this.buildTaskActivityEvent({
-          task,
-          status: taskStatus,
-          output,
-          workerId,
-        }));
       } catch (error) {
         state.stats.errors += 1;
         state.stats.lastError = error.message || String(error);
-        const errorMessage = error.message || String(error);
-        const nextRetry = Number(task.retries || 0) + 1;
-        if (nextRetry < this.maxTaskRetries) {
-          const retryTask = normalizeTaskPayload({
-            ...task,
-            id: uuidv4(),
-            retries: nextRetry,
-            createdAt: Date.now(),
+        const stageId = PHASE_TO_STAGE[task.phase];
+        if (stageId) {
+          this.setStageState(state, stageId, {
+            status: 'failed',
+            pass: false,
+            reason: String(error?.message || error || 'task_error'),
           });
-          state.queues[task.phase].push(retryTask);
-          this.updateTaskRow(state, task, 'failed', null, `retry_${nextRetry}:${errorMessage}`, workerId);
-          this.pushActivity(state, this.buildTaskActivityEvent({
-            task,
-            status: 'failed',
-            error: `retry_${nextRetry}:${errorMessage}`,
-            workerId,
-          }));
-        } else {
-          this.updateTaskRow(state, task, 'failed', null, errorMessage, workerId);
-          this.pushActivity(state, this.buildTaskActivityEvent({
-            task,
-            status: 'failed',
-            error: errorMessage,
-            workerId,
-          }));
         }
+        const nextRetry = (task.retries || 0) + 1;
+        if (nextRetry < this.maxTaskRetries) {
+          state.queues[task.phase].push(normalizeTaskPayload({
+            ...task, id: uuidv4(), retries: nextRetry, createdAt: Date.now(),
+          }));
+          this.updateTaskRow(state, task, 'failed', null, `retry_${nextRetry}:${error.message}`, workerId);
+        } else {
+          this.updateTaskRow(state, task, 'failed', null, error.message, workerId);
+        }
+        this.pushActivity(state, this.buildTaskActivityEvent({ task, status: 'failed', error: error.message, workerId }));
       } finally {
-        state.activeWorkersCount = Math.max(0, Number(state.activeWorkersCount || 1) - 1);
         state.lastActivityAt = Date.now();
         this.persistRunHeartbeat(state);
         this.emitProgress(state);
       }
     }
 
-    state.workerStatus.set(workerId, {
-      workerId,
-      status: 'stopped',
-      phase: null,
-      taskId: null,
-      updatedAt: Date.now(),
-    });
+    state.workerStatus.set(workerId, { workerId, status: 'stopped', phase: null, taskId: null, updatedAt: Date.now() });
   }
+
+  /* -- Run lifecycle ------------------------------------------------ */
 
   async completeRun(runState, reason = 'convergence_reached') {
     if (!runState || runState.status === 'completed' || runState.status === 'cancelled' || runState.status === 'error') return;
     if (runState.completing) return;
     runState.completing = true;
     try {
-      await this.generateFinalSynthesis(runState);
+      this.setStageState(runState, 'gate', { status: 'running', pass: null, reason: 'quality_gate_running' });
+      await this.generateReport(runState);
+      const quality = buildRunQuality(runState);
+      const qualityGate = buildQualityGate(runState, quality);
+      this.setStageState(runState, 'gate', {
+        status: 'completed',
+        pass: Boolean(qualityGate.passed),
+        reason: qualityGate.passed ? 'quality_gate_passed' : 'quality_gate_failed',
+      });
       runState.status = 'completed';
       runState.completedReason = reason;
       this.run(
-        `UPDATE research_runs
-         SET status = ?, stats_json = ?, convergence_count = ?, ended_at = ?, updated_at = ?, prompt_snapshot_json = ?
+        `UPDATE research_runs SET status = ?, stats_json = ?, convergence_count = ?, ended_at = ?, updated_at = ?, prompt_snapshot_json = ?
          WHERE id = ?`,
-        [
-          'completed',
-          safeStringify(runState.stats),
-          Number(runState.convergenceCount || 0),
-          nowIso(),
-          nowIso(),
-          safeStringify(runState.promptSnapshot || {}),
-          runState.id,
-        ]
+        ['completed', safeStringify(runState.stats), runState.convergenceCount || 0, nowIso(), nowIso(),
+         safeStringify({
+           settings: runState.settings,
+           sourcePolicy: runState.sourcePolicy,
+           projectContext: runState.projectContext,
+           intent: runState.intent || runState.question,
+           jurisdiction: runState.jurisdiction || 'auto',
+           assumptions: runState.assumptions || [],
+           policyViolations: runState.policyViolations || [],
+           stageStatus: ensureStageStatusShape(runState.stageStatus || {}),
+           quality,
+           qualityGate,
+           relevanceScore: scoreRunRelevance(runState.findings || []),
+           jurisdictionMatch: scoreJurisdictionMatch(runState),
+           report: runState.report,
+           progressSummaries: runState.progressSummaries,
+          }), runState.id]
       );
       this.persistCheckpoint(runState);
       this.saveDatabase();
@@ -2349,18 +2316,23 @@ class ResearchOrchestrator extends EventEmitter {
   async failRun(runState, errorMessage) {
     if (!runState || runState.status === 'error') return;
     runState.status = 'error';
+    this.setStageState(runState, 'gate', {
+      status: 'failed',
+      pass: false,
+      reason: String(errorMessage || 'run_error'),
+    });
     runState.stats.errors += 1;
     runState.stats.lastError = String(errorMessage || 'unknown_error');
     this.run(
-      `UPDATE research_runs
-       SET status = ?, stats_json = ?, ended_at = ?, updated_at = ?
-       WHERE id = ?`,
+      `UPDATE research_runs SET status = ?, stats_json = ?, ended_at = ?, updated_at = ? WHERE id = ?`,
       ['error', safeStringify(runState.stats), nowIso(), nowIso(), runState.id]
     );
     this.persistCheckpoint(runState);
     this.saveDatabase();
     this.emitProgress(runState, true);
   }
+
+  /* -- Monitor loop ------------------------------------------------- */
 
   setupMonitorLoop(runState) {
     if (runState.monitorTimer) clearInterval(runState.monitorTimer);
@@ -2370,7 +2342,7 @@ class ResearchOrchestrator extends EventEmitter {
         return;
       }
 
-      if (runState.status === 'cancelled' || runState.status === 'completed' || runState.status === 'error') {
+      if (['cancelled', 'completed', 'error'].includes(runState.status)) {
         clearInterval(runState.monitorTimer);
         this.persistRunHeartbeat(runState);
         this.emitProgress(runState, true);
@@ -2380,70 +2352,53 @@ class ResearchOrchestrator extends EventEmitter {
 
       if (runState.status === 'running') {
         if (runState.completing) {
-          this.persistRunHeartbeat(runState);
           this.emitProgress(runState);
           return;
         }
+
+        // Check runtime limit
+        if (this.isRuntimeExceeded(runState)) {
+          await this.completeRun(runState, 'runtime_limit_reached');
+          return;
+        }
+
+        // Check convergence
         const queueSize = this.queueSize(runState);
-        const active = Number(runState.activeWorkersCount || 0);
-        const settings = runState.researchSettings || normalizeResearchSettings();
-        const convergenceThreshold = Number(settings.convergenceThreshold || this.convergenceThreshold);
-        if (queueSize === 0 && active === 0) {
-          const nowMs = Date.now();
-          const backoffUntil = Number(runState.searchBackoffUntil || 0);
-          if (backoffUntil > nowMs) {
-            await this.maybeGenerateProgressSummary(runState);
-            this.persistRunHeartbeat(runState);
-            this.emitProgress(runState);
-            return;
-          }
+        const activeCount = Array.from(runState.workerStatus.values()).filter((w) => w.status === 'busy').length;
 
-          const persistentSearchFailure = Number(runState.searchFailureStreak || 0) >= 18
-            && Number(runState.stats.discoveredCandidates || 0) === 0
-            && Number(runState.stats.verifiedSaved || 0) === 0;
-          if (persistentSearchFailure) {
-            await this.completeRun(runState, 'search_backend_unavailable');
-            return;
-          }
-
-          if (Number(runState.stats.verifiedSaved || 0) > Number(runState.lastSavedCount || 0)) {
-            runState.lastSavedCount = Number(runState.stats.verifiedSaved || 0);
-            runState.convergenceCount = 0;
-          } else {
-            runState.convergenceCount = Number(runState.convergenceCount || 0) + 1;
-          }
-
-          const goalsMet = this.runMeetsCompletionGoals(runState);
-          const shouldRefill = runState.convergenceCount < convergenceThreshold || !goalsMet;
-          if (shouldRefill) {
-            const query = this.buildConvergenceQuery(runState);
-            if (query) this.enqueueTask(runState, 'discover', { query, depth: 0 });
-          }
-          if (!goalsMet && runState.convergenceCount >= convergenceThreshold) {
-            runState.convergenceCount = Math.max(0, convergenceThreshold - 1);
-          }
-
-          if (goalsMet && runState.convergenceCount >= convergenceThreshold && this.queueSize(runState) === 0) {
+        if (queueSize === 0 && activeCount === 0) {
+          runState.convergenceCount = (runState.convergenceCount || 0) + 1;
+          const threshold = runState.settings?.convergenceThreshold || 5;
+          if (runState.convergenceCount >= threshold) {
             await this.completeRun(runState, 'convergence_reached');
             return;
           }
+        } else if (runState.convergenceCount !== 0) {
+          // Convergence should be based on consecutive idle checks only.
+          runState.convergenceCount = 0;
         }
 
+        // Stall detection
         const now = Date.now();
-        if (now - Number(runState.lastActivityAt || 0) > this.stallTimeoutMs) {
-          runState.stallRecoveries = Number(runState.stallRecoveries || 0) + 1;
+        if (now - (runState.lastActivityAt || 0) > this.stallTimeoutMs) {
+          runState.stallRecoveries = (runState.stallRecoveries || 0) + 1;
           if (runState.stallRecoveries > this.maxStallRecoveries) {
             await this.failRun(runState, 'stall_watchdog_exceeded');
             return;
           }
-          const recoveryQuery = this.buildConvergenceQuery(runState) || normalizeSearchQuery(`${runState.objective} primary source`);
-          if (recoveryQuery) this.enqueueTask(runState, 'discover', { query: recoveryQuery, depth: 0 });
+          // Inject a fresh search as recovery
+          this.enqueueTask(runState, 'search', {
+            query: `${runState.question} latest information`,
+            depth: 0,
+          });
           runState.lastActivityAt = now;
         }
 
-        await this.maybeGenerateProgressSummary(runState);
+        // Periodic progress summary
+        await this.maybeEmitProgressSummary(runState);
 
-        if (Date.now() - Number(runState.lastCheckpointAt || 0) >= this.checkpointIntervalMs) {
+        // Checkpoint
+        if (Date.now() - (runState.lastCheckpointAt || 0) >= this.checkpointIntervalMs) {
           this.persistCheckpoint(runState);
         }
       }
@@ -2454,124 +2409,126 @@ class ResearchOrchestrator extends EventEmitter {
   }
 
   startWorkers(runState) {
-    const workerCount = Math.max(1, Number(runState.workerCount || this.defaultWorkerCount));
+    const count = Math.max(1, Number(runState.workerCount || this.defaultWorkerCount));
     runState.workerLoops = [];
-    for (let i = 0; i < workerCount; i += 1) {
-      const workerId = `worker_${i + 1}`;
-      const loopPromise = this.workerLoop(runState, workerId)
-        .catch((error) => {
+    for (let i = 0; i < count; i++) {
+      const wid = `worker_${i + 1}`;
+      runState.workerLoops.push(
+        this.workerLoop(runState, wid).catch((err) => {
           runState.stats.errors += 1;
-          runState.stats.lastError = error.message || String(error);
-        });
-      runState.workerLoops.push(loopPromise);
+          runState.stats.lastError = err.message || String(err);
+        })
+      );
     }
   }
 
   async startRun({
     projectId,
-    objective,
-    runInstructions = '',
+    question,
+    intent = '',
+    jurisdiction = 'auto',
     workerCount = this.defaultWorkerCount,
-    schema = DEFAULT_STARTER_SCHEMA,
+    settings = {},
     sourcePolicy = {},
-    researchSettings = {},
-    promptSnapshot = {},
+    projectContext = {},
     existingRunId = null,
     restoredCheckpoint = null,
   }) {
-    const normalizedObjective = String(objective || '').trim();
-    if (!normalizedObjective) {
-      throw new Error('Run objective is required');
-    }
+    const normalizedQuestion = String(question || '').trim();
+    if (!normalizedQuestion) throw new Error('Research question is required');
 
     const runId = existingRunId || uuidv4();
-    const normalizedSchema = normalizeSchema(schema);
-    const mergedSourcePolicy = mergeSourcePolicy({}, sourcePolicy || {});
-    const normalizedSettings = normalizeResearchSettings(
-      researchSettings && Object.keys(researchSettings || {}).length > 0
-        ? researchSettings
-        : promptSnapshot?.researchSettings || {}
+    const resolvedSettings = resolveSettings(
+      restoredCheckpoint?.settings || (settings && Object.keys(settings).length > 0 ? settings : {})
     );
-    const topicProfile = buildTopicProfile({
-      objective: normalizedObjective,
-      runInstructions,
-      promptSnapshot,
-    });
+    const resolvedSourcePolicy = mergeSourcePolicy(
+      DEFAULT_SOURCE_POLICY,
+      restoredCheckpoint?.sourcePolicy || sourcePolicy || {}
+    );
+    const resolvedProjectContext = mergeProjectContextValues(
+      projectContext || {},
+      restoredCheckpoint?.projectContext || {}
+    );
+    const compiledIntent = buildIntentAndAssumptions(
+      normalizedQuestion,
+      restoredCheckpoint?.intent || intent || normalizedQuestion,
+      restoredCheckpoint?.jurisdiction || jurisdiction || 'auto'
+    );
 
     const baseState = this.ensureRunState({
       id: runId,
       projectId,
-      objective: normalizedObjective,
-      runInstructions: String(runInstructions || ''),
+      question: normalizedQuestion,
+      intent: compiledIntent.intent,
+      jurisdiction: compiledIntent.jurisdiction,
       workerCount: Math.max(1, Number(workerCount || this.defaultWorkerCount)),
-      schema: normalizedSchema,
-      sourcePolicy: mergedSourcePolicy,
-      researchSettings: normalizedSettings,
-      topicProfile,
+      settings: resolvedSettings,
+      sourcePolicy: resolvedSourcePolicy,
+      projectContext: resolvedProjectContext,
       status: 'running',
       stats: buildStatsSkeleton(),
-      lastSavedCount: 0,
       lastActivityAt: Date.now(),
       runStartedAtMs: Number(restoredCheckpoint?.runStartedAtMs || Date.now()),
       createdAt: nowIso(),
-      promptSnapshot,
-      finalSynthesis: restoredCheckpoint?.finalSynthesis || promptSnapshot?.finalSynthesis || null,
-      queues: restoredCheckpoint?.queues || {
-        discover: [],
-        official_verify: [],
-        extract_fields: [],
-        evidence_validate: [],
-        persist: [],
-      },
+      findings: restoredCheckpoint?.findings || [],
+      sourcesRead: restoredCheckpoint?.sourcesRead || [],
+      report: restoredCheckpoint?.report || null,
+      progressSummaries: restoredCheckpoint?.progressSummaries || [],
+      queues: restoredCheckpoint?.queues || { plan: [], search: [], read: [], analyze: [] },
       convergenceCount: Number(restoredCheckpoint?.convergenceCount || 0),
-      discoverQueriesSeen: new Set(restoredCheckpoint?.discoverQueriesSeen || []),
-      candidateUrlsSeen: new Set(restoredCheckpoint?.candidateUrlsSeen || []),
-      queryCursor: Number(restoredCheckpoint?.queryCursor || 0),
-      searchFailureStreak: Number(restoredCheckpoint?.searchFailureStreak || 0),
-      searchBackoffUntil: Number(restoredCheckpoint?.searchBackoffUntil || 0),
-      lastProgressSummaryAt: Number(restoredCheckpoint?.lastProgressSummaryAt || 0),
-      lastProgressSummarySearches: Number(restoredCheckpoint?.lastProgressSummarySearches || 0),
-      lastProgressSummaryVerified: Number(restoredCheckpoint?.lastProgressSummaryVerified || 0),
-      intermediateSummary: restoredCheckpoint?.intermediateSummary || promptSnapshot?.intermediateSummary || null,
+      queriesSeen: new Set(restoredCheckpoint?.queriesSeen || []),
+      urlsSeen: new Set(restoredCheckpoint?.urlsSeen || []),
+      taskKeys: new Set(restoredCheckpoint?.taskKeys || []),
+      stepKeys: new Set(restoredCheckpoint?.stepKeys || []),
       activitySeq: Number(restoredCheckpoint?.activitySeq || 0),
-      activityLog: Array.isArray(restoredCheckpoint?.activityLog) ? restoredCheckpoint.activityLog.slice(-500) : [],
+      activityLog: Array.isArray(restoredCheckpoint?.activityLog) ? restoredCheckpoint.activityLog.slice(-400) : [],
       domainTally: restoredCheckpoint?.domainTally || {},
+      intentProfile: restoredCheckpoint?.intentProfile || null,
+      stageStatus: restoredCheckpoint?.stageStatus || buildStageStatus(),
+      assumptions: restoredCheckpoint?.assumptions || compiledIntent.assumptions || [],
+      policyViolations: restoredCheckpoint?.policyViolations || [],
+      steeringEvents: restoredCheckpoint?.steeringEvents || [],
+      persistedFindingKeys: Array.isArray(restoredCheckpoint?.persistedFindingKeys)
+        ? new Set(restoredCheckpoint.persistedFindingKeys)
+        : new Set(),
     });
 
     if (restoredCheckpoint?.stats) {
-      baseState.stats = {
-        ...buildStatsSkeleton(),
-        ...(restoredCheckpoint.stats || {}),
-      };
-      baseState.lastSavedCount = Number(restoredCheckpoint.lastSavedCount || baseState.stats.verifiedSaved || 0);
+      baseState.stats = { ...buildStatsSkeleton(), ...restoredCheckpoint.stats };
     }
-    if (restoredCheckpoint?.researchSettings) {
-      baseState.researchSettings = normalizeResearchSettings(restoredCheckpoint.researchSettings);
-    }
-    if (restoredCheckpoint?.topicProfile) {
-      baseState.topicProfile = restoredCheckpoint.topicProfile;
-    }
-    if (restoredCheckpoint?.finalSynthesis) {
-      baseState.finalSynthesis = restoredCheckpoint.finalSynthesis;
-    }
-    if (restoredCheckpoint?.intermediateSummary) {
-      baseState.intermediateSummary = restoredCheckpoint.intermediateSummary;
-    }
+    this.addAssumptions(baseState, compiledIntent.assumptions || []);
 
+    // Seed with plan task if fresh run
     if (!restoredCheckpoint) {
-      for (const seedQuery of this.buildSeedQueries({
-        objective: normalizedObjective,
-        runInstructions,
-        promptSnapshot,
-        researchSettings: baseState.researchSettings,
-        topicProfile: baseState.topicProfile,
-      })) {
-        this.enqueueTask(baseState, 'discover', { query: seedQuery, depth: 0 });
-      }
+      this.enqueueTask(baseState, 'plan', { question: normalizedQuestion });
     } else {
       for (const phase of PHASES) {
-        baseState.queues[phase] = (restoredCheckpoint.queues?.[phase] || []).map((task) => normalizeTaskPayload(task));
+        baseState.queues[phase] = (restoredCheckpoint.queues?.[phase] || []).map(normalizeTaskPayload);
       }
+    }
+
+    // Insert DB row for new runs
+    if (!existingRunId) {
+      this.run(
+        `INSERT INTO research_runs (id, project_id, objective, worker_count, status, stats_json, prompt_snapshot_json, started_at, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [runId, projectId, normalizedQuestion, baseState.workerCount, 'running',
+         safeStringify(baseState.stats), safeStringify({
+           settings: resolvedSettings,
+           sourcePolicy: resolvedSourcePolicy,
+           projectContext: resolvedProjectContext,
+           intent: baseState.intent || normalizedQuestion,
+           jurisdiction: baseState.jurisdiction || 'auto',
+           assumptions: baseState.assumptions || [],
+           policyViolations: baseState.policyViolations || [],
+           stageStatus: ensureStageStatusShape(baseState.stageStatus || {}),
+           quality: buildRunQuality(baseState),
+           qualityGate: buildQualityGate(baseState),
+           relevanceScore: scoreRunRelevance(baseState.findings || []),
+           jurisdictionMatch: scoreJurisdictionMatch(baseState),
+          }), nowIso(), nowIso(), nowIso()]
+      );
+      this.saveDatabase();
     }
 
     this.runs.set(runId, baseState);
@@ -2583,204 +2540,162 @@ class ResearchOrchestrator extends EventEmitter {
   }
 
   pauseRun(runId) {
-    const runState = this.runs.get(runId);
-    if (!runState) return null;
-    runState.status = 'paused';
-    this.persistRunHeartbeat(runState);
-    this.persistCheckpoint(runState);
-    this.emitProgress(runState, true);
-    return this.buildRunSnapshot(runState);
+    const state = this.runs.get(runId);
+    if (!state) return null;
+    state.status = 'paused';
+    this.persistRunHeartbeat(state);
+    this.persistCheckpoint(state);
+    this.emitProgress(state, true);
+    return this.buildRunSnapshot(state);
   }
 
   async cancelRun(runId) {
-    const runState = this.runs.get(runId);
-    if (!runState) return null;
-    runState.status = 'cancelled';
+    const state = this.runs.get(runId);
+    if (!state) return null;
+    state.status = 'cancelled';
     this.run(
-      `UPDATE research_runs
-       SET status = ?, stats_json = ?, ended_at = ?, updated_at = ?
-       WHERE id = ?`,
-      ['cancelled', safeStringify(runState.stats), nowIso(), nowIso(), runId]
+      `UPDATE research_runs SET status = ?, stats_json = ?, ended_at = ?, updated_at = ? WHERE id = ?`,
+      ['cancelled', safeStringify(state.stats), nowIso(), nowIso(), runId]
     );
-    this.persistCheckpoint(runState);
+    this.persistCheckpoint(state);
     this.saveDatabase();
-    this.emitProgress(runState, true);
-    return this.buildRunSnapshot(runState);
+    this.emitProgress(state, true);
+    return this.buildRunSnapshot(state);
   }
 
-  steerRun(runId, steeringInput = '') {
-    const runState = this.runs.get(runId);
-    if (!runState) return { success: false, error: 'Run not active' };
-    if (!['running', 'paused'].includes(String(runState.status || ''))) {
-      return { success: false, error: 'Run is not steerable in current state' };
-    }
-    const steeringText = String(steeringInput || '').replace(/\s+/g, ' ').trim();
-    if (!steeringText) return { success: false, error: 'Steering text is required' };
-
-    const priorInstructions = String(runState.runInstructions || '').trim();
-    runState.runInstructions = [priorInstructions, `Steering update: ${steeringText}`]
-      .filter(Boolean)
-      .join('\n');
-    runState.topicProfile = buildTopicProfile({
-      objective: runState.objective,
-      runInstructions: runState.runInstructions,
-      promptSnapshot: runState.promptSnapshot || {},
-    });
-    runState.promptSnapshot = {
-      ...(runState.promptSnapshot && typeof runState.promptSnapshot === 'object' ? runState.promptSnapshot : {}),
-      runInstructions: runState.runInstructions,
-      updatedAt: nowIso(),
-    };
-
-    let queued = 0;
-    const steeringObjective = `${String(runState.objective || '').trim()} ${steeringText}`.trim();
-    const steeringQueries = this.buildSeedQueries({
-      objective: steeringObjective,
-      runInstructions: runState.runInstructions,
-      promptSnapshot: runState.promptSnapshot || {},
-      researchSettings: {
-        ...(runState.researchSettings || normalizeResearchSettings()),
-        seedQueryLimit: 12,
-      },
-      topicProfile: runState.topicProfile,
-    });
-    for (const query of steeringQueries) {
-      if (this.enqueueTask(runState, 'discover', { query, depth: 0 })) queued += 1;
-    }
-
-    this.pushActivity(runState, {
-      id: uuidv4(),
-      at: nowIso(),
-      phase: 'setup',
-      phaseLabel: 'Steering',
-      status: 'completed',
-      summary: 'Run guidance updated.',
-      details: `Instruction: ${steeringText}${queued > 0 ? ` | queued discovery queries: ${queued}` : ''}`,
-    });
-
-    this.persistPromptSnapshot(runState);
-    this.persistCheckpoint(runState);
-    this.emitProgress(runState, true);
-    return {
-      success: true,
-      queuedQueries: queued,
-      run: this.buildRunSnapshot(runState),
-    };
-  }
-
-  async resumeRun({
-    runId,
-    projectId,
-    objective,
-    runInstructions,
-    workerCount,
-    schema,
-    sourcePolicy,
-    researchSettings,
-    promptSnapshot,
-  }) {
-    const existingState = this.runs.get(runId);
-    if (existingState) {
-      existingState.status = 'running';
-      this.persistRunHeartbeat(existingState);
-      this.emitProgress(existingState, true);
-      return this.buildRunSnapshot(existingState);
+  async resumeRun({ runId, projectId, question, intent, jurisdiction, workerCount, settings, sourcePolicy, projectContext }) {
+    const existing = this.runs.get(runId);
+    if (existing) {
+      existing.projectContext = mergeProjectContextValues(projectContext || {}, existing.projectContext || {});
+      if (intent) existing.intent = String(intent || '').trim();
+      if (jurisdiction) existing.jurisdiction = String(jurisdiction || '').trim();
+      existing.status = 'running';
+      this.persistRunHeartbeat(existing);
+      this.emitProgress(existing, true);
+      return this.buildRunSnapshot(existing);
     }
 
     const checkpointRow = this.queryOne(
-      `SELECT queue_json, state_json
-       FROM research_checkpoints
-       WHERE run_id = ?
-       ORDER BY created_at DESC
-       LIMIT 1`,
+      `SELECT queue_json, state_json FROM research_checkpoints WHERE run_id = ? ORDER BY created_at DESC LIMIT 1`,
       [runId]
     );
+    if (!checkpointRow) {
+      this.run(`UPDATE research_runs SET status = ?, updated_at = ? WHERE id = ?`, ['running', nowIso(), runId]);
+      this.saveDatabase();
+      return this.startRun({
+        projectId,
+        question: question || '',
+        workerCount,
+        settings: settings || {},
+        sourcePolicy: sourcePolicy || {},
+        projectContext: projectContext || {},
+        existingRunId: runId,
+        restoredCheckpoint: null,
+      });
+    }
+
     const queueJson = safeParseJson(checkpointRow?.queue_json, {});
     const stateJson = safeParseJson(checkpointRow?.state_json, {});
+
     const restoredCheckpoint = {
       queues: {
-        discover: (queueJson?.discover || []).map((task) => normalizeTaskPayload(task)),
-        official_verify: (queueJson?.official_verify || []).map((task) => normalizeTaskPayload(task)),
-        extract_fields: (queueJson?.extract_fields || []).map((task) => normalizeTaskPayload(task)),
-        evidence_validate: (queueJson?.evidence_validate || []).map((task) => normalizeTaskPayload(task)),
-        persist: (queueJson?.persist || []).map((task) => normalizeTaskPayload(task)),
+        plan: (queueJson?.plan || []).map(normalizeTaskPayload),
+        search: (queueJson?.search || []).map(normalizeTaskPayload),
+        read: (queueJson?.read || []).map(normalizeTaskPayload),
+        analyze: (queueJson?.analyze || []).map(normalizeTaskPayload),
       },
       stats: stateJson?.stats || null,
+      settings: stateJson?.settings || null,
+      sourcePolicy: stateJson?.sourcePolicy || null,
+      projectContext: stateJson?.projectContext || null,
+      intent: stateJson?.intent || null,
+      jurisdiction: stateJson?.jurisdiction || null,
+      stageStatus: stateJson?.stageStatus || null,
+      assumptions: stateJson?.assumptions || [],
+      policyViolations: stateJson?.policyViolations || [],
+      steeringEvents: stateJson?.steeringEvents || [],
       convergenceCount: Number(stateJson?.convergenceCount || 0),
-      lastSavedCount: Number(stateJson?.lastSavedCount || 0),
-      researchSettings: stateJson?.researchSettings || null,
-      topicProfile: stateJson?.topicProfile || null,
-      queryCursor: Number(stateJson?.queryCursor || 0),
+      findings: stateJson?.findings || [],
+      sourcesRead: stateJson?.sourcesRead || [],
+      report: stateJson?.report || null,
+      progressSummaries: stateJson?.progressSummaries || [],
       runStartedAtMs: Number(stateJson?.runStartedAtMs || Date.now()),
-      searchFailureStreak: Number(stateJson?.searchFailureStreak || 0),
-      searchBackoffUntil: Number(stateJson?.searchBackoffUntil || 0),
-      lastProgressSummaryAt: Number(stateJson?.lastProgressSummaryAt || 0),
-      lastProgressSummarySearches: Number(stateJson?.lastProgressSummarySearches || 0),
-      lastProgressSummaryVerified: Number(stateJson?.lastProgressSummaryVerified || 0),
-      discoverQueriesSeen: Array.isArray(stateJson?.discoverQueriesSeen) ? stateJson.discoverQueriesSeen : [],
-      candidateUrlsSeen: Array.isArray(stateJson?.candidateUrlsSeen) ? stateJson.candidateUrlsSeen : [],
+      queriesSeen: Array.isArray(stateJson?.queriesSeen) ? stateJson.queriesSeen : [],
+      urlsSeen: Array.isArray(stateJson?.urlsSeen) ? stateJson.urlsSeen : [],
+      taskKeys: Array.isArray(stateJson?.taskKeys) ? stateJson.taskKeys : [],
+      stepKeys: Array.isArray(stateJson?.stepKeys) ? stateJson.stepKeys : [],
       activitySeq: Number(stateJson?.activitySeq || 0),
       activityLog: Array.isArray(stateJson?.activityLog) ? stateJson.activityLog : [],
-      domainTally: stateJson?.domainTally && typeof stateJson.domainTally === 'object' ? stateJson.domainTally : {},
-      intermediateSummary: stateJson?.intermediateSummary || null,
-      finalSynthesis: stateJson?.finalSynthesis || null,
+      domainTally: stateJson?.domainTally || {},
+      intentProfile: stateJson?.intentProfile || null,
+      persistedFindingKeys: Array.isArray(stateJson?.persistedFindingKeys) ? stateJson.persistedFindingKeys : [],
     };
 
     this.run(`UPDATE research_runs SET status = ?, updated_at = ? WHERE id = ?`, ['running', nowIso(), runId]);
     this.saveDatabase();
+
     return this.startRun({
       projectId,
-      objective,
-      runInstructions,
+      question: question || stateJson?.question || '',
+      intent: intent || stateJson?.intent || question || stateJson?.question || '',
+      jurisdiction: jurisdiction || stateJson?.jurisdiction || 'auto',
       workerCount,
-      schema,
-      sourcePolicy,
-      researchSettings,
-      promptSnapshot,
+      settings: settings || stateJson?.settings || {},
+      sourcePolicy: sourcePolicy || stateJson?.sourcePolicy || {},
+      projectContext: projectContext || stateJson?.projectContext || {},
       existingRunId: runId,
       restoredCheckpoint,
     });
   }
 
+  /* -- Run queries -------------------------------------------------- */
+
   getRun(runId) {
-    const inMemory = this.runs.get(runId);
-    if (inMemory) return this.buildRunSnapshot(inMemory);
+    const live = this.runs.get(runId);
+    if (live) return this.buildRunSnapshot(live);
     const row = this.queryOne(`SELECT * FROM research_runs WHERE id = ?`, [runId]);
     if (!row) return null;
     const stats = safeParseJson(row.stats_json, buildStatsSkeleton());
-    const promptSnapshot = safeParseJson(row.prompt_snapshot_json, {});
-    const researchSettings = normalizeResearchSettings(promptSnapshot?.researchSettings || {});
+    const snapshot = safeParseJson(row.prompt_snapshot_json, {});
+    const settings = resolveSettings(snapshot?.settings || {});
+    const sourcePolicy = mergeSourcePolicy(DEFAULT_SOURCE_POLICY, snapshot?.sourcePolicy || {});
+    const projectContext = normalizeProjectContext(snapshot?.projectContext || {});
     const startedAtMs = Date.parse(row.started_at || row.created_at || '') || Date.now();
-    const goalProgress = this.getGoalProgress({
-      researchSettings,
-      runStartedAtMs: startedAtMs,
-      stats,
-    });
     return {
       id: row.id,
       projectId: row.project_id,
       status: row.status,
-      objective: row.objective,
+      question: row.objective,
+      intent: snapshot?.intent || row.objective,
+      jurisdiction: snapshot?.jurisdiction || 'auto',
       workerCount: Number(row.worker_count || this.defaultWorkerCount),
       convergenceCount: Number(row.convergence_count || 0),
-       convergenceThreshold: Number(researchSettings.convergenceThreshold || this.convergenceThreshold),
-      queueByPhase: {
-        discover: 0,
-        official_verify: 0,
-        extract_fields: 0,
-        evidence_validate: 0,
-        persist: 0,
-      },
+      convergenceThreshold: settings.convergenceThreshold || 5,
+      queueByPhase: { plan: 0, search: 0, read: 0, analyze: 0 },
       queueSize: 0,
       activeWorkers: 0,
       workers: [],
       stats,
-      researchSettings,
-      goalProgress,
+      settings,
+      sourcePolicy,
+      contextMeta: buildProjectContextMeta(projectContext),
+      quality: snapshot?.quality || null,
+      qualityGate: snapshot?.qualityGate || null,
+      relevanceScore: Number(snapshot?.relevanceScore || 0),
+      jurisdictionMatch: snapshot?.jurisdictionMatch ?? null,
+      assumptions: Array.isArray(snapshot?.assumptions) ? snapshot.assumptions : [],
+      policyViolations: Array.isArray(snapshot?.policyViolations) ? snapshot.policyViolations : [],
+      stageStatus: ensureStageStatusShape(snapshot?.stageStatus || {}),
+      stageOrder: STAGE_IDS.map((stageId) => ensureStageStatusShape(snapshot?.stageStatus || {})[stageId]),
+      stageId: null,
+      goalProgress: this.getGoalProgress({ settings, runStartedAtMs: startedAtMs, stats, findings: [] }),
       recentActivity: [],
+      recentFindings: [],
       domainStats: [],
-      intermediateSummary: promptSnapshot?.intermediateSummary || null,
-      finalSynthesis: promptSnapshot?.finalSynthesis || null,
+      totalFindings: 0,
+      totalSources: 0,
+      report: snapshot?.report || null,
+      progressSummaries: snapshot?.progressSummaries || [],
       createdAt: row.created_at,
       updatedAt: row.updated_at,
     };
@@ -2789,51 +2704,51 @@ class ResearchOrchestrator extends EventEmitter {
   listRuns(projectId, limit = 100) {
     const safeLimit = Math.max(1, Math.min(500, Number(limit || 100)));
     const rows = projectId
-      ? this.query(
-        `SELECT * FROM research_runs WHERE project_id = ? ORDER BY created_at DESC LIMIT ?`,
-        [projectId, safeLimit]
-      )
-      : this.query(
-        `SELECT * FROM research_runs ORDER BY created_at DESC LIMIT ?`,
-        [safeLimit]
-      );
+      ? this.query(`SELECT * FROM research_runs WHERE project_id = ? ORDER BY created_at DESC LIMIT ?`, [projectId, safeLimit])
+      : this.query(`SELECT * FROM research_runs ORDER BY created_at DESC LIMIT ?`, [safeLimit]);
     return rows.map((row) => {
       const live = this.runs.get(row.id);
       if (live) return this.buildRunSnapshot(live);
       const stats = safeParseJson(row.stats_json, buildStatsSkeleton());
-      const promptSnapshot = safeParseJson(row.prompt_snapshot_json, {});
-      const researchSettings = normalizeResearchSettings(promptSnapshot?.researchSettings || {});
-      const startedAtMs = Date.parse(row.started_at || row.created_at || '') || Date.now();
-      const goalProgress = this.getGoalProgress({
-        researchSettings,
-        runStartedAtMs: startedAtMs,
-        stats,
-      });
+      const snapshot = safeParseJson(row.prompt_snapshot_json, {});
+      const settings = resolveSettings(snapshot?.settings || {});
+      const sourcePolicy = mergeSourcePolicy(DEFAULT_SOURCE_POLICY, snapshot?.sourcePolicy || {});
+      const projectContext = normalizeProjectContext(snapshot?.projectContext || {});
       return {
         id: row.id,
         projectId: row.project_id,
         status: row.status,
-        objective: row.objective,
+        question: row.objective,
+        intent: snapshot?.intent || row.objective,
+        jurisdiction: snapshot?.jurisdiction || 'auto',
         workerCount: Number(row.worker_count || this.defaultWorkerCount),
         convergenceCount: Number(row.convergence_count || 0),
-        convergenceThreshold: Number(researchSettings.convergenceThreshold || this.convergenceThreshold),
-        queueByPhase: {
-          discover: 0,
-          official_verify: 0,
-          extract_fields: 0,
-          evidence_validate: 0,
-          persist: 0,
-        },
+        convergenceThreshold: settings.convergenceThreshold || 5,
+        queueByPhase: { plan: 0, search: 0, read: 0, analyze: 0 },
         queueSize: 0,
         activeWorkers: 0,
         workers: [],
         stats,
-        researchSettings,
-        goalProgress,
+        settings,
+        sourcePolicy,
+        contextMeta: buildProjectContextMeta(projectContext),
+        quality: snapshot?.quality || null,
+        qualityGate: snapshot?.qualityGate || null,
+        relevanceScore: Number(snapshot?.relevanceScore || 0),
+        jurisdictionMatch: snapshot?.jurisdictionMatch ?? null,
+        assumptions: Array.isArray(snapshot?.assumptions) ? snapshot.assumptions : [],
+        policyViolations: Array.isArray(snapshot?.policyViolations) ? snapshot.policyViolations : [],
+        stageStatus: ensureStageStatusShape(snapshot?.stageStatus || {}),
+        stageOrder: STAGE_IDS.map((stageId) => ensureStageStatusShape(snapshot?.stageStatus || {})[stageId]),
+        stageId: null,
+        goalProgress: { goals: {}, current: {} },
         recentActivity: [],
+        recentFindings: [],
         domainStats: [],
-        intermediateSummary: promptSnapshot?.intermediateSummary || null,
-        finalSynthesis: promptSnapshot?.finalSynthesis || null,
+        totalFindings: 0,
+        totalSources: 0,
+        report: snapshot?.report || null,
+        progressSummaries: snapshot?.progressSummaries || [],
         createdAt: row.created_at,
         updatedAt: row.updated_at,
       };
@@ -2846,4 +2761,12 @@ module.exports = {
   buildStatsSkeleton,
   safeParseJson,
   safeStringify,
+  DEPTH_PRESETS,
+  resolveSettings,
+  buildIntentProfile,
+  isRelevantToIntent,
+  tuneQueriesForIntent,
+  buildCoreQuestionQuery,
+  scoreFindingRelevance,
+  buildRunQuality,
 };
