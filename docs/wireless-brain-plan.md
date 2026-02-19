@@ -9,8 +9,21 @@ Build a personal AI "brain" that is:
 
 ## 2. Current Target Machine
 This plan uses two separate nodes with fixed roles:
-- Desktop Brain Node (always-on server): your personal "forever" AI, reachable from phone
-- Laptop NPU Node (daily driver): your work machine and local ChatGPT alternative during the day
+
+### 🖥️ Desktop Brain Node (Always-On Server)
+*The heavy lifter. Runs 70B+ models, stores long-term memory, and serves the phone.*
+- **CPU:** Intel Core i5-12400F (6c/12t)
+- **GPU:** RTX 3060 12GB VRAM
+- **RAM:** 64GB DDR4 (Crucial for CPU offloading of large models)
+- **Storage:** 1TB NVMe
+- **OS:** Windows 11 Home
+- **Role:** "Forever Brain", API Server, Vector DB Host
+
+### 💻 Laptop NPU Node (Daily Driver)
+*The efficient worker. Handles quick tasks, coding assistance, and local RAG during the workday.*
+- **Processor:** Intel Core Ultra (Meteor Lake / Lunar Lake) with NPU
+- **Role:** Local "ChatGPT" replacement, low-latency assistant, battery-friendly inference
+- **Key Feature:** Uses OpenVINO to run 3B-7B models on NPU, saving battery and keeping GPU free for rendering.
 
 ## 3. Product Principle
 Do not treat one model as "forever."
