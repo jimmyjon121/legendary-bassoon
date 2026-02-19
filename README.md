@@ -6,15 +6,57 @@
 ![Electron](https://img.shields.io/badge/Electron-31.x-47848F?style=flat-square&logo=electron&logoColor=white)
 ![React](https://img.shields.io/badge/React-18.x-61DAFB?style=flat-square&logo=react&logoColor=black)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
+![Status](https://img.shields.io/badge/Status-Active%20Development-orange?style=flat-square)
 
 ### Own Your AI. Control Your Costs. Keep Your Data.
 
 The cloud AI providers keep raising prices. APIs get deprecated. Terms change overnight.  
 **DevForge is your insurance policy** — a fully local AI workstation that runs on your hardware.
 
-[Why Local?](#why-local-ai) • [Features](#features) • [Quick Start](#quick-start) • [Documentation](#documentation)
+[Why Local?](#why-local-ai) • [Features](#features) • [Quick Start](#quick-start) • [For Agents](#-for-agents--developers) • [Documentation](#documentation)
+
+*Last Updated: February 18, 2026*
 
 </div>
+
+---
+
+## What is this?
+
+DevForge is a **sovereign AI workstation**. It's a desktop application that turns your computer into a private AI server and workspace. It orchestrates local LLMs (via Ollama, Llama.cpp, OpenVINO), manages your personal data (SQLite + Vector DB), and provides a suite of tools for coding, research, and writing—all without sending a single byte to the cloud.
+
+It is designed to be the "Forever Brain" that you own, independent of any company's API or policy changes.
+
+---
+
+## 🤖 For Agents / Developers
+
+**Quick Onboarding for AI Agents:**
+
+### 🗺️ Codebase Map
+- **Core Logic:** `electron/services/`
+  - `inference-orchestrator.js`: The "Cortex". Routes prompts to the best backend (Ollama/CUDA, OpenVINO/NPU) based on load and capability.
+  - `research/`: Autonomous web research agents (browser automation, content extraction).
+  - `intent-compiler/`: Natural language to system action translation.
+- **Frontend:** `src/`
+  - `components/Chat/`: Main chat interface with streaming markdown.
+  - `stores/`: Zustand state management for workspace, messages, and settings.
+- **Evaluation:** `scripts/`
+  - `casual-eval.js`: Quick sanity check for chat capabilities.
+  - `coding-eval.js`: Benchmarks coding performance.
+  - `research-eval.js`: Tests web search and synthesis.
+
+### ⚡ Key Commands
+```bash
+npm run dev          # Start the full stack (Electron + Vite)
+npm run eval:casual  # Run basic chat evaluation
+npm run eval:coding  # Run coding capability tests
+npm run build:win    # Build Windows installer
+```
+
+### 🏗️ Architecture Notes
+- **Hybrid Inference:** We prioritize NPU for small tasks (embeddings, small models) and GPU for heavy lifting (70B+ models).
+- **Wireless Brain:** The system is designed to be exposed via Tailscale for secure mobile access (see `docs/wireless-brain-plan.md`).
 
 ---
 
@@ -35,6 +77,11 @@ The cloud AI providers keep raising prices. APIs get deprecated. Terms change ov
 
 ## Features
 
+### 🧠 Wireless Brain (New!)
+Turn your desktop into an always-on AI server. Access your personal "brain" from your phone securely via Tailscale, with seamless handoff between devices.
+- **Desktop Node:** Heavy lifting, long-term memory, 70B+ models.
+- **Laptop/Mobile Node:** Lightweight interaction, NPU-optimized.
+
 ### 🏠 Purpose-Built Workspaces
 | Workspace | Optimized For |
 |-----------|---------------|
@@ -52,26 +99,21 @@ Interact with AI the way that works best for you:
 - **Focus** — Distraction-free mode
 
 ### 🤖 Intelligent Model Management
-- **Auto-optimization** — Detects model type and applies optimal settings automatically
-- **Hot-swap models** — Switch between models instantly
-- **Any GGUF model** — Use models from Hugging Face, Ollama, or anywhere
-- **Full parameter control** — Temperature, context length, and more
+- **Inference Orchestrator:** Automatically routes tasks to NPU, GPU, or CPU based on efficiency and speed profiles.
+- **Hot-swap models:** Switch between models instantly.
+- **Any GGUF model:** Use models from Hugging Face, Ollama, or anywhere.
+- **Full parameter control:** Temperature, context length, and more.
 
 ### 🎨 Local Image Generation
-- **ComfyUI integration** — Professional image generation workflow
-- **SDXL & FLUX support** — Latest models, running locally
-- **Automatic setup** — DevForge can install and configure ComfyUI for you
+- **ComfyUI integration:** Professional image generation workflow.
+- **SDXL & FLUX support:** Latest models, running locally.
+- **Automatic setup:** DevForge can install and configure ComfyUI for you.
 
 ### 🔐 Privacy & Security
-- **AES-256 encryption** for sensitive workspaces
-- **Zero telemetry** — No data collection whatsoever
-- **Offline capable** — Full functionality without internet
-- **Quick-hide** (`Ctrl+Shift+H`) — Instant privacy when needed
-
-### ⚡ Performance
-- **Virtualized lists** — Handles thousands of messages smoothly
-- **Lazy loading** — Fast startup, load features on demand
-- **Optimized state** — Minimal re-renders for smooth UI
+- **AES-256 encryption** for sensitive workspaces.
+- **Zero telemetry** — No data collection whatsoever.
+- **Offline capable** — Full functionality without internet.
+- **Quick-hide** (`Ctrl+Shift+H`) — Instant privacy when needed.
 
 ---
 
@@ -113,6 +155,7 @@ npm run dev
 | 8GB | 4GB | llama3.2, phi3, gemma2:2b |
 | 16GB | 8GB | mistral, codellama, llama3.1:8b |
 | 32GB | 12GB+ | mixtral, deepseek-coder:33b, llama3.1:70b (quantized) |
+| **64GB+** | **24GB+** | **The "Forever Brain" tier.** Run 70B+ models comfortably with CPU offloading. |
 
 DevForge's **auto-optimization** detects your model and adjusts settings for best performance.
 
@@ -127,7 +170,7 @@ DevForge's **auto-optimization** detects your model and adjusts settings for bes
 | Styling | Tailwind CSS |
 | State | Zustand |
 | Database | SQLite |
-| LLM | Ollama |
+| LLM | Ollama / Llama.cpp / OpenVINO |
 | Images | ComfyUI |
 
 ---
@@ -139,58 +182,21 @@ devforge/
 ├── electron/                 # Desktop app backend
 │   ├── main.js              # Electron main process
 │   ├── preload.js           # Secure IPC bridge
-│   └── services/            # Backend services
+│   └── services/            # Backend services (Inference, Research, etc.)
 ├── src/                     # React frontend
 │   ├── components/          # UI components
 │   ├── stores/              # State management
 │   ├── services/            # Frontend services
 │   └── hooks/               # Custom hooks
+├── scripts/                 # Evaluation and build scripts
 └── docs/                    # Documentation
 ```
 
 ---
 
-## Keyboard Shortcuts
-
-| Shortcut | Action |
-|----------|--------|
-| `Ctrl+Shift+H` | Quick hide window |
-| `Ctrl+R` | Reload |
-| `Ctrl+Shift+R` | Force reload |
-| `Ctrl+N` | New conversation |
-| `Ctrl+K` | Model selector |
-| `Ctrl+,` | Settings |
-| `Alt+1-5` | Switch views |
-
----
-
-## Development
-
-```bash
-npm run dev          # Development mode
-npm run build        # Production build
-npm run build:win    # Windows installer
-npm run build:mac    # macOS installer
-npm run build:linux  # Linux AppImage
-```
-
----
-
-## The Cost Comparison
-
-| Usage | Cloud AI (GPT-4) | DevForge |
-|-------|------------------|----------|
-| 1M tokens/month | ~$30-60 | $0 |
-| 10M tokens/month | ~$300-600 | $0 |
-| Heavy daily use | $100+/month | $0 |
-| **One year** | **$1,200+** | **$0** |
-
-*After initial hardware investment, your ongoing cost is just electricity.*
-
----
-
 ## Documentation
 
+- [Wireless Brain Plan](docs/wireless-brain-plan.md) (New!)
 - [Architecture Guide](docs/architecture.md)
 - [IPC API Reference](docs/ipc-api.md)
 - [User Guide](docs/user-guide.md)
