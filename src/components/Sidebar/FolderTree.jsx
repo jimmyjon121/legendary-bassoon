@@ -82,7 +82,7 @@ const FolderItem = memo(function FolderItem({
                 initial={{ opacity: 0, scale: 0.95 }}
                 animate={{ opacity: 1, scale: 1 }}
                 exit={{ opacity: 0, scale: 0.95 }}
-                className="absolute right-0 top-full mt-1 bg-forge-surface border border-forge-border rounded-lg shadow-xl py-1 z-30 min-w-[120px]"
+                className="absolute right-0 top-full mt-1 bg-forge-surface border border-forge-border rounded-lg shadow-[0_18px_44px_-28px_rgba(0,0,0,0.9)] py-1 z-30 min-w-[120px]"
                 onClick={(e) => e.stopPropagation()}
               >
                 <button

@@ -597,6 +597,11 @@ export function getOptimalSettings(modelName, workspaceType = 'casual') {
     settings.temperature = Math.max(0.1, settings.temperature - 0.3);
     settings.top_p = Math.min(0.95, settings.top_p);
     settings._source += '+workspace:code';
+  } else if (workspaceType === 'work') {
+    settings.temperature = Math.max(0.2, settings.temperature - 0.15);
+    settings.top_p = Math.min(0.92, settings.top_p);
+    settings.repeat_penalty = Math.max(1.05, settings.repeat_penalty);
+    settings._source += '+workspace:work';
   } else if (workspaceType === 'creative') {
     settings.temperature = Math.min(1.0, settings.temperature + 0.15);
     settings.top_k = Math.min(100, settings.top_k + 20);
@@ -719,7 +724,7 @@ export function buildOptimizedOllamaOptions(modelName, workspaceType = 'casual',
  * Falls back to name-parsing if modelInfo is not available.
  * 
  * @param {string} modelName - The model name (used as fallback for parsing)
- * @param {string} workspaceType - 'casual' | 'code' | 'creative'
+ * @param {string} workspaceType - 'casual' | 'work' | 'code' | 'creative'
  * @param {object|null} modelInfo - Real metadata from /api/show (or null)
  * @param {object} overrides - User overrides (explicit settings always win)
  * @returns {object} Ollama options
@@ -814,16 +819,34 @@ export function buildOptimizedOllamaOptionsWithInfo(modelName, workspaceType = '
     settings._source += `+quant:${quantization}`;
   }
   
-  // Workspace-specific adjustments
+  // Workspace-specific adjustments (including adaptive num_predict)
   if (workspaceType === 'code') {
     settings.temperature = Math.max(0.1, settings.temperature - 0.3);
     settings.top_p = Math.min(0.95, settings.top_p);
+    settings.num_predict = 8192;
     settings._source += '+workspace:code';
+  } else if (workspaceType === 'work') {
+    settings.temperature = Math.max(0.2, settings.temperature - 0.15);
+    settings.top_p = Math.min(0.92, settings.top_p);
+    settings.repeat_penalty = Math.max(1.05, settings.repeat_penalty);
+    settings.num_predict = 3072;
+    settings._source += '+workspace:work';
   } else if (workspaceType === 'creative') {
     settings.temperature = Math.min(1.0, settings.temperature + 0.15);
     settings.top_k = Math.min(100, settings.top_k + 20);
     settings.repeat_penalty = Math.max(1.0, settings.repeat_penalty - 0.05);
+    settings.num_predict = 4096;
     settings._source += '+workspace:creative';
+  } else if (workspaceType === 'casual') {
+    settings.num_predict = 2048;
+    settings._source += '+workspace:casual';
+  }
+
+  // Reasoning models need extra room for chain-of-thought
+  const modelType = familyProfile?.type;
+  if (modelType === 'reasoning') {
+    settings.num_predict = Math.max(settings.num_predict, 8192);
+    settings._source += '+reasoning';
   }
   
   // Detect thinking model (for UI and leak-detection bypass)

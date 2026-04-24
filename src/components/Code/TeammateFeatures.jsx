@@ -26,6 +26,7 @@ import {
   CheckCircle
 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore';
+import { shallow } from 'zustand/shallow';
 
 // ============================================================================
 // Investigate Button
@@ -110,7 +111,7 @@ export function DraftPRPanel({ isOpen, onClose }) {
   
   const { aiSession } = useEditorStore((state) => ({
     aiSession: state.aiSession
-  }));
+  }), shallow);
   
   const appliedPatches = aiSession?.appliedPatches || [];
   
@@ -263,7 +264,7 @@ export function CheckpointTimeline({ onRewind, onCompare }) {
     aiSession: state.aiSession,
     createCheckpoint: state.createCheckpoint,
     rewindToCheckpoint: state.rewindToCheckpoint
-  }));
+  }), shallow);
   
   const checkpoints = aiSession?.checkpoints || [];
   

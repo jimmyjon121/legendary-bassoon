@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import { useState, useCallback, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Pin, 
@@ -14,7 +14,7 @@ import {
 /**
  * ConversationItem - Enhanced conversation list item with pin/star
  */
-export const ConversationItem = ({ 
+export const ConversationItem = memo(({ 
   conversation,
   isActive = false,
   onSelect,
@@ -29,6 +29,9 @@ export const ConversationItem = ({
   const [showMenu, setShowMenu] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState(conversation.title);
+  const maskPrivateMeta = conversation.workspace === 'nsfw';
+  const displayTitle = maskPrivateMeta ? 'Vault note' : conversation.title;
+  const displayPreview = maskPrivateMeta ? '' : (conversation.preview || 'No messages yet');
 
   const handleRename = useCallback(() => {
     if (editTitle.trim() && editTitle !== conversation.title) {
@@ -105,7 +108,7 @@ export const ConversationItem = ({
             <>
               <div className="flex items-center gap-1.5">
                 <span className="text-sm text-white/90 truncate">
-                  {conversation.title}
+                  {displayTitle}
                 </span>
                 {conversation.pinned && (
                   <Pin size={10} className="text-amber-400 flex-shrink-0" />
@@ -116,7 +119,7 @@ export const ConversationItem = ({
               </div>
               <div className="flex items-center gap-2 mt-0.5">
                 <span className="text-xs text-white/40 truncate">
-                  {conversation.preview || 'No messages yet'}
+                  {displayPreview}
                 </span>
               </div>
             </>
@@ -198,7 +201,7 @@ export const ConversationItem = ({
       </div>
     </motion.div>
   );
-};
+});
 
 /**
  * Format timestamp to relative time
@@ -249,7 +252,6 @@ export const PinnedConversations = ({ conversations, ...props }) => {
 };
 
 export default ConversationItem;
-
 
 
 

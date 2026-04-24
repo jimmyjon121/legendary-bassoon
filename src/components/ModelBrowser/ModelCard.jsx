@@ -8,7 +8,7 @@ import React from 'react';
 import { motion } from 'framer-motion';
 import {
   Download, Star, GitCompare, Check, ExternalLink,
-  Code, MessageCircle, Lightbulb, Zap, Package, Brain,
+  Code, MessageCircle, Lightbulb, Zap, Package, Brain, Eye,
 } from 'lucide-react';
 
 const FAMILY_COLORS = {
@@ -32,10 +32,37 @@ const CAPABILITY_ICONS = {
   chat: MessageCircle,
   creative: Lightbulb,
   instruction: Brain,
+  vision: Eye,
   uncensored: Package,
   general: Zap,
   reasoning: Brain,
 };
+
+function normalizeCapability(model = {}) {
+  const capability = String(model?.capability || '').toLowerCase();
+  const tags = Array.isArray(model?.tags) ? model.tags.map((tag) => String(tag).toLowerCase()) : [];
+  if (capability === 'coding') return 'code';
+  if (capability === 'multimodal') return 'vision';
+  if (capability === 'roleplay' || capability === 'erotica' || capability === 'storytelling') return 'creative';
+  if ((!capability || capability === 'general') && (tags.includes('vision') || tags.includes('multimodal'))) return 'vision';
+  if ((!capability || capability === 'general') && (tags.includes('code') || tags.includes('coding') || tags.includes('programming'))) return 'code';
+  return capability || 'general';
+}
+
+function getFeatureLabels(model = {}) {
+  const tags = Array.isArray(model?.tags) ? model.tags.map((tag) => String(tag).toLowerCase()) : [];
+  const labels = [];
+  if (tags.includes('vision') || tags.includes('multimodal')) labels.push('Vision');
+  if (tags.includes('tools') || tags.includes('function-calling')) labels.push('Tools');
+  if (tags.includes('thinking') || tags.includes('reasoning')) labels.push('Thinking');
+  const seen = new Set();
+  return labels.filter((label) => {
+    const key = label.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 2);
+}
 
 function formatNumber(num) {
   if (num >= 1000000) return `${(num / 1000000).toFixed(1)}M`;
@@ -58,7 +85,8 @@ export function ModelCard({
   const author = enriched.author || modelId.split('/')[0];
   const family = enriched.family || 'Other';
   const params = enriched.params;
-  const capability = enriched.capability || 'general';
+  const capability = normalizeCapability(enriched);
+  const featureLabels = getFeatureLabels(enriched);
   const downloads = enriched.downloadCount || model.downloads || 0;
   const likes = enriched.likes || model.likes || 0;
 
@@ -198,6 +226,11 @@ export function ModelCard({
           <CapabilityIcon size={10} />
           <span className="capitalize">{capability}</span>
         </span>
+        {featureLabels.map((label) => (
+          <span key={label} className="px-2 py-0.5 rounded bg-forge-bg text-[10px] text-text-muted">
+            {label}
+          </span>
+        ))}
       </div>
 
       {/* Footer */}

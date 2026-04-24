@@ -14,6 +14,11 @@ export function TemplateEditor({ template, workspace, onSave, onCancel }) {
   const [category, setCategory] = useState(template?.category || 'General');
   const [targetWorkspace, setTargetWorkspace] = useState(template?.workspace || workspace || '');
   const [error, setError] = useState(null);
+  const showPrivateWorkspaceOption = (
+    template?.workspace === 'nsfw'
+    || workspace === 'nsfw'
+    || targetWorkspace === 'nsfw'
+  );
 
   useEffect(() => {
     setError(null);
@@ -82,7 +87,7 @@ export function TemplateEditor({ template, workspace, onSave, onCancel }) {
             <option value="casual">Casual</option>
             <option value="work">Work</option>
             <option value="code">Code</option>
-            <option value="nsfw">Private</option>
+            {showPrivateWorkspaceOption && <option value="nsfw">Vault</option>}
           </select>
         </div>
       </div>

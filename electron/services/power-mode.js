@@ -15,7 +15,7 @@
  * - Admin-required operations
  */
 
-const { powerSaveBlocker } = require('electron');
+const { powerSaveBlocker, powerMonitor } = require('electron');
 const { exec } = require('child_process');
 const os = require('os');
 
@@ -32,6 +32,110 @@ class PowerModeService {
       memoryOptimized: false
     };
     this.originalEnv = {};
+
+    // Power-state cache + subscribers. Updated on Electron powerMonitor
+    // events so lane routing doesn't have to poll the OS on every turn.
+    this._powerState = {
+      onBattery: false,
+      batteryPercent: null,
+      acConnected: true,
+      source: 'default',
+      updatedAt: Date.now(),
+    };
+    this._powerListeners = new Set();
+    this._powerMonitorWired = false;
+  }
+
+  /**
+   * Get current power state. Lazy-wires the Electron powerMonitor
+   * listeners on first call so app boot isn't slowed down by the query.
+   * Cached in-memory; updates via event listener.
+   */
+  async getPowerState() {
+    if (!this._powerMonitorWired) {
+      this._wirePowerMonitor();
+    }
+    // Refresh from the OS on demand — Electron's onBatteryPower is
+    // accurate but battery percent requires a secondary probe.
+    try {
+      const onBattery = typeof powerMonitor?.isOnBatteryPower === 'function'
+        ? Boolean(powerMonitor.isOnBatteryPower())
+        : this._powerState.onBattery;
+      const batteryPercent = await this._queryBatteryPercent();
+      this._powerState = {
+        onBattery,
+        batteryPercent,
+        acConnected: !onBattery,
+        source: 'powerMonitor',
+        updatedAt: Date.now(),
+      };
+    } catch (_) {
+      // Keep prior state on failure.
+    }
+    return { ...this._powerState };
+  }
+
+  onPowerStateChange(listener) {
+    if (typeof listener !== 'function') return () => {};
+    this._powerListeners.add(listener);
+    if (!this._powerMonitorWired) this._wirePowerMonitor();
+    return () => { this._powerListeners.delete(listener); };
+  }
+
+  _wirePowerMonitor() {
+    if (this._powerMonitorWired) return;
+    this._powerMonitorWired = true;
+    try {
+      if (typeof powerMonitor?.on === 'function') {
+        powerMonitor.on('on-ac', () => {
+          this._powerState = {
+            ...this._powerState,
+            onBattery: false,
+            acConnected: true,
+            source: 'powerMonitor:on-ac',
+            updatedAt: Date.now(),
+          };
+          this._emitPowerChange();
+        });
+        powerMonitor.on('on-battery', () => {
+          this._powerState = {
+            ...this._powerState,
+            onBattery: true,
+            acConnected: false,
+            source: 'powerMonitor:on-battery',
+            updatedAt: Date.now(),
+          };
+          this._emitPowerChange();
+        });
+      }
+    } catch (err) {
+      console.warn('[PowerMode] powerMonitor wiring failed:', err?.message || err);
+    }
+  }
+
+  _emitPowerChange() {
+    for (const listener of this._powerListeners) {
+      try { listener({ ...this._powerState }); } catch (_) { /* noop */ }
+    }
+  }
+
+  _queryBatteryPercent() {
+    // Best-effort: use systeminformation if available, otherwise null.
+    return new Promise((resolve) => {
+      try {
+        const si = require('systeminformation');
+        if (si?.battery) {
+          si.battery().then((batt) => {
+            const percent = Number(batt?.percent);
+            resolve(Number.isFinite(percent) ? percent : null);
+          }).catch(() => resolve(null));
+          return;
+        }
+      } catch (_) {
+        // systeminformation not installed; give up quietly.
+      }
+      resolve(null);
+    });
   }
 
   /**

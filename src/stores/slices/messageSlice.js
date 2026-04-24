@@ -3,12 +3,36 @@
 // PHILOSOPHY: Give the AI EVERYTHING it needs. Use the full context window!
 
 import { v4 as uuidv4 } from 'uuid';
-import { isElectron, safeCall } from '../../utils/electronAPI';
+import { api, isElectron, safeCall } from '../../utils/electronAPI';
 import { useAdaptiveGeneration } from '../../services/adaptiveGeneration';
-import { buildOptimizedOllamaOptionsWithInfo, parseModelName, MODEL_FAMILIES } from '../../services/modelOptimizer';
+import { buildOptimizedOllamaOptionsWithInfo, parseModelName, MODEL_FAMILIES, isThinkingModel as detectThinkingModel } from '../../services/modelOptimizer';
 import { useEditorStore } from '../editorStore';
 import { buildFullContext } from '../../services/fullContextBuilder';
-import { WEB_SEARCH_TOOL_PROMPT, isWebSearchAvailable, processSearchCalls, hasSearchCalls } from '../../services/webSearchTool';
+import { resolveChatProjectContext } from '../../services/chatProjectContext';
+import {
+  WEB_SEARCH_TOOL_PROMPT,
+  isWebSearchAvailable,
+  processSearchCalls,
+  hasSearchCalls,
+  isDirectDateOrTimePrompt,
+  buildSearchQueryFromPrompt,
+  shouldForceWebSearch,
+} from '../../services/webSearchTool';
+
+function isSyntheticModelSelection(model = '') {
+  return String(model || '').trim().toLowerCase().startsWith('npu:');
+}
+
+function formatModelLabel(model = '') {
+  const raw = String(model || '').trim();
+  if (!raw) return 'Model';
+  if (isSyntheticModelSelection(raw)) {
+    const target = raw.slice(4).trim();
+    const parts = target.split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] || 'NPU model';
+  }
+  return raw.split(':')[0] || raw;
+}
 
 // Clean up response text: strip leaked prompt artifacts, conversation turn markers, etc.
 function cleanupResponse(text) {
@@ -253,60 +277,6 @@ function getActualContextSize(modelName) {
   return 16384; // Reasonable default for unknown models
 }
 
-// Some imported GGUF models ship with a raw Ollama template ("{{ .Prompt }}"),
-// which means /api/chat won't apply role-aware turn formatting reliably.
-function isRawPromptTemplate(template) {
-  if (!template || typeof template !== 'string') return false;
-  const normalized = template.replace(/\s+/g, ' ').trim();
-  if (!normalized) return false;
-  return (
-    normalized === '{{ .Prompt }}' ||
-    normalized === '{{.Prompt}}' ||
-    (normalized.includes('{{ .Prompt') && !normalized.includes('.Messages'))
-  );
-}
-
-function buildGenerateFallbackPrompt(systemPrompt, chatMessages = []) {
-  const parts = [];
-  const sys = (systemPrompt || '').trim();
-  if (sys) {
-    parts.push(`System: ${sys}`);
-  }
-
-  for (const msg of chatMessages) {
-    const role = msg.role === 'assistant' ? 'Assistant' : 'User';
-    const content = (msg.content || '').trim();
-    if (!content) continue;
-    parts.push(`${role}: ${content}`);
-  }
-
-  parts.push('Assistant:');
-  return parts.join('\n\n');
-}
-
-// GPT-OSS models expect Harmony-style turn tokens.
-// Using plain "User:/Assistant:" prompt text produces broken continuations.
-function buildGptOssHarmonyPrompt(systemPrompt, chatMessages = []) {
-  const parts = [];
-  const sys = (systemPrompt || '').trim() || 'You are a helpful assistant.';
-
-  parts.push(`<|start|>system<|message|>${sys}<|end|>`);
-
-  for (const msg of chatMessages) {
-    const content = (msg.content || '').trim();
-    if (!content) continue;
-
-    if (msg.role === 'assistant') {
-      parts.push(`<|start|>assistant<|channel|>final<|message|>${content}<|end|>`);
-    } else {
-      parts.push(`<|start|>user<|message|>${content}<|end|>`);
-    }
-  }
-
-  parts.push('<|start|>assistant<|channel|>final<|message|>');
-  return parts.join('');
-}
-
 function isLikelyCodeRequest(text) {
   if (!text || typeof text !== 'string') return false;
   const raw = text.trim();
@@ -461,8 +431,10 @@ function normalizeChatMessages(messages = [], fallbackUserMessage = '') {
 
 function isSimpleGreeting(text) {
   if (!text || typeof text !== 'string') return false;
-  return /^(hi|hello|hey|yo|sup|how are you|good morning|good afternoon|good evening|what's up|whats up)[!.? ]*$/i
-    .test(text.trim());
+  const value = text.trim().toLowerCase();
+  if (!value || value.length > 80) return false;
+  return /^(hi|hello|hey|yo|sup)( there| again)?[!.? ]*$|^(how are you|good morning|good afternoon|good evening|what's up|whats up)[!.? ]*$/i
+    .test(value);
 }
 
 function isShortCasualPrompt(text) {
@@ -477,121 +449,216 @@ function isShortCasualPrompt(text) {
   return isSimpleGreeting(raw);
 }
 
-function isProfileCardArtifact(text) {
-  const raw = String(text || '').trim();
-  if (!raw) return false;
-  const lower = raw.toLowerCase();
-
-  if (lower.includes('quick links') || lower.includes('my availability')) return true;
-  if (/\|\s*day\b/i.test(raw)) return true;
-
-  const bulletLines = raw
-    .split('\n')
-    .map((line) => line.trim())
-    .filter((line) => /^[-*]/.test(line));
-  const contactHits = ['call', 'chat', 'email'].reduce((count, token) => (
-    lower.includes(token) ? count + 1 : count
-  ), 0);
-
-  if (contactHits >= 3 && bulletLines.length >= 2 && raw.length > 80) return true;
-  if (lower.includes('availability') && contactHits >= 2) return true;
-  return false;
+function isAcknowledgementPrompt(text) {
+  if (!text || typeof text !== 'string') return false;
+  return /^(thanks|thank you|thx|ok|okay|cool|nice|great|sounds good|all good|appreciate it)[!.? ]*$/i
+    .test(text.trim());
 }
 
-function sanitizeSimpleGreetingResponse(text) {
-  const raw = String(text || '').trim();
-  if (!raw) {
-    return 'Hey! What would you like to do today?';
-  }
-
-  const lower = raw.toLowerCase();
-  const hasProfileCardMarkers =
-    lower.includes('quick links') ||
-    lower.includes('my availability') ||
-    (lower.includes('call') && lower.includes('email') && raw.length > 90);
-
-  const looksLikeStructuredCard =
-    (/^#+\s/m.test(raw) && /(^|\n)\s*[-*]\s+/m.test(raw) && raw.length > 120) ||
-    /\|\s*day\b/i.test(raw);
-
-  if (hasProfileCardMarkers || looksLikeStructuredCard) {
-    const firstLine = raw
-      .split('\n')
-      .map((line) => line.replace(/^[#>*`\-\s]+/, '').trim())
-      .find(Boolean);
-
-    if (firstLine && /^(hi|hello|hey)\b/i.test(firstLine) && firstLine.length <= 120) {
-      return firstLine;
-    }
-    return 'Hey! Good to see you. What do you want to work on right now?';
-  }
-
-  // Keep greeting replies short and natural.
-  if (raw.length > 260) {
-    const firstLine = raw.split('\n').map((line) => line.trim()).find(Boolean);
-    if (firstLine) return firstLine;
-  }
-
-  return raw;
+function stripThinkBlocks(text) {
+  const raw = String(text || '');
+  if (!raw) return '';
+  return raw
+    .replace(/<think>[\s\S]*?<\/think>/gi, ' ')
+    .replace(/<think>[\s\S]*$/gi, ' ')
+    .replace(/<\/think>/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
 }
 
-function sanitizeShortCasualResponse(userPrompt, text) {
-  const raw = String(text || '').trim();
-  if (!raw) return 'I am here. What should we work on?';
+function extractWebToolTranscript(content) {
+  const text = String(content || '');
+  if (!text) return '';
 
-  if (!isShortCasualPrompt(userPrompt)) return raw;
-  if (isSimpleGreeting(userPrompt)) {
-    return sanitizeSimpleGreetingResponse(raw);
-  }
+  const blocks = [];
+  const patterns = [
+    /\[Web Search Actions for "[^"]+"\][\s\S]*?\[End of Web Search Actions\]/gi,
+    /\[Web Search Results for "[^"]+"\][\s\S]*?\[End of Search Results\]/gi,
+  ];
 
-  if (isProfileCardArtifact(raw)) {
-    return 'I am here and ready. What do you want to do next?';
-  }
-
-  if (raw.length > 260) {
-    const firstLine = raw.split('\n').map((line) => line.trim()).find(Boolean);
-    if (firstLine) return firstLine;
-  }
-
-  return raw;
-}
-
-function buildRawModelHistory(messages = [], latestUserMessage = '') {
-  const normalized = normalizeChatMessages(messages, latestUserMessage);
-  if (normalized.length === 0) return [];
-
-  const lastUserIndex = (() => {
-    for (let i = normalized.length - 1; i >= 0; i--) {
-      if (normalized[i].role === 'user') return i;
-    }
-    return -1;
-  })();
-
-  if (lastUserIndex < 0) return normalized.slice(-1);
-
-  const latestUserText = normalized[lastUserIndex]?.content || latestUserMessage || '';
-  // For short greetings/small talk, ignore previous assistant turns.
-  // This prevents one bad generation from poisoning follow-up hellos.
-  if (isSimpleGreeting(latestUserText)) {
-    return [normalized[lastUserIndex]];
-  }
-
-  const result = [];
-  const previous = normalized[lastUserIndex - 1];
-  if (previous && previous.role === 'assistant') {
-    const previousText = previous.content || '';
-    const previousLooksNoisy =
-      previousText.length > 1200 ||
-      detectPromptLeak(previousText) ||
-      /<\|start\|>|<\|message\|>|assistant:|user:/i.test(previousText);
-
-    if (!previousLooksNoisy) {
-      result.push(previous);
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(text)) !== null) {
+      blocks.push({
+        index: match.index,
+        text: String(match[0] || '').trim(),
+      });
     }
   }
-  result.push(normalized[lastUserIndex]);
-  return result;
+
+  if (blocks.length === 0) return '';
+  return blocks
+    .sort((a, b) => a.index - b.index)
+    .map((block) => block.text)
+    .filter(Boolean)
+    .join('\n\n')
+    .trim();
 }
+
+function truncateWebFallbackText(value, maxLength = 180) {
+  const normalized = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!normalized) return '';
+  if (normalized.length <= maxLength) return normalized;
+  return `${normalized.slice(0, Math.max(0, maxLength - 1)).trim()}...`;
+}
+
+function buildClockFallbackAnswer(userPrompt = '') {
+  const normalizedUserPrompt = String(userPrompt || '').trim();
+  const asksTime = /\b(current time|what time|time is it|right now|now)\b/i.test(normalizedUserPrompt);
+  const asksDate = /\b(today(?:'s)? date|current date|what(?:'s| is)\s+(?:the\s+)?date|what day is it)\b/i.test(normalizedUserPrompt);
+  if (!asksDate && !asksTime) return '';
+
+  const now = new Date();
+  const localDate = new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'full',
+  }).format(now);
+  const localTime = new Intl.DateTimeFormat(undefined, {
+    timeStyle: 'long',
+  }).format(now);
+
+  if (asksDate && asksTime) {
+    return `Today is ${localDate}, and the current local time is ${localTime}.`;
+  }
+  if (asksDate) {
+    return `Today is ${localDate}.`;
+  }
+  return `The current local time is ${localTime}.`;
+}
+
+function buildDeterministicWebFallbackAnswer({ userPrompt = '', searchResults = [] } = {}) {
+  const parts = [];
+  const clockAnswer = buildClockFallbackAnswer(userPrompt);
+  if (clockAnswer) parts.push(clockAnswer);
+
+  const primarySearch = Array.isArray(searchResults) && searchResults.length > 0 ? searchResults[0] : null;
+  const results = Array.isArray(primarySearch?.results)
+    ? primarySearch.results.filter((item) => item?.title && item?.url).slice(0, 4)
+    : [];
+
+  if (results.length > 0) {
+    const isNewsPrompt = /\b(news|headline|headlines|updates?|happ\w*|develop\w*)\b/i.test(String(userPrompt || ''));
+    const lines = [
+      isNewsPrompt ? 'Latest relevant coverage:' : 'Relevant sources:',
+      ...results.map((item, index) => {
+        const title = truncateWebFallbackText(item?.title || 'Untitled result', 140);
+        const snippet = truncateWebFallbackText(item?.snippet || '', 180);
+        return `[${index + 1}] ${title}${snippet ? ` - ${snippet}` : ''}`;
+      }),
+      '',
+      'Sources:',
+      ...results.map((item, index) => `[${index + 1}] ${String(item?.url || '').trim()}`),
+    ];
+    parts.push(lines.join('\n'));
+  }
+
+  return parts.join('\n\n').trim();
+}
+
+async function synthesizeWebSearchAnswer({
+  model,
+  systemPrompt,
+  userPrompt,
+  toolTranscript,
+  synthesisContext,
+  options = {},
+}) {
+  if (!isElectron() || typeof window?.electronAPI?.sendToLLM !== 'function') {
+    return '';
+  }
+
+  const safeModel = String(model || '').trim();
+  if (!safeModel) return '';
+
+  const researchMaterial = [String(toolTranscript || '').trim(), String(synthesisContext || '').trim()]
+    .filter(Boolean)
+    .join('\n\n');
+  if (!researchMaterial) return '';
+  const now = new Date();
+  const currentUtcIso = now.toISOString();
+  const localTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local';
+  const currentLocalDateTime = new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'full',
+    timeStyle: 'long',
+  }).format(now);
+  const normalizedUserPrompt = String(userPrompt || '').trim();
+  const isRealtimeTimeQuery = /\b(current time|what time|time is it|right now|now)\b/i.test(normalizedUserPrompt);
+  const isRealtimeDateQuery = /\b(today(?:'s)? date|current date|what(?:'s| is)\s+(?:the\s+)?date|what day is it)\b/i.test(normalizedUserPrompt);
+  const isRealtimeNewsQuery = /\b(news|headline|headlines|updates?|happening|developments?)\b/i.test(normalizedUserPrompt);
+
+  const synthesisSystemPrompt = [
+    String(systemPrompt || '').trim(),
+    'You are in FINAL ANSWER mode after web tool execution.',
+    'Do not emit any tool calls like [SEARCH: ...] or JSON search payloads.',
+    'Answer the user directly and cite supporting sources with [n] notation when relevant.',
+    'Do not dump raw tool transcripts in the final answer body.',
+    isRealtimeTimeQuery
+      ? 'If the user asks for current time, compute from provided UTC timestamp and the target timezone. Do not copy stale snippet timestamps.'
+      : '',
+    isRealtimeDateQuery
+      ? 'If the user asks for today\'s date, answer it directly from the provided clock context instead of inferring it from search snippets.'
+      : '',
+    isRealtimeNewsQuery
+      ? 'If the user asks for news together with date or time, give the date/time first and then summarize the searched news.'
+      : '',
+  ].filter(Boolean).join('\n\n');
+
+  const synthesisPrompt = [
+    `User question: ${normalizedUserPrompt}`,
+    `Current UTC timestamp: ${currentUtcIso}`,
+    `Current local timezone: ${localTimeZone}`,
+    `Current local date/time: ${currentLocalDateTime}`,
+    '',
+    'Web research material:',
+    researchMaterial,
+    '',
+    'Now provide the final answer.',
+    '- Start with the direct answer.',
+    '- Keep it concise but complete.',
+    '- If the user asked for today\'s date or the current time, state it directly before any news summary.',
+    '- Cite searched sources using [1], [2], etc. when relevant.',
+  ].join('\n');
+
+  const baseTemperature = Number(options?.temperature);
+  const basePredict = Number(options?.num_predict);
+  const synthesisOptions = {
+    ...options,
+    temperature: Number.isFinite(baseTemperature)
+      ? Math.min(Math.max(baseTemperature, 0.1), 0.5)
+      : 0.3,
+    num_predict: Number.isFinite(basePredict)
+      ? Math.min(Math.max(basePredict, 192), 900)
+      : 500,
+  };
+
+  try {
+    const response = await window.electronAPI.sendToLLM({
+      model: safeModel,
+      messages: [{ role: 'user', content: synthesisPrompt }],
+      system: synthesisSystemPrompt,
+      options: synthesisOptions,
+      lane: 'lane_interactive',
+      workloadType: 'chat',
+      allowFallback: true,
+      priority: -10,
+    });
+
+    let content = String(response?.response || response?.message?.content || '').trim();
+    if (!content) return '';
+    if (hasSearchCalls(content)) {
+      content = content.replace(/\[SEARCH:\s*[^\]]+\]/gi, '').trim();
+    }
+    content = content.replace(/<\|search_result\|>[\s\S]*?<\|end_search_result\|>/gi, '').trim();
+    content = content
+      .replace(/\[Web Search Actions for "[^"]+"\][\s\S]*?\[End of Web Search Actions\]\n*/gi, '')
+      .replace(/\[Web Search Results for "[^"]+"\][\s\S]*?\[End of Search Results\]\n*/gi, '')
+      .trim();
+    return content;
+  } catch (error) {
+    console.warn('[WebSearch] Synthesis pass failed:', error);
+    return '';
+  }
+}
+
 
 export const createMessageSlice = (set, get) => ({
   // Image generation state
@@ -619,6 +686,10 @@ export const createMessageSlice = (set, get) => ({
     breakdown: [], // Array of {type, tokens, priority}
     lastUpdated: null,
   },
+  lastUserSubmitGuard: {
+    key: '',
+    at: 0,
+  },
 
   // Runtime visibility + stabilization state (per model)
   lastGenerationProfile: null,
@@ -632,8 +703,111 @@ export const createMessageSlice = (set, get) => ({
     result: null,
     error: null,
   },
+  guardrailMetrics: {
+    casual: {
+      totalEvents: 0,
+      byReason: {},
+      byType: {},
+      lastEvent: null,
+      recent: [],
+    },
+    coding: {
+      totalEvents: 0,
+      byReason: {},
+      byType: {},
+      lastEvent: null,
+      recent: [],
+    },
+    research: {
+      totalEvents: 0,
+      byReason: {},
+      byType: {},
+      lastEvent: null,
+      recent: [],
+    },
+  },
 
   dismissRuntimeNotice: () => set({ runtimeNotice: null }),
+
+  recordGuardrailEvent: (event = {}) => {
+    const scope = ['casual', 'coding', 'research'].includes(String(event.scope || '').toLowerCase())
+      ? String(event.scope || '').toLowerCase()
+      : 'casual';
+    const reason = String(event.reason || 'unknown_reason').trim() || 'unknown_reason';
+    const type = String(event.type || 'guardrail').trim() || 'guardrail';
+    const model = String(event.model || '').trim() || null;
+    const workspace = String(event.workspace || '').trim() || null;
+    const now = new Date().toISOString();
+    const entry = {
+      id: `guardrail_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      scope,
+      type,
+      reason,
+      model,
+      workspace,
+      createdAt: now,
+      ...((event.meta && typeof event.meta === 'object') ? { meta: event.meta } : {}),
+    };
+
+    set((state) => {
+      const metrics = state.guardrailMetrics || {};
+      const current = metrics[scope] || {
+        totalEvents: 0,
+        byReason: {},
+        byType: {},
+        lastEvent: null,
+        recent: [],
+      };
+
+      return {
+        guardrailMetrics: {
+          ...metrics,
+          [scope]: {
+            totalEvents: Number(current.totalEvents || 0) + 1,
+            byReason: {
+              ...(current.byReason || {}),
+              [reason]: Number(current.byReason?.[reason] || 0) + 1,
+            },
+            byType: {
+              ...(current.byType || {}),
+              [type]: Number(current.byType?.[type] || 0) + 1,
+            },
+            lastEvent: entry,
+            recent: [entry, ...(current.recent || [])].slice(0, 60),
+          },
+        },
+      };
+    });
+  },
+
+  resetGuardrailMetrics: (scope = 'all') => {
+    const normalized = String(scope || 'all').toLowerCase();
+    const empty = {
+      totalEvents: 0,
+      byReason: {},
+      byType: {},
+      lastEvent: null,
+      recent: [],
+    };
+    set((state) => {
+      if (normalized === 'all') {
+        return {
+          guardrailMetrics: {
+            casual: { ...empty },
+            coding: { ...empty },
+            research: { ...empty },
+          },
+        };
+      }
+      if (!['casual', 'coding', 'research'].includes(normalized)) return {};
+      return {
+        guardrailMetrics: {
+          ...(state.guardrailMetrics || {}),
+          [normalized]: { ...empty },
+        },
+      };
+    });
+  },
 
   setImageGenSettings: (settings) => set(state => ({
     imageGenSettings: { ...state.imageGenSettings, ...settings }
@@ -666,13 +840,17 @@ export const createMessageSlice = (set, get) => ({
       { id: 'code', prompt: 'Write a tiny JavaScript function add(a, b) that returns the sum.' },
     ];
 
+    const parsedModel = parseModelName(currentModel);
+    const thinkingModel = detectThinkingModel(parsedModel?.family, currentModel, null);
+
     const probeOptions = {
-      temperature: 0.2,
+      temperature: thinkingModel ? 0.4 : 0.2,
       top_p: 0.9,
       top_k: 40,
       repeat_penalty: 1.1,
       num_ctx: 4096,
-      num_predict: 180,
+      // Thinking models need more room to finish reasoning + final answer.
+      num_predict: thinkingModel ? 420 : 180,
     };
 
     try {
@@ -687,23 +865,28 @@ export const createMessageSlice = (set, get) => ({
         });
 
         const text = String(response?.response || response?.message?.content || '').trim();
-        const isLeak = detectPromptLeak(text);
-        const isLoop = detectDegenerateLoopText(text);
-        const tooLong = text.length > 2200;
-        const empty = text.length < 2;
+        const textForChecks = thinkingModel ? stripThinkBlocks(text) : text;
+        const hasThinkBlocks = /<think>/i.test(text) || /<\/think>/i.test(text);
+
+        // Reuse runtime guardrails, but avoid prompt-leak false positives on reasoning models.
+        const isLeak = thinkingModel ? false : detectPromptLeak(textForChecks);
+        const isLoop = detectDegenerateLoopText(textForChecks);
+        const tooLong = textForChecks.length > (thinkingModel ? 4200 : 2200);
+        const empty = textForChecks.length < 2;
         const failed = isLeak || isLoop || tooLong || empty;
 
         if (failed) failures += 1;
         details.push({
           id: test.id,
           chars: text.length,
+          charsChecked: textForChecks.length,
+          thinking: hasThinkBlocks,
           failed,
           reasons: [isLeak && 'leak', isLoop && 'loop', tooLong && 'too_long', empty && 'empty'].filter(Boolean),
         });
       }
 
       const status = failures === 0 ? 'stable' : (failures === 1 ? 'warning' : 'unstable');
-      const enableStability = failures > 0;
       const nowIso = new Date().toISOString();
 
       set((state) => ({
@@ -718,21 +901,13 @@ export const createMessageSlice = (set, get) => ({
             details,
           },
         },
-        stabilityModeByModel: {
-          ...state.stabilityModeByModel,
-          [currentModel]: {
-            enabled: enableStability,
-            reason: enableStability ? 'recalibration_failed' : 'recalibration_passed',
-            updatedAt: nowIso,
-          },
-        },
-        runtimeNotice: enableStability
+        runtimeNotice: failures > 0
           ? {
               id: `runtime-${Date.now()}`,
               type: 'warning',
               model: currentModel,
-              title: 'Stability mode enabled',
-              message: `${currentModel.split(':')[0]} failed ${failures}/${tests.length} probe checks. Safer runtime settings are now active.`,
+              title: 'Model health check',
+              message: `${formatModelLabel(currentModel)} failed ${failures}/${tests.length} probe checks.`,
               createdAt: nowIso,
             }
           : {
@@ -740,7 +915,7 @@ export const createMessageSlice = (set, get) => ({
               type: 'success',
               model: currentModel,
               title: 'Model recalibrated',
-              message: `${currentModel.split(':')[0]} passed probe checks. Running in normal auto mode.`,
+              message: `${formatModelLabel(currentModel)} passed probe checks. Running in normal auto mode.`,
               createdAt: nowIso,
             },
         recalibration: {
@@ -810,10 +985,10 @@ export const createMessageSlice = (set, get) => ({
 
     // Remove the assistant message from DB
     try {
-      await window.electronAPI?.dbRun(
-        'DELETE FROM messages WHERE id = ?',
-        [lastAssistant.id]
-      );
+      await api.data.messagesDelete({
+        id: lastAssistant.id,
+        conversationId: currentConversationId,
+      });
     } catch (e) {
       console.error('Failed to delete assistant message for regeneration:', e);
     }
@@ -844,7 +1019,10 @@ export const createMessageSlice = (set, get) => ({
     const messagesToDelete = messages.slice(msgIndex + 1);
     for (const m of messagesToDelete) {
       try {
-        await window.electronAPI?.dbRun('DELETE FROM messages WHERE id = ?', [m.id]);
+        await api.data.messagesDelete({
+          id: m.id,
+          conversationId: currentConversationId,
+        });
       } catch (e) {
         console.error('Failed to delete message during edit:', e);
       }
@@ -852,10 +1030,11 @@ export const createMessageSlice = (set, get) => ({
 
     // Update the user message in DB
     try {
-      await window.electronAPI?.dbRun(
-        'UPDATE messages SET content = ? WHERE id = ?',
-        [newContent.trim(), messageId]
-      );
+      await api.data.messagesUpdate({
+        id: messageId,
+        content: newContent.trim(),
+        conversationId: currentConversationId,
+      });
     } catch (e) {
       console.error('Failed to update edited message:', e);
     }
@@ -877,7 +1056,7 @@ export const createMessageSlice = (set, get) => ({
     if (isGenerating) return;
 
     try {
-      await window.electronAPI?.dbRun('DELETE FROM messages WHERE id = ?', [messageId]);
+      await api.data.messagesDelete({ id: messageId });
     } catch (e) {
       console.error('Failed to delete message:', e);
     }
@@ -891,12 +1070,66 @@ export const createMessageSlice = (set, get) => ({
    * Main send message entry point.
    */
   sendMessage: async (content, extra = {}) => {
-    const { currentConversationId, currentModel, currentWorkspace, workspaceSettings } = get();
-    
+    const state = get();
+    let { currentConversationId, currentModel, currentWorkspace, workspaceSettings } = state;
+    const normalizedContent = String(content || '').trim();
+    if (!normalizedContent) return;
+    content = normalizedContent;
+
+    const availableModels = Array.isArray(state.availableModels) ? state.availableModels : [];
+    const availableNames = new Set(availableModels.map((model) => String(model?.name || '').trim()).filter(Boolean));
+
+    if (
+      !currentModel
+      || (
+        !isSyntheticModelSelection(currentModel)
+        && availableNames.size > 0
+        && !availableNames.has(currentModel)
+      )
+    ) {
+      try {
+        const resolved = await state.resolveModelSelection?.(currentModel, { refresh: true });
+        if (resolved?.modelName) {
+          currentModel = resolved.modelName;
+          if (currentModel !== state.currentModel) {
+            await state.setModel?.(currentModel);
+            currentModel = get().currentModel;
+          }
+        }
+      } catch (resolveError) {
+        console.warn('[sendMessage] Failed to resolve current model:', resolveError?.message || resolveError);
+      }
+    }
+
     if (!currentModel) {
-      set({ error: 'No model selected' });
+      set({ error: 'No valid model selected' });
       return;
     }
+
+    // Suppress accidental duplicate submit events (e.g. Enter + click firing together).
+    const nowMs = Date.now();
+    const guardWindowMs = 900;
+    const dedupeConversationId = currentConversationId || 'new';
+    const dedupeKey = `${dedupeConversationId}::${content.toLowerCase()}`;
+    const lastGuard = state.lastUserSubmitGuard || { key: '', at: 0 };
+    const guardAge = nowMs - Number(lastGuard.at || 0);
+    if (lastGuard.key === dedupeKey && guardAge >= 0 && guardAge < guardWindowMs) {
+      console.warn('[sendMessage] Duplicate user send suppressed');
+      return;
+    }
+    const lastMessage = Array.isArray(state.messages) && state.messages.length > 0
+      ? state.messages[state.messages.length - 1]
+      : null;
+    if (
+      lastMessage?.role === 'user'
+      && String(lastMessage.content || '').trim().toLowerCase() === content.toLowerCase()
+      && lastMessage?.created_at
+      && (nowMs - new Date(lastMessage.created_at).getTime()) < 1500
+    ) {
+      console.warn('[sendMessage] Duplicate adjacent user turn suppressed');
+      return;
+    }
+    set({ lastUserSubmitGuard: { key: dedupeKey, at: nowMs } });
     
     // Create conversation if needed
     let conversationId = currentConversationId;
@@ -938,16 +1171,24 @@ export const createMessageSlice = (set, get) => ({
       attachments,
     };
     
-    await window.electronAPI?.dbRun(
-      'INSERT INTO messages (id, conversation_id, role, content, branch_id, parent_message_id) VALUES (?, ?, ?, ?, ?, ?)',
-      [userMessageId, conversationId, 'user', messageContent, branchId, parentId]
-    );
+    await api.data.messagesAppend({
+      id: userMessageId,
+      conversationId,
+      role: 'user',
+      content: messageContent,
+      branchId,
+      parentMessageId: parentId,
+    });
 
     // Persist attachments
     if (attachments.length > 0 && isElectron()) {
       try {
         const encryptionPassword = isNsfw && nsfwPassword ? nsfwPassword : null;
-        await safeCall('saveMessageAttachments', [userMessageId, attachments, encryptionPassword], null);
+        await api.data.attachmentsSave({
+          messageId: userMessageId,
+          files: attachments,
+          password: encryptionPassword,
+        });
       } catch (error) {
         console.error('Failed to save message attachments:', error);
       }
@@ -955,10 +1196,10 @@ export const createMessageSlice = (set, get) => ({
     
     // Mark conversation as encrypted if NSFW
     if (isNsfw) {
-      await window.electronAPI?.dbRun(
-        'UPDATE conversations SET encrypted = 1 WHERE id = ?',
-        [conversationId]
-      );
+      await api.data.conversationsUpdateMeta({
+        id: conversationId,
+        encrypted: true,
+      });
     }
     
     set(state => ({ 
@@ -1005,10 +1246,15 @@ export const createMessageSlice = (set, get) => ({
         }
       }
 
-      await window.electronAPI?.dbRun(
-        'INSERT INTO messages (id, conversation_id, role, content, model, branch_id, parent_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [assistantMessageId, conversationId, 'assistant', specContent, currentModel, bId, pId]
-      );
+      await api.data.messagesAppend({
+        id: assistantMessageId,
+        conversationId,
+        role: 'assistant',
+        content: specContent,
+        model: currentModel,
+        branchId: bId,
+        parentMessageId: pId,
+      });
 
       const assistantMessage = {
         id: assistantMessageId,
@@ -1028,16 +1274,13 @@ export const createMessageSlice = (set, get) => ({
         generationMetadata: { stage: 'idle', startedAt: null, chars: 0, tokensEstimated: 0, tokensPerSecond: 0 },
       }));
 
-      await window.electronAPI?.dbRun(
-        'UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-        [conversationId]
-      );
+      await api.data.conversationsUpdateMeta({ id: conversationId });
 
       return;
     }
     
-    // Proceed to generate
-    const allowWebSearch = get().currentWorkspace === 'research'
+    const ws = get().currentWorkspace;
+    const allowWebSearch = (ws === 'research' || ws === 'casual' || ws === 'work')
       ? Boolean(extra.webSearchEnabled)
       : false;
     await get()._generateResponse(content, conversationId, {
@@ -1051,7 +1294,51 @@ export const createMessageSlice = (set, get) => ({
    * Used by sendMessage, regenerateLastResponse, and editMessageAndRegenerate.
    */
   _generateResponse: async (userContent, conversationId, genOptions = {}) => {
-    const { currentModel, currentWorkspace, workspaceSettings } = get();
+    const stateAtStart = get();
+    let { currentModel, currentWorkspace, workspaceSettings } = stateAtStart;
+
+    const availableModels = Array.isArray(stateAtStart.availableModels) ? stateAtStart.availableModels : [];
+    const availableNames = new Set(availableModels.map((model) => String(model?.name || '').trim()).filter(Boolean));
+
+    if (
+      !currentModel
+      || (
+        !isSyntheticModelSelection(currentModel)
+        && availableNames.size > 0
+        && !availableNames.has(currentModel)
+      )
+    ) {
+      try {
+        const resolved = await stateAtStart.resolveModelSelection?.(currentModel, { refresh: true });
+        if (resolved?.modelName) {
+          currentModel = resolved.modelName;
+          if (currentModel !== stateAtStart.currentModel) {
+            await stateAtStart.setModel?.(currentModel);
+            currentModel = get().currentModel || currentModel;
+          }
+        }
+      } catch (resolveError) {
+        console.warn('[_generateResponse] Failed to resolve model:', resolveError?.message || resolveError);
+      }
+    }
+
+    if (!currentModel) {
+      set({
+        isGenerating: false,
+        streamingContent: '',
+        currentStreamChannel: null,
+        error: 'No valid model selected',
+        generationMetadata: {
+          stage: 'idle',
+          startedAt: null,
+          chars: 0,
+          tokensEstimated: 0,
+          tokensPerSecond: 0,
+        },
+      });
+      return;
+    }
+
     const isNsfw = currentWorkspace === 'nsfw';
     const nsfwPassword = get().nsfwPassword;
     
@@ -1076,11 +1363,14 @@ export const createMessageSlice = (set, get) => ({
     const messages = get().messages;
 
     let systemPrompt = workspaceSettings[currentWorkspace]?.systemPrompt || '';
-    const isGreetingTurn = isSimpleGreeting(userContent);
-    const isShortCasualTurn = currentWorkspace === 'casual' && isShortCasualPrompt(userContent);
-    const shouldUseMinimalContext = isGreetingTurn || isShortCasualTurn;
     const userAskedForCode = isLikelyCodeRequest(userContent);
     const userAskedForWorkspaceContext = isWorkspaceAwarenessQuery(userContent);
+    const userWantsExpandedContext =
+      userAskedForCode ||
+      userAskedForWorkspaceContext ||
+      /\?/.test(String(userContent || '')) ||
+      String(userContent || '').trim().length >= 90;
+    const allowContextAugmentation = currentWorkspace !== 'casual' || userWantsExpandedContext;
     const codeContextHints = genOptions.codeContext || null;
     const editorStateSnapshot = currentWorkspace === 'code' ? useEditorStore.getState() : null;
     const hasLoadedProject = currentWorkspace === 'code'
@@ -1090,6 +1380,25 @@ export const createMessageSlice = (set, get) => ({
     const projectContextMode = currentWorkspace === 'code'
       ? (userAskedForCode || userAskedForWorkspaceContext ? 'full' : 'light')
       : 'off';
+    const guardrailScope = currentWorkspace === 'code'
+      ? 'coding'
+      : currentWorkspace === 'research'
+        ? 'research'
+        : 'casual';
+    const guardrailReasonCodes = new Set();
+    const recordGuardrailReason = (reason, type = 'guardrail', meta = {}) => {
+      const reasonCode = String(reason || '').trim();
+      if (!reasonCode) return;
+      guardrailReasonCodes.add(reasonCode);
+      get().recordGuardrailEvent?.({
+        scope: guardrailScope,
+        workspace: currentWorkspace,
+        model: currentModel,
+        type,
+        reason: reasonCode,
+        meta,
+      });
+    };
 
     if (currentWorkspace === 'code') {
       systemPrompt = buildCodeWorkspaceContractPrompt(
@@ -1105,7 +1414,7 @@ export const createMessageSlice = (set, get) => ({
       : currentWorkspace === 'casual'
         ? 'casual'
         : null;
-    if (!shouldUseMinimalContext && promotedContextTarget && typeof get().listPromotedResearchContext === 'function') {
+    if (allowContextAugmentation && promotedContextTarget && typeof get().listPromotedResearchContext === 'function') {
       const promotedEntries = get().listPromotedResearchContext(promotedContextTarget).slice(0, 4);
       if (promotedEntries.length > 0) {
         const contextLines = promotedEntries.map((entry, idx) => {
@@ -1123,44 +1432,50 @@ export const createMessageSlice = (set, get) => ({
         }
       }
     }
+
+    let chatProjectContext = null;
+    if (allowContextAugmentation && currentWorkspace !== 'nsfw' && get().activeProjectId) {
+      chatProjectContext = await resolveChatProjectContext({
+        workspace: currentWorkspace,
+        activeProjectId: get().activeProjectId,
+        currentConversationId: conversationId,
+        prompt: userContent,
+      });
+    }
     // NOTE: Soul personalization overlay intentionally disabled.
     // We want a "raw model" conversation (plus useful context like memory/RAG/project),
     // without any personality injection.
     
-    const canUseWebSearch = currentWorkspace === 'research'
+    const canUseWebSearch = (currentWorkspace === 'research' || currentWorkspace === 'casual' || currentWorkspace === 'work')
       && Boolean(genOptions.webSearchEnabled)
       && isWebSearchAvailable();
 
-    // Add web search tool capability to system prompt (research mode only)
     if (canUseWebSearch) {
-      systemPrompt = systemPrompt + '\n\n' + WEB_SEARCH_TOOL_PROMPT;
+      const now = new Date();
+      const localTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local';
+      const currentLocalDateTime = new Intl.DateTimeFormat(undefined, {
+        dateStyle: 'full',
+        timeStyle: 'long',
+      }).format(now);
+      systemPrompt = [
+        systemPrompt,
+        WEB_SEARCH_TOOL_PROMPT,
+        '## Current Clock Context',
+        `Current UTC timestamp: ${now.toISOString()}`,
+        `Current local timezone: ${localTimeZone}`,
+        `Current local date/time: ${currentLocalDateTime}`,
+      ].filter(Boolean).join('\n\n');
     }
-
-    // Raw-template models need conservative context and prompt shaping.
-    const modelTemplate = currentModelInfo?.template || null;
-    const modelNameLower = (currentModel || '').toLowerCase();
-    const likelyRawTemplateModel =
-      modelNameLower.includes('gpt-oss') ||
-      modelNameLower.includes('gpt_oss') ||
-      modelNameLower.includes('rawprompt');
-    const useGptOssHarmony = modelNameLower.includes('gpt-oss') || modelNameLower.includes('gpt_oss');
-    const useGenerateCompatibility = isRawPromptTemplate(modelTemplate) || likelyRawTemplateModel;
-    const rawContextCap = useGenerateCompatibility
-      ? (useGptOssHarmony ? 8192 : 16384)
-      : Number.POSITIVE_INFINITY;
 
     // === FULL CONTEXT BUILDING ===
     // Use the model's ACTUAL context window, not a conservative default
     // Prefer real metadata from /api/show when available
-    const actualContextSize = Math.min(
-      currentModelInfo?.contextLength || getActualContextSize(currentModel),
-      rawContextCap
-    );
+    const actualContextSize = currentModelInfo?.contextLength || getActualContextSize(currentModel);
     let chatMessages = []; // Structured messages for /api/chat
     let messagesIncluded = 0;
     
     // Try full context builder first (includes memories, soul, project, RAG, etc.)
-    if (isElectron() && !shouldUseMinimalContext) {
+    if (isElectron() && allowContextAugmentation) {
       try {
         const editorState = currentWorkspace === 'code' && shouldInjectProjectContext
           ? (editorStateSnapshot || useEditorStore.getState())
@@ -1185,6 +1500,7 @@ export const createMessageSlice = (set, get) => ({
           systemPromptBase: systemPrompt,
           projectContext: mergedProjectContext,
           projectContextMode,
+          chatProjectContext,
           ragQuery: userContent,
           // Pass real context length from /api/show so we don't have to guess
           modelContextLength: currentModelInfo?.contextLength || null,
@@ -1217,7 +1533,7 @@ export const createMessageSlice = (set, get) => ({
     // Fallback: build messages array directly from conversation history
     if (chatMessages.length === 0) {
       // Memory engine for smart context
-      if (!shouldUseMinimalContext && isElectron() && messages.length > 15) {
+      if (allowContextAugmentation && isElectron() && messages.length > 15) {
         try {
           const memoryContext = await safeCall('memoryBuildContext', [{
             conversationId,
@@ -1241,23 +1557,14 @@ export const createMessageSlice = (set, get) => ({
       }
       
       // Build messages array from recent conversation.
-      // For simple greetings, avoid injecting heavy history/context to reduce odd template artifacts.
-      if (shouldUseMinimalContext) {
-        chatMessages = [{
-          role: 'user',
-          content: String(userContent || '').trim() || 'hello',
-        }];
-        messagesIncluded = 1;
-      } else {
-        const maxMessages = Math.min(messages.length, Math.floor(actualContextSize * 0.5 / 500));
-        const recentMessages = messages.slice(-maxMessages);
-        
-        chatMessages = recentMessages.map(m => ({
-          role: m.role === 'user' ? 'user' : 'assistant',
-          content: m.content,
-        }));
-        messagesIncluded = recentMessages.length;
-      }
+      const maxMessages = Math.min(messages.length, Math.floor(actualContextSize * 0.5 / 500));
+      const recentMessages = messages.slice(-maxMessages);
+      
+      chatMessages = recentMessages.map(m => ({
+        role: m.role === 'user' ? 'user' : 'assistant',
+        content: m.content,
+      }));
+      messagesIncluded = recentMessages.length;
 
       // Fallback: inject minimal code context even if fullContextBuilder failed
       if (currentWorkspace === 'code' && shouldInjectProjectContext) {
@@ -1286,6 +1593,10 @@ export const createMessageSlice = (set, get) => ({
             systemPrompt += `\n\n${lightSummary}`;
           }
         } catch (_) { /* ignore */ }
+      }
+
+      if (chatProjectContext?.systemPromptBlock && !systemPrompt.includes('## Active Chat Project')) {
+        systemPrompt += `\n\n${chatProjectContext.systemPromptBlock}`;
       }
     }
 
@@ -1330,7 +1641,8 @@ export const createMessageSlice = (set, get) => ({
         options.num_batch = autoTuneResult.batchSize;
       }
       
-      // GPU layers: accept both numeric and semantic tuner outputs.
+      // GPU layers: prefer numeric tuner outputs, but keep legacy string
+      // compatibility while older auto-tuner payloads are still around.
       if (typeof autoTuneResult.gpuLayers === 'number') {
         options.num_gpu = autoTuneResult.gpuLayers;
       } else if (typeof autoTuneResult.gpuLayers === 'string') {
@@ -1338,9 +1650,11 @@ export const createMessageSlice = (set, get) => ({
         if (gpuMode === 'all' || gpuMode === 'most') {
           options.num_gpu = -1;
         } else if (gpuMode === 'partial') {
-          options.num_gpu = Math.max(8, Math.round((options.num_ctx || 4096) / 1024));
+          options.num_gpu = 15;
         }
       }
+      // The orchestrator may still promote Ollama requests to full GPU offload
+      // on Electron-managed paths to avoid accidental CPU execution.
       
       // KV cache precision: q8_0 or q4_0 to fit larger contexts in VRAM
       if (autoTuneResult.kvCachePrecision) {
@@ -1429,8 +1743,13 @@ export const createMessageSlice = (set, get) => ({
           const base64Images = [];
           for (const img of imageAttachments) {
             if (img.originalPath) {
-              // Read as base64 via dedicated IPC call for vision models (LLaVA, bakllava, etc.)
-              const b64 = await window.electronAPI?.readFileBase64(img.originalPath);
+              // Read as base64 via typed attachment API (supports encrypted private files).
+              const result = await api.data.attachmentsRead({
+                filePath: img.originalPath,
+                password: isNsfw && nsfwPassword ? nsfwPassword : null,
+                encoding: 'base64',
+              });
+              const b64 = result?.success ? result.data : null;
               if (b64) {
                 base64Images.push(b64);
               }
@@ -1455,12 +1774,6 @@ export const createMessageSlice = (set, get) => ({
       console.log(`[LLM] Thinking model detected — disabling prompt-leak detection, enabling <think> tag parsing`);
     }
     
-    // Compatibility mode: raw-template models (template "{{ .Prompt }}")
-    // should use /api/generate with an explicit role-formatted prompt.
-    if (useGenerateCompatibility) {
-      console.log('[LLM] Raw template model detected — using /api/generate compatibility mode');
-    }
-
     // === STREAM RESPONSE ===
     let fullResponse = '';
     const channel = `llm:stream:${Date.now()}`;
@@ -1519,48 +1832,10 @@ export const createMessageSlice = (set, get) => ({
       return -1;
     };
     
-    // Track whether we've already checked for prompt leak (only need to check early on)
     let promptLeakChecked = false;
-    let stabilityTriggered = false;
-
-    const enableStabilityMode = (reason) => {
-      if (stabilityTriggered) return;
-      stabilityTriggered = true;
-      const nowIso = new Date().toISOString();
-      const shortModel = (currentModel || 'model').split(':')[0];
-
-      set((state) => ({
-        stabilityModeByModel: {
-          ...state.stabilityModeByModel,
-          [currentModel]: {
-            enabled: true,
-            reason,
-            updatedAt: nowIso,
-            source: 'auto-fallback',
-          },
-        },
-        modelHealthByModel: {
-          ...state.modelHealthByModel,
-          [currentModel]: {
-            status: 'unstable',
-            reason,
-            checkedAt: nowIso,
-            source: 'generation',
-          },
-        },
-        runtimeNotice: {
-          id: `runtime-${Date.now()}`,
-          type: 'warning',
-          model: currentModel,
-          title: 'Stability mode enabled',
-          message: `${shortModel} produced unstable output (${reason}). DevForge switched to safer settings automatically.`,
-          createdAt: nowIso,
-        },
-      }));
-    };
     
     // Attach vision images to the last user message (for /api/chat)
-    if (!useGenerateCompatibility && visionImages && chatMessages.length > 0) {
+    if (visionImages && chatMessages.length > 0) {
       // Find the last user message to attach images
       for (let i = chatMessages.length - 1; i >= 0; i--) {
         if (chatMessages[i].role === 'user') {
@@ -1579,59 +1854,9 @@ export const createMessageSlice = (set, get) => ({
       }
     }
 
-    // Raw-template compatibility safety caps:
-    // keep context and prediction lengths conservative to avoid runaway
-    // continuations on untemplated GGUF imports (especially GPT-OSS).
-    if (useGenerateCompatibility) {
-      const greetingLike = isSimpleGreeting(userContent);
-      const cappedCtx = useGptOssHarmony ? 8192 : 16384;
-      const cappedPredict = greetingLike ? 96 : (useGptOssHarmony ? 384 : 768);
-
-      if (!Number.isFinite(cleanOptions.num_ctx) || cleanOptions.num_ctx > cappedCtx) {
-        cleanOptions.num_ctx = cappedCtx;
-      }
-      if (!Number.isFinite(cleanOptions.num_predict) || cleanOptions.num_predict > cappedPredict) {
-        cleanOptions.num_predict = cappedPredict;
-      }
-
-      cleanOptions.repeat_penalty = Math.max(1.1, cleanOptions.repeat_penalty || 1.05);
-      if (greetingLike) {
-        cleanOptions.temperature = Math.min(Math.max(cleanOptions.temperature ?? 0.2, 0.2), 0.35);
-      }
-
-      console.warn(
-        `[LLM Compat] ${currentModel} ctx=${cleanOptions.num_ctx} predict=${cleanOptions.num_predict} greeting=${greetingLike}`
-      );
-    }
-
-    const stabilityModeActive = !!get().stabilityModeByModel?.[currentModel]?.enabled;
-    if (stabilityModeActive) {
-      cleanOptions.temperature = Math.min(cleanOptions.temperature ?? 0.7, 0.35);
-      cleanOptions.repeat_penalty = Math.max(cleanOptions.repeat_penalty || 1.05, 1.12);
-      cleanOptions.top_p = Math.min(cleanOptions.top_p ?? 0.9, 0.92);
-      cleanOptions.num_predict = Math.min(
-        cleanOptions.num_predict ?? 4096,
-        userAskedForCode ? 512 : 320
-      );
-      if (isSimpleGreeting(userContent)) {
-        cleanOptions.num_predict = Math.min(cleanOptions.num_predict, 96);
-      }
-    }
-
-    if (shouldUseMinimalContext) {
-      cleanOptions.num_predict = Math.min(
-        Number.isFinite(cleanOptions.num_predict) ? cleanOptions.num_predict : 180,
-        180
-      );
-      cleanOptions.temperature = Math.min(
-        Math.max(cleanOptions.temperature ?? 0.4, 0.2),
-        0.6
-      );
-    }
-
     const runtimeProfile = {
       model: currentModel,
-      mode: useGenerateCompatibility ? 'compat-generate' : 'chat',
+      mode: 'chat',
       num_ctx: cleanOptions.num_ctx ?? null,
       num_predict: cleanOptions.num_predict ?? null,
       temperature: cleanOptions.temperature ?? null,
@@ -1639,11 +1864,10 @@ export const createMessageSlice = (set, get) => ({
       num_gpu: typeof cleanOptions.num_gpu === 'number' ? cleanOptions.num_gpu : null,
       flash_attn: !!cleanOptions.flash_attn,
       kv_cache_type: cleanOptions.kv_cache_type || null,
-      stabilityMode: stabilityModeActive,
       updatedAt: new Date().toISOString(),
     };
     
-    console.log(`[LLM] Sending to Ollama (${modelSource}${useGenerateCompatibility ? '+compat:generate' : '+chat'}):`, {
+    console.log(`[LLM] Sending to Ollama (${modelSource}+chat):`, {
       model: currentModel,
       num_ctx: cleanOptions.num_ctx,
       num_predict: cleanOptions.num_predict,
@@ -1655,67 +1879,26 @@ export const createMessageSlice = (set, get) => ({
       kv_cache_type: cleanOptions.kv_cache_type,
       messagesCount: chatMessages.length,
       isThinkingModel: _isThinkingModel,
-      stabilityMode: stabilityModeActive,
     });
     
-    // Store thinking model flag in generation metadata for UI components
     set(state => ({
       lastGenerationProfile: runtimeProfile,
       generationMetadata: {
         ...state.generationMetadata,
         isThinkingModel: _isThinkingModel,
-        stabilityMode: stabilityModeActive,
       }
     }));
     
-    const streamPayload = useGenerateCompatibility
-      ? (() => {
-          const compatSystemPrompt = useGptOssHarmony
-            ? (
-              userAskedForCode
-                ? 'You are a precise coding assistant. Give direct, practical answers with runnable code when asked.'
-                : 'You are a helpful assistant. Reply naturally and directly in a concise way.'
-            )
-            : systemPrompt;
-
-          const compatOptions = useGptOssHarmony
-            ? {
-                ...cleanOptions,
-                stop: Array.from(new Set([
-                  ...(Array.isArray(cleanOptions.stop) ? cleanOptions.stop : []),
-                  '<|return|>',
-                  '<|end|>',
-                  '<|start|>',
-                ])),
-              }
-            : cleanOptions;
-          const compatMessages = useGptOssHarmony
-            ? buildRawModelHistory(chatMessages, userContent)
-            : chatMessages;
-
-          return {
-            model: currentModel,
-            prompt: useGptOssHarmony
-              ? buildGptOssHarmonyPrompt(compatSystemPrompt, compatMessages)
-              : buildGenerateFallbackPrompt(systemPrompt, chatMessages),
-            options: compatOptions,
-            lane: 'lane_interactive',
-            workloadType: 'chat',
-            allowFallback: true,
-            priority: -20,
-            ...(visionImages ? { images: visionImages } : {}),
-          };
-        })()
-      : {
-          model: currentModel,
-          messages: chatMessages,
-          system: systemPrompt,
-          options: cleanOptions,
-          lane: 'lane_interactive',
-          workloadType: 'chat',
-          allowFallback: true,
-          priority: -20,
-        };
+    const streamPayload = {
+      model: currentModel,
+      messages: chatMessages,
+      system: systemPrompt,
+      options: cleanOptions,
+      lane: 'lane_interactive',
+      workloadType: 'chat',
+      allowFallback: true,
+      priority: -20,
+    };
 
     const cleanup = window.electronAPI.streamFromLLM(
       streamPayload,
@@ -1744,8 +1927,8 @@ export const createMessageSlice = (set, get) => ({
             modelHealthByModel: {
               ...state.modelHealthByModel,
               [currentModel]: {
-                status: stabilityModeActive ? 'warning' : 'stable',
-                reason: stabilityModeActive ? 'stability_mode_active' : 'last_generation_ok',
+                status: 'stable',
+                reason: 'last_generation_ok',
                 checkedAt: new Date().toISOString(),
                 source: 'generation',
               },
@@ -1761,10 +1944,15 @@ export const createMessageSlice = (set, get) => ({
 
             // FIX: Properly await encryption before DB write
             const saveToDb = async (dbContent) => {
-              await window.electronAPI?.dbRun(
-                'INSERT INTO messages (id, conversation_id, role, content, model, branch_id, parent_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-                [assistantMessageId, conversationId, 'assistant', dbContent, currentModel, branchId, parentId]
-              );
+              await api.data.messagesAppend({
+                id: assistantMessageId,
+                conversationId,
+                role: 'assistant',
+                content: dbContent,
+                model: currentModel,
+                branchId,
+                parentMessageId: parentId,
+              });
             };
 
             if (isNsfw && nsfwPassword) {
@@ -1793,6 +1981,8 @@ export const createMessageSlice = (set, get) => ({
                 chars: finalMeta.chars || fullResponse.length,
                 startedAt: finalMeta.startedAt || null,
                 durationSeconds: elapsedSec,
+                guardrailReasons: Array.from(guardrailReasonCodes),
+                guardrailReasonPrimary: Array.from(guardrailReasonCodes)[0] || null,
               },
             };
 
@@ -1802,10 +1992,9 @@ export const createMessageSlice = (set, get) => ({
               // First exchange: generate a smart title
               _autoTitleConversation(conversationId, userContent, fullResponse, currentModel);
             } else {
-              window.electronAPI?.dbRun(
-                'UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-                [conversationId]
-              );
+              api.data.conversationsUpdateMeta({ id: conversationId }).catch((error) => {
+                console.warn('Failed to update conversation timestamp:', error);
+              });
             }
 
             set(state => ({
@@ -1840,14 +2029,49 @@ export const createMessageSlice = (set, get) => ({
           };
 
           // === WEB SEARCH EXECUTION ===
-          // Check if the AI output contains [SEARCH: ...] calls and process them
+          // Check if the AI output contains search calls and process them.
+          // Then run a synthesis pass so the user gets an actual answer, not just raw results.
           if (canUseWebSearch && hasSearchCalls(fullResponse)) {
             (async () => {
               try {
-                const { content: processedContent } = await processSearchCalls(fullResponse);
-                fullResponse = processedContent;
+                const {
+                  content: processedContent,
+                  searchResults = [],
+                  synthesisContext = '',
+                } = await processSearchCalls(fullResponse, {
+                  maxResults: 8,
+                  fetchTopResults: 2,
+                  fetchTimeout: 7000,
+                  fetchMaxLength: 2800,
+                  excerptLength: 900,
+                  userPrompt: userContent,
+                });
+                const toolTranscript = extractWebToolTranscript(processedContent) || processedContent;
+                fullResponse = toolTranscript;
+
                 // Update the streaming content immediately so user sees results
                 set({ streamingContent: fullResponse });
+
+                const synthesizedAnswer = await synthesizeWebSearchAnswer({
+                  model: currentModel,
+                  systemPrompt,
+                  userPrompt: userContent,
+                  toolTranscript,
+                  synthesisContext,
+                  options: cleanOptions,
+                });
+                const deterministicFallback = buildDeterministicWebFallbackAnswer({
+                  userPrompt: userContent,
+                  searchResults,
+                });
+
+                if (synthesizedAnswer) {
+                  fullResponse = synthesizedAnswer.trim();
+                  set({ streamingContent: fullResponse });
+                } else if (deterministicFallback) {
+                  fullResponse = deterministicFallback;
+                  set({ streamingContent: fullResponse });
+                }
               } catch (e) {
                 console.warn('[WebSearch] Failed to process search calls:', e);
               }
@@ -1857,7 +2081,71 @@ export const createMessageSlice = (set, get) => ({
             return; // Let the async handler finish
           }
 
+          const shouldAutoSearch = canUseWebSearch && !hasSearchCalls(fullResponse) && shouldForceWebSearch(userContent);
+          const shouldClockSynthesize = canUseWebSearch && !hasSearchCalls(fullResponse) && isDirectDateOrTimePrompt(userContent);
+
+          if (shouldAutoSearch || shouldClockSynthesize) {
+            (async () => {
+              try {
+                let toolTranscript = '';
+                let synthesisContext = '';
+                let searchResults = [];
+
+                if (shouldAutoSearch) {
+                  const forcedQuery = buildSearchQueryFromPrompt(userContent);
+                  if (forcedQuery) {
+                    const {
+                      content: processedContent,
+                      searchResults: forcedSearchResults = [],
+                      synthesisContext: forcedSynthesisContext = '',
+                    } = await processSearchCalls(`[SEARCH: ${forcedQuery}]`, {
+                      maxResults: 8,
+                      fetchTopResults: 2,
+                      fetchTimeout: 7000,
+                      fetchMaxLength: 2800,
+                      excerptLength: 900,
+                      userPrompt: userContent,
+                    });
+                    toolTranscript = extractWebToolTranscript(processedContent) || processedContent;
+                    searchResults = forcedSearchResults;
+                    synthesisContext = forcedSynthesisContext;
+                    fullResponse = toolTranscript;
+                    set({ streamingContent: fullResponse });
+                  }
+                }
+
+                const synthesizedAnswer = await synthesizeWebSearchAnswer({
+                  model: currentModel,
+                  systemPrompt,
+                  userPrompt: userContent,
+                  toolTranscript: toolTranscript || 'No web lookup was required. Use the provided clock context to answer directly.',
+                  synthesisContext,
+                  options: cleanOptions,
+                });
+                const deterministicFallback = buildDeterministicWebFallbackAnswer({
+                  userPrompt: userContent,
+                  searchResults,
+                });
+
+                if (synthesizedAnswer) {
+                  fullResponse = synthesizedAnswer.trim();
+                  set({ streamingContent: fullResponse });
+                } else if (deterministicFallback) {
+                  fullResponse = deterministicFallback;
+                  set({ streamingContent: fullResponse });
+                }
+              } catch (e) {
+                console.warn('[WebSearch] Fresh-info fallback failed:', e);
+              }
+              finalizeAssistantMessage();
+            })();
+            return;
+          }
+
           if (!canUseWebSearch && hasSearchCalls(fullResponse)) {
+            recordGuardrailReason('search_call_stripped_offline', 'policy_enforcement', {
+              workspace: currentWorkspace,
+            });
             fullResponse = fullResponse.replace(/\[SEARCH:\s*[^\]]+\]/gi, '').trim();
           }
 
@@ -1881,26 +2169,16 @@ export const createMessageSlice = (set, get) => ({
             fullResponse = cleanupResponse(fullResponse);
           }
 
-          if (isGreetingTurn) {
-            fullResponse = sanitizeSimpleGreetingResponse(fullResponse);
-          }
-          if (isShortCasualTurn) {
-            const sanitized = sanitizeShortCasualResponse(userContent, fullResponse);
-            if (sanitized !== fullResponse) {
-              enableStabilityMode('casual_short_prompt_artifact');
-              fullResponse = sanitized;
-            }
-          }
-          
-          // If cleanup stripped everything (entire response was leaked reasoning), 
-          // provide a fallback so the user doesn't see an empty bubble
+          // If cleanup stripped everything, provide a simple fallback
           if (!fullResponse || fullResponse.length < 5) {
-            fullResponse = 'Hello! How can I help you today?';
+            recordGuardrailReason('final_empty_fallback', 'fallback');
+            fullResponse = "I couldn't generate a response. Please try again.";
           }
 
           // If a coding model denies workspace access despite IDE context, recover with
           // a deterministic workspace-aware response instead of surfacing the denial.
           if (currentWorkspace === 'code' && shouldInjectProjectContext && isWorkspaceContextDenialResponse(fullResponse)) {
+            recordGuardrailReason('workspace_context_denial_recovered', 'context_recovery');
             fullResponse = buildWorkspaceContextRecovery(
               editorStateSnapshot || useEditorStore.getState(),
               codeContextHints
@@ -1948,7 +2226,7 @@ export const createMessageSlice = (set, get) => ({
               if (fullResponse.length > 150) {
                 promptLeakChecked = true;
                 fullResponse = stripPromptLeak(fullResponse);
-                enableStabilityMode('prompt_leak');
+                recordGuardrailReason('stream_prompt_leak_abort', 'stream_guardrail');
                 shouldAbort = true;
               }
               // Under 150 chars -- wait a bit more to see if there's a valid first line
@@ -1965,7 +2243,7 @@ export const createMessageSlice = (set, get) => ({
             if (leakPos > 0) {
               fullResponse = fullResponse.slice(0, leakPos).trimEnd();
               console.warn('[LLM] Detected leaked conversation turn, truncating response');
-              enableStabilityMode('turn_leak');
+              recordGuardrailReason('stream_turn_leak_abort', 'stream_guardrail');
               shouldAbort = true;
             }
           }
@@ -1976,7 +2254,7 @@ export const createMessageSlice = (set, get) => ({
               console.warn('[LLM] Detected repetition loop, aborting generation');
               const halfWindow = Math.floor(REPETITION_WINDOW / 2);
               fullResponse = fullResponse.slice(0, -halfWindow).trimEnd();
-              enableStabilityMode('repetition_loop');
+              recordGuardrailReason('stream_repetition_loop_abort', 'stream_guardrail');
               shouldAbort = true;
             }
           }
@@ -1984,27 +2262,16 @@ export const createMessageSlice = (set, get) => ({
           if (!shouldAbort && detectDegenerateLoop(fullResponse)) {
             console.warn('[LLM] Detected degenerate loop pattern, aborting generation');
             fullResponse = fullResponse.trimEnd();
-            enableStabilityMode('degenerate_loop');
+            recordGuardrailReason('stream_degenerate_loop_abort', 'stream_guardrail');
             shouldAbort = true;
           }
           
           if (shouldAbort) {
-            // Clean the response and abort the stream
             fullResponse = cleanupResponse(fullResponse);
-            if (isGreetingTurn) {
-              fullResponse = sanitizeSimpleGreetingResponse(fullResponse);
-            }
-            if (isShortCasualTurn) {
-              const sanitized = sanitizeShortCasualResponse(userContent, fullResponse);
-              if (sanitized !== fullResponse) {
-                enableStabilityMode('casual_short_prompt_artifact');
-                fullResponse = sanitized;
-              }
-            }
             try { cleanup?.(); } catch {}
-            // If cleanup stripped everything, provide a simple helpful fallback
             if (!fullResponse || fullResponse.length < 10) {
-              fullResponse = 'Hello! How can I help you today?';
+              recordGuardrailReason('stream_abort_empty_fallback', 'fallback');
+              fullResponse = "I couldn't generate a response. Please try again.";
             }
             _savePartialResponse(fullResponse, conversationId, currentModel);
             set({ 
@@ -2052,10 +2319,17 @@ export const createMessageSlice = (set, get) => ({
       const prev = stateNow.messages.length > 0 ? stateNow.messages[stateNow.messages.length - 1] : null;
       const pId = prev ? prev.id : null;
 
-      window.electronAPI?.dbRun(
-        'INSERT INTO messages (id, conversation_id, role, content, model, branch_id, parent_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [partialId, convId, 'assistant', content, model, bId, pId]
-      );
+      api.data.messagesAppend({
+        id: partialId,
+        conversationId: convId,
+        role: 'assistant',
+        content,
+        model,
+        branchId: bId,
+        parentMessageId: pId,
+      }).catch((error) => {
+        console.warn('Failed to save partial response:', error);
+      });
 
       const partialMessage = {
         id: partialId,
@@ -2066,7 +2340,11 @@ export const createMessageSlice = (set, get) => ({
         created_at: new Date().toISOString(),
         branch_id: bId,
         parent_message_id: pId,
-        meta: { partial: true },
+        meta: {
+          partial: true,
+          guardrailReasons: Array.from(guardrailReasonCodes),
+          guardrailReasonPrimary: Array.from(guardrailReasonCodes)[0] || null,
+        },
       };
 
       set(state => ({
@@ -2144,18 +2422,18 @@ export const createMessageSlice = (set, get) => ({
           title = question.substring(0, 50);
         }
 
-        await window.electronAPI?.dbRun(
-          'UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-          [title, convId]
-        );
+        await api.data.conversationsUpdateMeta({
+          id: convId,
+          title,
+        });
         get().loadConversations().then(convs => set({ conversations: convs }));
       } catch (e) {
         // Fallback: use first 50 chars
         console.warn('[AutoTitle] LLM title generation failed, using fallback:', e);
-        await window.electronAPI?.dbRun(
-          'UPDATE conversations SET title = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-          [question.substring(0, 50), convId]
-        );
+        await api.data.conversationsUpdateMeta({
+          id: convId,
+          title: question.substring(0, 50),
+        });
         get().loadConversations().then(convs => set({ conversations: convs }));
       }
     }

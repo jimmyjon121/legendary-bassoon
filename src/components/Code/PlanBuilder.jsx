@@ -121,7 +121,7 @@ export function PlanBuilder({ onExecutePlan, currentFile, initialPlan, onPlanCon
   const generationSeqRef = useRef(0);
   const generationTickerRef = useRef(null);
   
-  const { currentModel } = useAppStore();
+  const currentModel = useAppStore((s) => s.currentModel);
   const currentModelName = resolveModelName(currentModel);
   const { openFiles, activeFilePath } = useEditorStore();
 

@@ -12,6 +12,8 @@ import {
   Loader2
 } from 'lucide-react';
 import { useDebounce } from '../../hooks/useDebounce';
+import { api } from '../../utils/electronAPI';
+import { useAppStore } from '../../stores/appStore';
 
 export const ConversationSearch = ({ 
   conversations = [],
@@ -19,6 +21,7 @@ export const ConversationSearch = ({
   onFilter,
   className = ''
 }) => {
+  const currentWorkspace = useAppStore(s => s.currentWorkspace);
   const [query, setQuery] = useState('');
   const [isOpen, setIsOpen] = useState(false);
   const [showFilters, setShowFilters] = useState(false);
@@ -42,25 +45,25 @@ export const ConversationSearch = ({
     const doDeepSearch = async () => {
       setIsDeepSearching(true);
       try {
-        const results = await window.electronAPI?.dbQuery(
-          `SELECT m.id, m.conversation_id, m.role, m.content, m.created_at, 
-                  c.title as conversation_title
-           FROM messages m
-           JOIN conversations c ON m.conversation_id = c.id
-           WHERE m.content LIKE ? 
-           ORDER BY m.created_at DESC
-           LIMIT 20`,
-          [`%${debouncedQuery}%`]
-        );
+        const results = await api.data.searchMessages({
+          query: debouncedQuery,
+          limit: 20,
+        });
         
         if (!cancelled && results) {
-          // Group by conversation and extract snippets
+          // Strip NSFW conversations from results when not in Private workspace
+          const safeResults = currentWorkspace === 'nsfw'
+            ? results
+            : results.filter(r => r.workspace !== 'nsfw');
+
           const grouped = {};
-          for (const row of results) {
+          for (const row of safeResults) {
             if (!grouped[row.conversation_id]) {
               grouped[row.conversation_id] = {
                 conversationId: row.conversation_id,
-                conversationTitle: row.conversation_title || 'Untitled',
+                conversationTitle: currentWorkspace === 'nsfw'
+                  ? 'Vault note'
+                  : (row.conversation_title || 'Untitled'),
                 matches: [],
               };
             }
@@ -98,7 +101,7 @@ export const ConversationSearch = ({
     const matchesFilter = 
       activeFilter === 'all' ||
       (activeFilter === 'starred' && conv.starred) ||
-      (activeFilter === 'recent' && isRecent(conv.updatedAt));
+      (activeFilter === 'recent' && isRecent(conv.updatedAt || conv.updated_at));
     
     return matchesQuery && matchesFilter;
   });
@@ -302,17 +305,21 @@ export const ConversationSearch = ({
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2">
                               <span className="text-sm text-white/90 font-medium truncate">
-                                {highlightMatch(conv.title || 'Untitled', debouncedQuery)}
+                                {currentWorkspace === 'nsfw'
+                                  ? 'Vault note'
+                                  : highlightMatch(conv.title || 'Untitled', debouncedQuery)}
                               </span>
                               {conv.starred && (
                                 <Star className="w-3 h-3 text-amber-400" fill="currentColor" />
                               )}
                             </div>
                             <p className="text-xs text-white/40 truncate mt-0.5">
-                              {conv.preview || 'No messages yet'}
+                              {currentWorkspace === 'nsfw'
+                                ? 'Contents hidden in vault'
+                                : (conv.preview || 'No messages yet')}
                             </p>
                             <p className="text-[10px] text-white/30 mt-1">
-                              {formatDate(conv.updatedAt)}
+                              {formatDate(conv.updatedAt || conv.updated_at)}
                             </p>
                           </div>
                         </motion.button>
@@ -352,20 +359,28 @@ export const ConversationSearch = ({
                               <span className="text-sm text-white/90 font-medium truncate block">
                                 {group.conversationTitle}
                               </span>
-                              {group.matches.slice(0, 2).map((match, mi) => (
-                                <p key={match.id} className="text-xs text-white/40 mt-1 line-clamp-1">
-                                  <span className={`text-[10px] px-1 py-0.5 rounded mr-1 ${
-                                    match.role === 'user' ? 'bg-violet-500/20 text-violet-300' : 'bg-cyan-500/20 text-cyan-300'
-                                  }`}>
-                                    {match.role === 'user' ? 'You' : 'AI'}
-                                  </span>
-                                  {highlightMatch(match.snippet, debouncedQuery)}
+                              {currentWorkspace === 'nsfw' ? (
+                                <p className="text-xs text-white/40 mt-1 line-clamp-1">
+                                  {group.matches.length} matching message{group.matches.length !== 1 && 's'}
                                 </p>
-                              ))}
-                              {group.matches.length > 2 && (
-                                <p className="text-[10px] text-white/30 mt-1">
-                                  +{group.matches.length - 2} more matches
-                                </p>
+                              ) : (
+                                <>
+                                  {group.matches.slice(0, 2).map((match) => (
+                                    <p key={match.id} className="text-xs text-white/40 mt-1 line-clamp-1">
+                                      <span className={`text-[10px] px-1 py-0.5 rounded mr-1 ${
+                                        match.role === 'user' ? 'bg-violet-500/20 text-violet-300' : 'bg-cyan-500/20 text-cyan-300'
+                                      }`}>
+                                        {match.role === 'user' ? 'You' : 'AI'}
+                                      </span>
+                                      {highlightMatch(match.snippet, debouncedQuery)}
+                                    </p>
+                                  ))}
+                                  {group.matches.length > 2 && (
+                                    <p className="text-[10px] text-white/30 mt-1">
+                                      +{group.matches.length - 2} more matches
+                                    </p>
+                                  )}
+                                </>
                               )}
                             </div>
                           </motion.button>
@@ -453,9 +468,6 @@ function formatDate(date) {
 }
 
 export default ConversationSearch;
-
-
-
 
 
 

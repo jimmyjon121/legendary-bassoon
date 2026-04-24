@@ -128,6 +128,10 @@ function scoreCommandRisk(command = '') {
     return { level: 'high', blocked: true, mutating: true, reason: 'destructive_delete_command' };
   }
 
+  if (/(remove-item|format\s+[a-z]:|diskpart|shutdown\s|reg\s+delete|cipher\s+\/w)/.test(trimmed)) {
+    return { level: 'high', blocked: true, mutating: true, reason: 'destructive_system_command' };
+  }
+
   if (/git\s+(reset|clean|checkout\s+--)/.test(trimmed)) {
     return { level: 'high', blocked: true, mutating: true, reason: 'destructive_git_command' };
   }
@@ -478,6 +482,7 @@ async function runCommand(projectRoot, command, cwd, timeout = 30000) {
     return {
       success: false,
       error: `Command not allowed: "${rawCommand}". Only safe commands from the allowlist can be executed.`,
+      code: 'command_not_allowlisted',
       allowedPatterns: [
         'npm test/run/install',
         'yarn/pnpm commands',
@@ -499,6 +504,7 @@ async function runCommand(projectRoot, command, cwd, timeout = 30000) {
       return {
         success: false,
         error: 'No command provided',
+        code: 'empty_command',
       };
     }
 
@@ -558,6 +564,7 @@ async function runCommand(projectRoot, command, cwd, timeout = 30000) {
             stderr: stderr || `Command timed out after ${maxDuration}ms`,
             exitCode,
             error: 'Command timed out',
+            code: 'command_timeout',
           });
           return;
         }
@@ -567,7 +574,7 @@ async function runCommand(projectRoot, command, cwd, timeout = 30000) {
           stdout,
           stderr,
           exitCode,
-          ...(exitCode !== 0 ? { error: `Command exited with code ${exitCode}` } : {}),
+          ...(exitCode !== 0 ? { error: `Command exited with code ${exitCode}`, code: 'command_failed_exit_code' } : {}),
         });
       });
     });
@@ -577,7 +584,8 @@ async function runCommand(projectRoot, command, cwd, timeout = 30000) {
       stdout: '',
       stderr: error.message,
       exitCode: 1,
-      error: error.message
+      error: error.message,
+      code: 'command_runtime_error',
     };
   }
 }
@@ -814,6 +822,7 @@ function errorResult(error, code = 'tool_error', retryable = false, details = nu
     success: false,
     error: message,
     code,
+    reasonCode: code,
     retryable,
     details,
   };
@@ -885,11 +894,13 @@ function setupCodeToolsHandlers(ipcMain, _mainWindow, _store) {
       }
       return errorResult(
         result?.error || result?.stderr || 'Command failed',
-        'command_failed',
+        result?.code || 'command_failed',
         false,
         {
           ...payload,
           rollback,
+          autoRolledBack: Boolean(rollback?.success),
+          rollbackReasonCode: rollback?.success ? 'rollback_success' : (rollback ? 'rollback_failed' : 'rollback_not_attempted'),
         }
       );
     } catch (error) {
@@ -902,6 +913,8 @@ function setupCodeToolsHandlers(ipcMain, _mainWindow, _store) {
         checkpointId,
         audit,
         rollback,
+        autoRolledBack: Boolean(rollback?.success),
+        rollbackReasonCode: rollback?.success ? 'rollback_success' : (rollback ? 'rollback_failed' : 'rollback_not_attempted'),
       });
     }
   });
@@ -948,6 +961,8 @@ function setupCodeToolsHandlers(ipcMain, _mainWindow, _store) {
         checkpointId,
         audit,
         rollback,
+        autoRolledBack: Boolean(rollback?.success),
+        rollbackReasonCode: rollback?.success ? 'rollback_success' : (rollback ? 'rollback_failed' : 'rollback_not_attempted'),
       });
     }
   });

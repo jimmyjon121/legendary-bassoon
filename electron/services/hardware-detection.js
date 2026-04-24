@@ -163,28 +163,29 @@ function detectGpuType(gpu) {
 }
 
 /**
- * Detect Intel NPU (AI Boost)
+ * Detect Intel NPU (AI Boost).
+ * Uses three strategies: CPU brand heuristic, Windows WMI query, and
+ * OpenVINO device enumeration (the most reliable method).
  */
 async function detectNpu(cpuInfo) {
   const result = {
     detected: false,
     name: null,
     driver: null,
-    tops: null // Tera Operations Per Second
+    tops: null
   };
 
   // Intel Core Ultra CPUs have integrated NPU
   if (cpuInfo.brand?.toLowerCase().includes('ultra')) {
     result.detected = true;
     result.name = 'Intel AI Boost NPU';
-    
-    // Estimate TOPS based on CPU generation
+
     if (cpuInfo.brand.includes('285') || cpuInfo.brand.includes('288')) {
-      result.tops = 45; // Lunar Lake / Arrow Lake
+      result.tops = 45;
     } else if (cpuInfo.brand.includes('165') || cpuInfo.brand.includes('155')) {
-      result.tops = 34; // Meteor Lake
+      result.tops = 34;
     } else {
-      result.tops = 10; // Conservative estimate
+      result.tops = 10;
     }
   }
 
@@ -198,7 +199,29 @@ async function detectNpu(cpuInfo) {
         result.driver = wmiResult.npuDriver;
       }
     } catch (e) {
-      // WMI query failed, use CPU-based detection
+      // WMI query failed, continue to OpenVINO probe.
+    }
+  }
+
+  // If still not detected, ask the NpuBridge (uses OpenVINO Core API).
+  if (!result.detected) {
+    try {
+      const { getNpuBridge } = require('./npu-bridge');
+      const npuBridge = getNpuBridge();
+      const installation = await npuBridge.checkOpenVinoInstallation();
+      if (installation?.installed) {
+        const devices = await npuBridge.queryDevices({ force: true });
+        if (devices?.npuAvailable) {
+          result.detected = true;
+          result.name = result.name || 'Intel NPU (OpenVINO)';
+          const npuDevice = (devices.devices || []).find(
+            (d) => /^NPU/i.test(String(d.id || ''))
+          );
+          if (npuDevice?.name) result.name = npuDevice.name;
+        }
+      }
+    } catch (err) {
+      console.warn('[HardwareDetection] OpenVINO NPU probe failed:', err?.message);
     }
   }
 
@@ -329,15 +352,64 @@ let previousCpuTimes = null;
 let cachedOllamaStats = null;
 let lastOllamaStatsUpdate = 0;
 
+// Cache nvidia-smi stats
+let cachedNvidiaSmi = null;
+let lastNvidiaSmiUpdate = 0;
+
+/**
+ * Query nvidia-smi directly for real GPU utilization and VRAM.
+ * systeminformation's si.graphics() returns 0 for NVIDIA on Windows,
+ * so nvidia-smi is the only reliable source.
+ */
+async function getNvidiaSmiStats() {
+  const now = Date.now();
+  if (cachedNvidiaSmi && (now - lastNvidiaSmiUpdate) < 2000) {
+    return cachedNvidiaSmi;
+  }
+
+  return new Promise((resolve) => {
+    if (process.platform !== 'win32') {
+      resolve(null);
+      return;
+    }
+    exec(
+      'nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits',
+      { timeout: 3000 },
+      (error, stdout) => {
+        if (error || !stdout?.trim()) {
+          resolve(cachedNvidiaSmi || null);
+          return;
+        }
+        try {
+          const parts = stdout.trim().split(',').map(s => parseFloat(s.trim()));
+          if (parts.length >= 3 && parts.every(v => Number.isFinite(v))) {
+            cachedNvidiaSmi = {
+              utilizationGpu: Math.round(parts[0]),
+              vramUsed: Math.round(parts[1]),
+              vramTotal: Math.round(parts[2]),
+              temperature: parts.length >= 4 ? Math.round(parts[3]) : null,
+              vramPercent: parts[2] > 0 ? Math.round((parts[1] / parts[2]) * 100) : 0,
+            };
+            lastNvidiaSmiUpdate = now;
+          }
+          resolve(cachedNvidiaSmi);
+        } catch {
+          resolve(cachedNvidiaSmi || null);
+        }
+      }
+    );
+  });
+}
+
 /**
  * Query Ollama for running models and their GPU memory usage
  * This gives us accurate VRAM usage from models loaded by Ollama
  */
-async function getOllamaGpuStats(ollamaEndpoint = 'http://localhost:11434') {
+async function getOllamaGpuStats(ollamaEndpoint = 'http://127.0.0.1:11434') {
   const now = Date.now();
   
-  // Cache Ollama stats for 3 seconds (slower poll)
-  if (cachedOllamaStats && (now - lastOllamaStatsUpdate) < 3000) {
+  // Cache Ollama stats for 5 seconds (slower poll — endpoint can block when model is loading)
+  if (cachedOllamaStats && (now - lastOllamaStatsUpdate) < 5000) {
     return cachedOllamaStats;
   }
   
@@ -371,19 +443,16 @@ async function getOllamaGpuStats(ollamaEndpoint = 'http://localhost:11434') {
       return cachedOllamaStats;
     }
     
-    // Parse running models and their VRAM usage
     const models = result.models.map(m => ({
       name: m.name || m.model,
       size: m.size || 0,
-      sizeVram: m.size_vram || 0, // VRAM used by this model (bytes)
+      sizeVram: m.size_vram || 0,
       digest: m.digest,
       details: m.details,
-      // Calculate GPU layers
       gpuLayers: m.details?.parameter_size ? 
         Math.round((m.size_vram / m.size) * 100) : null
     }));
     
-    // Total VRAM across all loaded models
     const totalVram = models.reduce((sum, m) => sum + (m.sizeVram || 0), 0);
     
     cachedOllamaStats = {
@@ -397,7 +466,7 @@ async function getOllamaGpuStats(ollamaEndpoint = 'http://localhost:11434') {
     return cachedOllamaStats;
   } catch (error) {
     console.warn('Failed to get Ollama GPU stats:', error.message);
-    return { models: [], totalVram: 0 };
+    return cachedOllamaStats || { models: [], totalVram: 0 };
   }
 }
 
@@ -453,18 +522,46 @@ async function getHardwareStats() {
     
     previousCpuTimes = currentTimes;
     
-    // Try to get GPU info with a longer timeout (GPU calls can be slow on Windows)
+    // Get live GPU stats — prefer nvidia-smi (always accurate on NVIDIA/Windows)
+    // then fall back to systeminformation.
     let gpuData = [];
-    try {
-      // Use cached hardware info if available (has GPU names)
-      if (cachedHardware && cachedHardware.gpus) {
-        // Use cached GPU structure but try to fetch live stats
+    const nvidiaSmi = await getNvidiaSmiStats();
+
+    if (cachedHardware?.gpus?.length) {
+      const hasNvidia = cachedHardware.gpus.some(g => g.type === 'nvidia');
+
+      if (hasNvidia && nvidiaSmi) {
+        // nvidia-smi gave us authoritative data — use it for the NVIDIA GPU
+        gpuData = cachedHardware.gpus.map((gpu) => {
+          if (gpu.type === 'nvidia') {
+            return {
+              name: gpu.name,
+              utilizationGpu: nvidiaSmi.utilizationGpu,
+              utilizationMemory: nvidiaSmi.vramPercent,
+              temperature: nvidiaSmi.temperature,
+              vramUsed: nvidiaSmi.vramUsed,
+              vramTotal: nvidiaSmi.vramTotal,
+              vramPercent: nvidiaSmi.vramPercent,
+            };
+          }
+          return {
+            name: gpu.name,
+            utilizationGpu: 0,
+            utilizationMemory: 0,
+            temperature: null,
+            vramUsed: 0,
+            vramTotal: Math.round(gpu.vram || 0),
+            vramPercent: 0,
+          };
+        });
+      } else {
+        // No nvidia-smi — try systeminformation as fallback
         try {
           const graphics = await Promise.race([
-            si.graphics(),
+            si ? si.graphics() : Promise.reject(new Error('no si')),
             new Promise((_, reject) => setTimeout(() => reject(new Error('GPU timeout')), 2000))
           ]);
-          
+
           gpuData = graphics.controllers.map((gpu, i) => ({
             name: gpu.model || gpu.name || cachedHardware.gpus[i]?.name || 'GPU',
             utilizationGpu: Math.round(gpu.utilizationGpu || 0),
@@ -475,7 +572,6 @@ async function getHardwareStats() {
             vramPercent: gpu.vram ? Math.round((gpu.memoryUsed || 0) / gpu.vram * 100) : 0
           }));
         } catch {
-          // Live GPU stats failed, use cached info with zero utilization
           gpuData = cachedHardware.gpus.map(gpu => ({
             name: gpu.name,
             utilizationGpu: 0,
@@ -487,8 +583,6 @@ async function getHardwareStats() {
           }));
         }
       }
-    } catch {
-      // GPU stats unavailable - not critical
     }
     
     const processes = { all: 0, list: [] }; // Skip process enumeration - too slow
@@ -654,14 +748,26 @@ async function getHardwareStats() {
           available: Math.round(freeMem / (1024 * 1024 * 1024)),
           usagePercent: Math.round((usedMem / totalMem) * 100)
         },
-        gpus: cachedHardware?.gpus?.map(gpu => ({
-          name: gpu.name,
-          utilizationGpu: 0,
-          temperature: null,
-          vramUsed: 0,
-          vramTotal: Math.round(gpu.vram || 0),
-          vramPercent: 0
-        })) || [],
+        gpus: cachedHardware?.gpus?.map(gpu => {
+          if (gpu.type === 'nvidia' && cachedNvidiaSmi) {
+            return {
+              name: gpu.name,
+              utilizationGpu: cachedNvidiaSmi.utilizationGpu,
+              temperature: cachedNvidiaSmi.temperature,
+              vramUsed: cachedNvidiaSmi.vramUsed,
+              vramTotal: cachedNvidiaSmi.vramTotal,
+              vramPercent: cachedNvidiaSmi.vramPercent,
+            };
+          }
+          return {
+            name: gpu.name,
+            utilizationGpu: 0,
+            temperature: null,
+            vramUsed: 0,
+            vramTotal: Math.round(gpu.vram || 0),
+            vramPercent: 0,
+          };
+        }) || [],
         npu: cachedHardware?.npu?.detected ? {
           detected: true,
           active: false,
@@ -734,6 +840,8 @@ function clearCache() {
   cachedHardware = null;
   cachedStats = null;
   lastStatsUpdate = 0;
+  cachedNvidiaSmi = null;
+  lastNvidiaSmiUpdate = 0;
   // Also reset NPU tracking caches
   cachedNpuServerStatus = null;
   lastNpuServerStatusAt = 0;
@@ -788,11 +896,20 @@ async function checkVulkanAvailable() {
   });
 }
 
+// Non-blocking accessor for the most recent detection result. Returns null
+// when `detectHardware()` has not yet been called (callers must handle null
+// and avoid triggering detection from hot paths).
+function getCachedHardware() {
+  return cachedHardware;
+}
+
 module.exports = {
   detectHardware,
   getHardwareStats,
   getOllamaGpuStats,
+  getNvidiaSmiStats,
   getGpuInfo,
+  getCachedHardware,
   clearCache,
   checkCudaAvailable,
   checkVulkanAvailable

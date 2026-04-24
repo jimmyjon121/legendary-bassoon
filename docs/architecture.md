@@ -21,11 +21,13 @@ DevForge is a local-first AI workstation built with Electron, React, and SQLite.
 
 ### 3. IPC Handlers (`electron/ipc-handlers.js`)
 
-- **Database**: SQLite operations via `better-sqlite3`
+- **Database**: SQLite operations via `sql.js` (file-backed persistence)
+- **Typed Data Layer**: `electron/services/ipc/data-service.js` exposes conversation/message/attachment/branch IPC endpoints
+- **Scoped Filesystem Layer**: `electron/services/ipc/fs-access-service.js` enforces grant-root access boundaries
 - **LLM Communication**: HTTP requests to Ollama API
 - **Image Generation**: ComfyUI workflow submission and polling
 - **Encryption**: AES-256-GCM encryption for NSFW workspace
-- **File System**: Safe file/folder selection dialogs
+- **File System**: safe file/folder selection dialogs plus scoped read/write/list/mkdir IPC
 - **Health Checks**: Backend connectivity testing
 
 ### 4. React Frontend (`src/`)
@@ -39,20 +41,19 @@ DevForge is a local-first AI workstation built with Electron, React, and SQLite.
 
 ### LLM Chat Flow
 
-1. User types message → `ChatArea` component
-2. `appStore.sendMessage()` called
-3. Message encrypted if NSFW workspace
-4. Message saved to SQLite `messages` table
-5. IPC call to `llm:stream` handler
-6. HTTP request to Ollama `/api/generate`
-7. Stream chunks sent back via IPC channel
-8. UI updates with streaming content
-9. Final message saved to database
+1. User types a message in `ChatV2Surface` (`src/chat-v2/ui/ChatV2Surface.jsx`)
+2. `ChatV2Engine.sendUserMessage()` validates and starts generation
+3. Runtime adapter (`createElectronRuntimeAdapter`) builds inference options and payload
+4. IPC call to `llm:stream` handler
+5. HTTP request to Ollama `/api/chat` (or compatible backend stream endpoint)
+6. Stream chunks are processed by Chat V2 engine guardrails and watchdogs
+7. UI updates incrementally through engine subscriptions
+8. Final assistant turn is committed to SQLite-backed conversation history
 
 ### Encryption Flow (NSFW Workspace)
 
-1. User sets password → `nsfw:setPassword` IPC
-2. Password hashed with scrypt + random salt
+1. User sets password via `nsfw:setPassword` IPC
+2. Password hashed with scrypt plus random salt
 3. Hash stored in `nsfw_auth` table
 4. When sending message:
    - Content encrypted with password-derived key
@@ -75,8 +76,8 @@ DevForge is a local-first AI workstation built with Electron, React, and SQLite.
 ### `messages`
 - `id` (TEXT PRIMARY KEY)
 - `conversation_id` (TEXT, FK to conversations)
-- `role` (TEXT, 'user' or 'assistant')
-- `content` (TEXT, encrypted if conversation.encrypted = 1)
+- `role` (TEXT, `user` or `assistant`)
+- `content` (TEXT, encrypted if `conversation.encrypted = 1`)
 - `model` (TEXT)
 - `created_at` (DATETIME)
 
@@ -90,7 +91,7 @@ DevForge is a local-first AI workstation built with Electron, React, and SQLite.
 - `created_at` (DATETIME)
 
 ### `nsfw_auth`
-- `id` (TEXT PRIMARY KEY, always 'nsfw')
+- `id` (TEXT PRIMARY KEY, always `nsfw`)
 - `password_hash` (TEXT)
 - `salt` (TEXT)
 - `created_at`, `updated_at` (DATETIME)
@@ -105,7 +106,7 @@ DevForge is a local-first AI workstation built with Electron, React, and SQLite.
 
 ## IPC API Contract
 
-See `docs/ipc-api.md` for complete IPC channel documentation.
+See `docs/ipc-api.md` for complete IPC channel documentation, including v2 typed data and scoped filesystem APIs plus deprecation notes.
 
 ## Extension Points
 
@@ -113,4 +114,3 @@ See `docs/ipc-api.md` for complete IPC channel documentation.
 - **New Backends**: Add handlers in `electron/ipc-handlers.js`
 - **Custom Models**: Works with any Ollama-compatible backend
 - **Image Backends**: Extend `image:generate` handler for other APIs
-

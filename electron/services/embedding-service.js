@@ -103,51 +103,54 @@ async function embedTextsWithOpenVino(endpoint, texts, modelName = '') {
 }
 
 async function embedTextsWithRouting({
-  texts = [],
-  ollamaEndpoint = 'http://127.0.0.1:11434',
-  openvinoEndpoint = 'http://127.0.0.1:8081',
-  modelName = 'nomic-embed-text',
-  preferNpu = true,
-} = {}) {
-  const safeTexts = Array.isArray(texts)
-    ? texts.map((item) => String(item || '')).filter(Boolean)
-    : [];
+    texts = [],
+    ollamaEndpoint = 'http://127.0.0.1:11434',
+    openvinoEndpoint = 'http://127.0.0.1:8081',
+    modelName = 'nomic-embed-text',
+    preferNpu = true,
+  } = {}) {
+    const safeTexts = Array.isArray(texts)
+      ? texts.map((item) => String(item || '')).filter(Boolean)
+      : [];
 
-  if (safeTexts.length === 0) {
+    if (safeTexts.length === 0) {
+      return {
+        vectors: [],
+        route: null,
+        fallbackReason: 'no-texts',
+      };
+    }
+
+    // Try NPU first if preferred
+    if (preferNpu) {
+      const npuVectors = await embedTextsWithOpenVino(openvinoEndpoint, safeTexts, modelName);
+      if (npuVectors.length === safeTexts.length) {
+        return {
+          vectors: npuVectors,
+          route: 'openvino-npu',
+          fallbackReason: null,
+        };
+      }
+    }
+
+    // Fallback to Ollama (which is configured to use GPU via CUDA_VISIBLE_DEVICES=0)
+    // We explicitly pass the model name here
+    const ollamaVectors = await embedTextsWithOllama(ollamaEndpoint, safeTexts, modelName);
+    if (ollamaVectors.length === safeTexts.length) {
+      return {
+        vectors: ollamaVectors,
+        route: 'ollama-cuda', // We know Ollama is forced to GPU
+        fallbackReason: preferNpu ? 'openvino-unavailable-or-invalid' : null,
+      };
+    }
+
     return {
       vectors: [],
       route: null,
-      fallbackReason: 'no-texts',
+      fallbackReason: preferNpu
+        ? 'openvino-and-ollama-failed'
+        : 'ollama-failed',
     };
-  }
-
-  if (preferNpu) {
-    const npuVectors = await embedTextsWithOpenVino(openvinoEndpoint, safeTexts, modelName);
-    if (npuVectors.length === safeTexts.length) {
-      return {
-        vectors: npuVectors,
-        route: 'openvino-npu',
-        fallbackReason: null,
-      };
-    }
-  }
-
-  const ollamaVectors = await embedTextsWithOllama(ollamaEndpoint, safeTexts, modelName);
-  if (ollamaVectors.length === safeTexts.length) {
-    return {
-      vectors: ollamaVectors,
-      route: 'ollama',
-      fallbackReason: preferNpu ? 'openvino-unavailable-or-invalid' : null,
-    };
-  }
-
-  return {
-    vectors: [],
-    route: null,
-    fallbackReason: preferNpu
-      ? 'openvino-and-ollama-failed'
-      : 'ollama-failed',
-  };
 }
 
 // Cosine similarity between two embedding vectors

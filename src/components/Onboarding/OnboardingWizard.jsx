@@ -6,51 +6,139 @@ import { motion, AnimatePresence } from 'framer-motion';
 const RECOMMENDED_MODEL = 'llama3.2:3b'; // Small, fast, good quality
 
 export function OnboardingWizard({ onComplete }) {
-  const { initializeApp, setModel, refreshModels, setNsfwPassword } = useAppStore();
+  const initializeApp = useAppStore((s) => s.initializeApp);
+  const setModel = useAppStore((s) => s.setModel);
+  const setPreferredBackend = useAppStore((s) => s.setPreferredBackend);
+  const refreshModels = useAppStore((s) => s.refreshModels);
+  const refreshLlmRuntime = useAppStore((s) => s.refreshLlmRuntime);
   const [currentStep, setCurrentStep] = useState(0);
-  const [setupStatus, setSetupStatus] = useState('auto-setup'); // auto-setup, checking, ready, no-ollama, no-models, downloading, error
+  const [setupStatus, setSetupStatus] = useState('auto-setup'); // auto-setup, checking, ready, no-ollama, no-models, ollama-not-running, npu-available, downloading, error
   const [downloadProgress, setDownloadProgress] = useState('');
   const [error, setError] = useState('');
   const [isSettingUp, setIsSettingUp] = useState(true);
   const [systemHealth, setSystemHealth] = useState(null);
   const [setupLog, setSetupLog] = useState([]);
 
-  useEffect(() => {
-    // Listen for auto-setup completion from main process
-    if (window.electronAPI?.onAutoSetupComplete) {
-      window.electronAPI.onAutoSetupComplete((result) => {
-        console.log('Auto-setup completed:', result);
-        setSetupLog(result.log || []);
-        setSetupStatus('checking');
-        // After auto-setup, check the actual status
-        setTimeout(() => {
-          setIsSettingUp(false);
-          checkSetup();
-        }, 500);
-      });
-    } else {
-      // If in browser mode, skip auto-setup and go straight to checking
-      setSetupStatus('checking');
-      checkSetup();
-    }
+  const getConfiguredNpuModelId = React.useCallback((status) => {
+    const modelId = String(status?.model || status?.modelPath || '').trim();
+    return modelId || null;
   }, []);
 
-  const checkSetup = async () => {
+  const loadSystemHealth = React.useCallback(async () => {
+    const summary = {
+      ollama: await window.electronAPI?.getOllamaStatus?.(),
+      npu: (await window.electronAPI?.getNpuStatus?.({ force: false })) || null,
+      image: (await window.electronAPI?.getImageBackendStatus?.()) || null,
+    };
+    setSystemHealth(summary);
+    return summary;
+  }, []);
+
+  const activateNpuRuntime = React.useCallback(async (options = {}) => {
+    setIsSettingUp(true);
+    setError('');
+    setSetupStatus('npu-available');
+
+    try {
+      let npuStatus = await window.electronAPI?.getNpuStatus?.({ force: true });
+      let modelId = getConfiguredNpuModelId(npuStatus);
+
+      if (!modelId && options.autoConfigure !== false) {
+        const configResult = await window.electronAPI?.autoConfigureNpuModel?.({
+          enableAutoStart: true,
+          workload: 'chat',
+          profile: 'balanced',
+          forceStatusRefresh: true,
+        });
+        modelId = String(configResult?.model || '').trim() || modelId;
+        npuStatus = await window.electronAPI?.getNpuStatus?.({ force: true }) || npuStatus;
+        modelId = modelId || getConfiguredNpuModelId(npuStatus);
+      }
+
+      if (!modelId) {
+        throw new Error('No OpenVINO model is configured for the NPU yet.');
+      }
+
+      if (!npuStatus?.serverRunning) {
+        const startResult = await window.electronAPI?.startNpuServer?.({ device: 'NPU' });
+        if (!startResult?.success) {
+          throw new Error(startResult?.error || 'Failed to start the OpenVINO server');
+        }
+      }
+
+      await setPreferredBackend?.('openvino-npu');
+      const selection = `npu:${modelId}`;
+      const setResult = await setModel(selection);
+      if (setResult?.success === false) {
+        throw new Error(setResult?.error || 'Failed to select the NPU model');
+      }
+
+      await loadSystemHealth();
+      setSetupStatus('ready');
+    } catch (err) {
+      console.error('NPU activation failed:', err);
+      setError(err?.message || 'Failed to enable the NPU runtime');
+      setSetupStatus('npu-available');
+    } finally {
+      setIsSettingUp(false);
+    }
+  }, [getConfiguredNpuModelId, loadSystemHealth, setModel, setPreferredBackend]);
+
+  const checkSetup = React.useCallback(async () => {
     console.log('Checking setup...');
     setIsSettingUp(true);
     setError('');
     
     try {
-      // Check if Ollama is running
       console.log('Checking Ollama health...');
-      const health = await window.electronAPI?.checkLLMHealth();
+      const runtime = await refreshLlmRuntime?.({
+        refreshModels: true,
+        hydrateSelection: false,
+        persistResolvedSelection: false,
+        updateError: false,
+        skipStatus: true,
+      });
+      const summary = await loadSystemHealth();
+      const npuStatus = summary?.npu || null;
+      const configuredNpuModelId = getConfiguredNpuModelId(npuStatus);
+      const npuAvailable = Boolean(npuStatus?.openvinoInstalled && npuStatus?.npuAvailable);
+      const npuConfigured = Boolean(npuAvailable && configuredNpuModelId);
+      const health = runtime?.llmHealth || useAppStore.getState().llmHealth;
       console.log('Health result:', health);
+
+      if (npuConfigured && npuStatus?.serverRunning) {
+        try {
+          await setPreferredBackend?.('openvino-npu');
+          const selection = `npu:${configuredNpuModelId}`;
+          const setResult = await setModel(selection);
+          if (setResult?.success === false) {
+            throw new Error(setResult?.error || 'Failed to select the NPU model');
+          }
+          console.log('NPU runtime already ready, using it for onboarding');
+          setSetupStatus('ready');
+          setIsSettingUp(false);
+          return;
+        } catch (npuError) {
+          console.warn('Failed to auto-select configured NPU model:', npuError);
+          setError(npuError?.message || 'Failed to activate the configured NPU model');
+          setSetupStatus('npu-available');
+          setIsSettingUp(false);
+          return;
+        }
+      }
       
       if (!health?.healthy) {
         console.log('Ollama not healthy');
+
+        if (npuAvailable) {
+          console.log('NPU acceleration is available, offering NPU onboarding path');
+          setSetupStatus('npu-available');
+          setIsSettingUp(false);
+          return;
+        }
         
         // Check if Ollama is installed but just not running
-        const ollamaStatus = await window.electronAPI?.getOllamaStatus?.();
+        const ollamaStatus = runtime?.ollamaStatus || summary?.ollama || await window.electronAPI?.getOllamaStatus?.();
         console.log('Ollama status:', ollamaStatus);
         
         if (ollamaStatus?.installed && !ollamaStatus?.running) {
@@ -68,22 +156,23 @@ export function OnboardingWizard({ onComplete }) {
       
       // Check if we have models
       console.log('Getting models...');
-      const models = await window.electronAPI?.getModels();
+      const models = Array.isArray(runtime?.availableModels)
+        ? runtime.availableModels
+        : (useAppStore.getState().availableModels || []);
       console.log('Models:', models);
       
       if (!models || models.length === 0) {
+        if (npuAvailable) {
+          console.log('No Ollama models found, but NPU acceleration is available');
+          setSetupStatus('npu-available');
+          setIsSettingUp(false);
+          return;
+        }
         console.log('No models found, setting no-models');
         setSetupStatus('no-models');
         setIsSettingUp(false);
         return;
       }
-
-      const summary = {
-        ollama: await window.electronAPI?.getOllamaStatus?.(),
-        npu: (await window.electronAPI?.getNpuStatus?.()) || null,
-        image: (await window.electronAPI?.getImageBackendStatus?.()) || null,
-      };
-      setSystemHealth(summary);
       
       // All good!
       console.log('All good! Setting ready');
@@ -91,7 +180,10 @@ export function OnboardingWizard({ onComplete }) {
       setIsSettingUp(false);
       
       // Auto-select first model
-      await setModel(models[0].name);
+      const startupModel = runtime?.model || models[0]?.name || null;
+      if (startupModel) {
+        await setModel(startupModel);
+      }
       
     } catch (err) {
       console.error('Setup check error:', err);
@@ -99,7 +191,52 @@ export function OnboardingWizard({ onComplete }) {
       setError(err.message);
       setIsSettingUp(false);
     }
-  };
+  }, [getConfiguredNpuModelId, loadSystemHealth, refreshLlmRuntime, setModel, setPreferredBackend]);
+
+  useEffect(() => {
+    let unsubscribe = null;
+    let safetyTimer = null;
+    let completed = false;
+
+    const markCompletedAndCheck = (source = 'ipc') => {
+      if (completed) return;
+      completed = true;
+      if (safetyTimer) clearTimeout(safetyTimer);
+      if (source === 'timeout') {
+        console.warn('[Onboarding] auto-setup-complete did not arrive within 90s; proceeding with local health check');
+        setSetupLog((prev) => (Array.isArray(prev) ? prev : []).concat([
+          `[${new Date().toISOString()}] [WARN] Startup signal timed out after 90s; continuing with local checks`,
+        ]));
+      }
+      setSetupStatus('checking');
+      setTimeout(() => {
+        setIsSettingUp(false);
+        checkSetup();
+      }, 300);
+    };
+
+    if (window.electronAPI?.onAutoSetupComplete) {
+      unsubscribe = window.electronAPI.onAutoSetupComplete((result) => {
+        console.log('Auto-setup completed:', result);
+        setSetupLog(result?.log || []);
+        markCompletedAndCheck('ipc');
+      });
+      // Safety net: if the main process never emits auto-setup-complete
+      // (crash, timeout, dead renderer link), fall back to our own probes
+      // so the wizard never sits on the setup screen forever.
+      safetyTimer = setTimeout(() => markCompletedAndCheck('timeout'), 90000);
+    } else {
+      setSetupStatus('checking');
+      checkSetup();
+    }
+
+    return () => {
+      if (typeof unsubscribe === 'function') {
+        unsubscribe();
+      }
+      if (safetyTimer) clearTimeout(safetyTimer);
+    };
+  }, [checkSetup]);
 
   const handleOneClickSetup = async () => {
     setIsSettingUp(true);
@@ -215,7 +352,9 @@ export function OnboardingWizard({ onComplete }) {
       {
         label: 'NPU Server',
         ok: systemHealth.npu?.serverRunning,
-        detail: systemHealth.npu?.npuAvailable ? 'NPU detected' : 'NPU not detected',
+        detail: getConfiguredNpuModelId(systemHealth.npu)
+          ? `Configured: ${getConfiguredNpuModelId(systemHealth.npu).split('/').pop()}`
+          : (systemHealth.npu?.npuAvailable ? 'NPU detected' : 'NPU not detected'),
       },
       {
         label: 'Image Backend',
@@ -246,11 +385,11 @@ export function OnboardingWizard({ onComplete }) {
       <motion.div
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
-        className="w-full max-w-xl bg-forge-surface border border-forge-border rounded-xl shadow-2xl overflow-hidden"
+        className="w-full max-w-xl bg-forge-surface border border-forge-border rounded-xl shadow-[0_24px_70px_-42px_rgba(0,0,0,0.92)] overflow-hidden"
       >
         {/* Header */}
         <div className="px-8 py-6 border-b border-forge-border text-center">
-          <div className="w-16 h-16 rounded-2xl bg-workspace-casual/20 border border-workspace-casual/30 flex items-center justify-center mx-auto mb-4">
+          <div className="w-14 h-14 rounded-xl bg-workspace-casual/20 border border-workspace-casual/30 flex items-center justify-center mx-auto mb-4">
             <Sparkles size={32} className="text-workspace-casual" />
           </div>
           <h1 className="text-2xl font-bold text-text-primary">Welcome to DevForge</h1>
@@ -335,7 +474,7 @@ export function OnboardingWizard({ onComplete }) {
                     }
                   }}
                   disabled={isSettingUp}
-                  className="btn btn-primary w-full text-lg py-3 mb-4"
+                  className="btn btn-primary w-full text-base py-2.5 mb-4"
                 >
                   {isSettingUp ? (
                     <>
@@ -380,7 +519,7 @@ export function OnboardingWizard({ onComplete }) {
                 <div className="space-y-4">
                   <button
                     onClick={openOllamaDownload}
-                    className="btn btn-primary w-full text-lg py-3"
+                    className="btn btn-primary w-full text-base py-2.5"
                   >
                     <ExternalLink size={20} />
                     Download Ollama (Free)
@@ -419,6 +558,70 @@ export function OnboardingWizard({ onComplete }) {
               </motion.div>
             )}
 
+            {setupStatus === 'npu-available' && (
+              <motion.div
+                key="npu-available"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                className="text-center"
+              >
+                <div className="w-20 h-20 rounded-full bg-workspace-casual/20 flex items-center justify-center mx-auto mb-6">
+                  <Sparkles size={40} className="text-workspace-casual" />
+                </div>
+
+                <h2 className="text-xl font-semibold text-text-primary mb-2">
+                  NPU Acceleration Is Available
+                </h2>
+                <p className="text-text-secondary mb-6">
+                  DevForge can start with your local OpenVINO/NPU runtime even if Ollama is not ready.
+                </p>
+
+                <div className="p-4 mb-4 bg-forge-bg rounded-lg text-left text-sm text-text-muted">
+                  <p className="font-medium text-text-secondary mb-2">What this will do:</p>
+                  <ul className="space-y-1">
+                    <li>Start the OpenVINO inference server</li>
+                    <li>{getConfiguredNpuModelId(systemHealth?.npu) ? 'Use your configured NPU model' : 'Auto-select an NPU-friendly model'}</li>
+                    <li>Make the NPU runtime the active backend</li>
+                  </ul>
+                </div>
+
+                {error && (
+                  <div className="p-4 mb-4 bg-status-error/20 border border-status-error/30 rounded-lg text-status-error text-sm">
+                    {error}
+                  </div>
+                )}
+
+                <button
+                  onClick={() => activateNpuRuntime({ autoConfigure: true })}
+                  disabled={isSettingUp}
+                  className="btn btn-primary w-full text-base py-2.5 disabled:opacity-50"
+                >
+                  {isSettingUp ? (
+                    <>
+                      <Loader size={20} className="animate-spin" />
+                      Starting NPU Runtime...
+                    </>
+                  ) : (
+                    <>
+                      <Sparkles size={20} />
+                      Use NPU Acceleration
+                    </>
+                  )}
+                </button>
+
+                <button
+                  onClick={checkSetup}
+                  disabled={isSettingUp}
+                  className="btn btn-secondary w-full mt-3"
+                  type="button"
+                >
+                  <RefreshCw size={16} />
+                  Check Again
+                </button>
+              </motion.div>
+            )}
+
             {setupStatus === 'no-models' && (
               <motion.div
                 key="no-models"
@@ -447,7 +650,7 @@ export function OnboardingWizard({ onComplete }) {
                 <button
                   onClick={handleOneClickSetup}
                   disabled={isSettingUp}
-                  className="btn btn-primary w-full text-lg py-3 disabled:opacity-50"
+                  className="btn btn-primary w-full text-base py-2.5 disabled:opacity-50"
                 >
                   {isSettingUp ? (
                     <>
@@ -519,7 +722,13 @@ export function OnboardingWizard({ onComplete }) {
                 <div className="space-y-3 text-left p-4 bg-forge-bg rounded-lg mb-6">
                   <div className="flex items-center gap-3 text-sm">
                     <Check size={16} className="text-status-success flex-shrink-0" />
-                    <span className="text-text-secondary">Ollama connected</span>
+                    <span className="text-text-secondary">
+                      {systemHealth?.npu?.serverRunning
+                        ? 'OpenVINO runtime connected'
+                        : systemHealth?.ollama?.running
+                          ? 'Ollama connected'
+                          : 'Local runtime connected'}
+                    </span>
                   </div>
                   <div className="flex items-center gap-3 text-sm">
                     <Check size={16} className="text-status-success flex-shrink-0" />
@@ -533,7 +742,7 @@ export function OnboardingWizard({ onComplete }) {
 
                 <button
                   onClick={handleComplete}
-                  className="btn btn-primary w-full text-lg py-3"
+                  className="btn btn-primary w-full text-base py-2.5"
                 >
                   Start Using DevForge
                   <ArrowRight size={20} />
@@ -545,7 +754,7 @@ export function OnboardingWizard({ onComplete }) {
         </div>
 
         {/* Footer */}
-        {(setupStatus === 'no-ollama' || setupStatus === 'no-models') && (
+        {(setupStatus === 'no-ollama' || setupStatus === 'no-models' || setupStatus === 'npu-available') && (
           <div className="px-8 py-4 border-t border-forge-border">
             <button
               onClick={handleSkipSetup}

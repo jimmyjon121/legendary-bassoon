@@ -1,8 +1,12 @@
 {
-  "model_path": "Qwen/Qwen2-0.5B-Instruct",
-  "tokenizer": "Qwen/Qwen2-0.5B-Instruct",
-  "device": "AUTO",
-  "precision": "fp16",
+  "model_path": "OpenVINO/Qwen2.5-1.5B-Instruct-int4-ov",
+  "tokenizer": "OpenVINO/Qwen2.5-1.5B-Instruct-int4-ov",
+  "device": "NPU",
+  "precision": "int4",
   "auto_start": true,
-  "notes": "AUTO will use Intel Arc GPU or NPU automatically based on compatibility"
+  "selected_by": "phase-1-default",
+  "selected_at": "2026-04-24T00:00:00.000Z",
+  "workload": "general",
+  "profile": "balanced",
+  "note": "General-purpose default for Intel NPU 3 (13 TOPS). Small enough to run at interactive speed for embeddings, classifiers, autocomplete, and short chat turns. Vault-workspace overrides live in vault-profile.json; chat engine merges them on top when the user is in the nsfw workspace."
 }

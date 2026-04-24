@@ -10,7 +10,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { safeCall } from '../../utils/electronAPI';
 
 export function ImageGenModal() {
-  const { toggleImageGen, currentWorkspace } = useAppStore();
+  const toggleImageGen = useAppStore((s) => s.toggleImageGen);
+  const currentWorkspace = useAppStore((s) => s.currentWorkspace);
   
   // Status
   const [status, setStatus] = useState(null);
@@ -230,7 +231,7 @@ export function ImageGenModal() {
 
   const renderSetupScreen = () => (
     <div className="flex flex-col items-center justify-center py-10 px-6 overflow-y-auto">
-      <div className="w-20 h-20 bg-gradient-to-br from-pink-500/20 to-purple-500/20 rounded-2xl flex items-center justify-center mb-6">
+      <div className="w-[72px] h-[72px] bg-gradient-to-br from-pink-500/20 to-purple-500/20 rounded-xl flex items-center justify-center mb-5">
         <Image size={40} className="text-pink-400" />
       </div>
       
@@ -319,7 +320,7 @@ export function ImageGenModal() {
       <button
         onClick={handleAutoSetup}
         disabled={isSettingUp}
-        className="flex items-center justify-center gap-2 bg-gradient-to-r from-pink-500 to-purple-500 text-white px-8 py-3 text-lg rounded-xl hover:opacity-90 disabled:opacity-50 transition-opacity font-medium"
+        className="flex items-center justify-center gap-2 bg-gradient-to-r from-pink-500 to-purple-500 text-white px-6 py-2.5 rounded-lg hover:opacity-95 disabled:opacity-50 transition-opacity font-medium"
       >
         {isSettingUp ? (
           <>
@@ -342,7 +343,7 @@ export function ImageGenModal() {
 
   const renderNeedsModel = () => (
     <div className="flex flex-col items-center py-8 px-6 overflow-y-auto">
-      <div className="w-16 h-16 bg-purple-500/20 rounded-2xl flex items-center justify-center mb-4">
+      <div className="w-14 h-14 bg-purple-500/20 rounded-xl flex items-center justify-center mb-4">
         <HardDrive size={32} className="text-purple-400" />
       </div>
       
@@ -450,7 +451,7 @@ export function ImageGenModal() {
 
   const renderNotRunning = () => (
     <div className="flex flex-col items-center justify-center py-12 px-6">
-      <div className="w-16 h-16 bg-amber-500/20 rounded-2xl flex items-center justify-center mb-4">
+      <div className="w-14 h-14 bg-amber-500/20 rounded-xl flex items-center justify-center mb-4">
         <AlertTriangle size={32} className="text-amber-400" />
       </div>
       
@@ -470,7 +471,7 @@ export function ImageGenModal() {
       <button
         onClick={handleStartBackend}
         disabled={isLoading}
-        className="flex items-center gap-2 bg-gradient-to-r from-pink-500 to-purple-500 text-white px-6 py-3 rounded-xl transition-opacity hover:opacity-90 disabled:opacity-50"
+        className="flex items-center gap-2 bg-gradient-to-r from-pink-500 to-purple-500 text-white px-5 py-2.5 rounded-lg transition-opacity hover:opacity-95 disabled:opacity-50"
       >
         {isLoading ? (
           <>
@@ -607,7 +608,7 @@ export function ImageGenModal() {
         <button
           onClick={handleGenerate}
           disabled={!prompt.trim() || isGenerating}
-          className="w-full mt-4 flex items-center justify-center gap-2 bg-gradient-to-r from-pink-500 to-purple-500 text-white py-3 rounded-xl disabled:opacity-50 hover:opacity-90 transition-opacity font-medium"
+          className="w-full mt-4 flex items-center justify-center gap-2 bg-gradient-to-r from-pink-500 to-purple-500 text-white py-2.5 rounded-lg disabled:opacity-50 hover:opacity-95 transition-opacity font-medium"
         >
           {isGenerating ? (
             <>
@@ -757,7 +758,7 @@ export function ImageGenModal() {
           initial={{ scale: 0.95, opacity: 0 }}
           animate={{ scale: 1, opacity: 1 }}
           exit={{ scale: 0.95, opacity: 0 }}
-          className="w-full max-w-2xl h-[80vh] bg-neutral-950 rounded-2xl shadow-2xl border border-neutral-800 overflow-hidden flex flex-col"
+          className="w-full max-w-2xl h-[80vh] bg-neutral-950 rounded-xl shadow-[0_24px_80px_-48px_rgba(0,0,0,0.95)] border border-neutral-800 overflow-hidden flex flex-col"
           onClick={(e) => e.stopPropagation()}
         >
           {/* Header */}

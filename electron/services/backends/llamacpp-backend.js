@@ -6,7 +6,7 @@
 const BaseBackend = require('./base-backend');
 const http = require('http');
 const https = require('https');
-const { spawn } = require('child_process');
+const { spawn, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 
@@ -33,6 +33,7 @@ class LlamaCppBackend extends BaseBackend {
     this.modelPath = config.modelPath || null;
     this.activeRequests = new Map();
     this.useVulkan = config.useVulkan !== false;
+    this.startupDiagnostics = null;
   }
 
   /**
@@ -282,6 +283,100 @@ class LlamaCppBackend extends BaseBackend {
     };
   }
 
+  _probeBinaryCapabilities() {
+    const versionRes = spawnSync(this.serverPath, ['--version'], {
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+    const helpRes = spawnSync(this.serverPath, ['--help'], {
+      encoding: 'utf8',
+      windowsHide: true,
+    });
+
+    const versionText = `${versionRes.stdout || ''}\n${versionRes.stderr || ''}`.trim();
+    const helpText = `${helpRes.stdout || ''}\n${helpRes.stderr || ''}`.trim();
+    const binaryVersion = versionText.split(/\r?\n/).find((line) => line.trim()) || 'unknown';
+
+    return {
+      binaryVersion,
+      rawVersion: versionText,
+      helpText,
+      supportsGpuLayersLong: /--gpu-layers/.test(helpText),
+      supportsGpuLayersShort: /(^|\s)-ngl(\s|,|$)/m.test(helpText),
+      supportsContextLong: /--ctx-size/.test(helpText),
+      supportsContextShort: /(^|\s)-c(\s|,|$)/m.test(helpText),
+      supportsHost: /--host/.test(helpText),
+      supportsPort: /--port/.test(helpText),
+    };
+  }
+
+  _resolveFlagProfile(probe = {}) {
+    const profile = {
+      id: 'legacy-default',
+      gpuFlag: null,
+      contextFlag: null,
+      hostFlag: null,
+      portFlag: null,
+    };
+
+    if (probe.supportsGpuLayersLong) {
+      profile.gpuFlag = '--gpu-layers';
+      profile.id = 'gpu-layers-long';
+    } else if (probe.supportsGpuLayersShort) {
+      profile.gpuFlag = '-ngl';
+      profile.id = 'gpu-layers-short';
+    }
+
+    if (probe.supportsContextLong) {
+      profile.contextFlag = '--ctx-size';
+    } else if (probe.supportsContextShort) {
+      profile.contextFlag = '-c';
+    }
+
+    if (probe.supportsHost) {
+      profile.hostFlag = '--host';
+    }
+    if (probe.supportsPort) {
+      profile.portFlag = '--port';
+    }
+
+    return profile;
+  }
+
+  _buildServerArgs(modelPath, options, profile) {
+    const endpoint = new URL(this.endpoint);
+    const args = ['-m', modelPath];
+
+    if (profile.hostFlag) {
+      args.push(profile.hostFlag, '127.0.0.1');
+    }
+    if (profile.portFlag) {
+      args.push(profile.portFlag, endpoint.port || '8080');
+    }
+    if (profile.contextFlag) {
+      args.push(profile.contextFlag, String(options.contextSize || '4096'));
+    }
+
+    const desiredGpuLayers = String(options.gpuLayers || '99');
+    if (this.useVulkan && profile.gpuFlag) {
+      args.push(profile.gpuFlag, desiredGpuLayers);
+    }
+
+    return args;
+  }
+
+  _buildStartupDiagnostics(base = {}) {
+    return {
+      binaryVersion: base.binaryVersion || 'unknown',
+      flagProfile: base.flagProfile || 'unknown',
+      stderrTail: Array.isArray(base.stderrTail) ? base.stderrTail.slice(-20) : [],
+      healthTimeoutReason: base.healthTimeoutReason || null,
+      args: Array.isArray(base.args) ? base.args : [],
+      endpoint: this.endpoint,
+      timestamp: new Date().toISOString(),
+    };
+  }
+
   /**
    * Start the llama.cpp server
    */
@@ -294,59 +389,139 @@ class LlamaCppBackend extends BaseBackend {
       throw new Error(`Model file not found: ${modelPath}`);
     }
 
-    const args = [
-      '-m', modelPath,
-      '--host', '127.0.0.1',
-      '--port', new URL(this.endpoint).port || '8080',
-      '-c', options.contextSize || '4096',
-      '-ngl', options.gpuLayers || '99', // Offload all layers to GPU
-    ];
+    const probe = this._probeBinaryCapabilities();
+    const profile = this._resolveFlagProfile(probe);
 
-    // Add Vulkan support
-    if (this.useVulkan) {
-      args.push('--gpu-layers', '99');
+    if (this.useVulkan && !profile.gpuFlag) {
+      const diagnostics = this._buildStartupDiagnostics({
+        binaryVersion: probe.binaryVersion,
+        flagProfile: profile.id,
+        stderrTail: [],
+        healthTimeoutReason: 'gpu_flag_unsupported',
+      });
+      this.startupDiagnostics = diagnostics;
+      const error = new Error('llama.cpp binary does not support GPU layer flags for Vulkan offload');
+      error.diagnostics = diagnostics;
+      throw error;
     }
 
+    const args = this._buildServerArgs(modelPath, options, profile);
+
     return new Promise((resolve, reject) => {
+      const stderrTail = [];
+      let settled = false;
       this.serverProcess = spawn(this.serverPath, args, {
         stdio: ['ignore', 'pipe', 'pipe']
       });
 
       let started = false;
+      const listeningRegex = /(listening|server started|running on|HTTP server listening)/i;
+      const startupTimeoutMs = Number(options.startupTimeoutMs) || 60000;
+      const healthPollIntervalMs = 1500;
 
-      this.serverProcess.stdout.on('data', (data) => {
+      const finalizeSuccess = () => {
+        if (settled) return;
+        settled = true;
+        started = true;
+        clearTimeout(timeoutTimer);
+        clearInterval(healthPoller);
+        const diagnostics = this._buildStartupDiagnostics({
+          binaryVersion: probe.binaryVersion,
+          flagProfile: profile.id,
+          stderrTail,
+          args,
+        });
+        this.startupDiagnostics = diagnostics;
+        resolve({
+          success: true,
+          pid: this.serverProcess?.pid || null,
+          binaryVersion: diagnostics.binaryVersion,
+          flagProfile: diagnostics.flagProfile,
+          stderrTail: diagnostics.stderrTail,
+        });
+      };
+
+      const finalizeFailure = (message, extra = {}) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutTimer);
+        clearInterval(healthPoller);
+        const diagnostics = this._buildStartupDiagnostics({
+          binaryVersion: probe.binaryVersion,
+          flagProfile: profile.id,
+          stderrTail,
+          args,
+          ...extra,
+        });
+        this.startupDiagnostics = diagnostics;
+        const error = new Error(message);
+        error.diagnostics = diagnostics;
+        reject(error);
+      };
+
+      const onStdout = (data) => {
         const output = data.toString();
         console.log('[llama.cpp]', output);
         
-        if (output.includes('listening') && !started) {
-          started = true;
-          resolve({ success: true, pid: this.serverProcess.pid });
+        if (!started && listeningRegex.test(output)) {
+          finalizeSuccess();
         }
-      });
+      };
 
-      this.serverProcess.stderr.on('data', (data) => {
-        console.error('[llama.cpp error]', data.toString());
-      });
+      const onStderr = (data) => {
+        const text = data.toString();
+        console.error('[llama.cpp error]', text);
+        for (const line of text.split(/\r?\n/)) {
+          if (!line.trim()) continue;
+          stderrTail.push(line.trim());
+          if (stderrTail.length > 40) {
+            stderrTail.shift();
+          }
+        }
+      };
+
+      this.serverProcess.stdout.on('data', onStdout);
+      this.serverProcess.stderr.on('data', onStderr);
 
       this.serverProcess.on('error', (error) => {
-        reject(error);
+        this.serverProcess = null;
+        finalizeFailure(`Failed to spawn llama.cpp server: ${error.message}`);
       });
 
       this.serverProcess.on('exit', (code) => {
         this.serverProcess = null;
-        if (!started) {
-          reject(new Error(`Server exited with code ${code}`));
+        if (!started && !settled) {
+          finalizeFailure(`Server exited with code ${code}`, {
+            healthTimeoutReason: 'exited_before_ready',
+          });
         }
       });
 
-      // Timeout after 60 seconds
-      setTimeout(() => {
-        if (!started) {
-          this.stopServer();
-          reject(new Error('Server start timeout'));
+      const healthPoller = setInterval(async () => {
+        if (settled || started) return;
+        try {
+          const health = await this.checkHealth();
+          if (health?.available) {
+            finalizeSuccess();
+          }
+        } catch {
+          // Ignore transient health errors during startup.
         }
-      }, 60000);
+      }, healthPollIntervalMs);
+
+      const timeoutTimer = setTimeout(() => {
+        if (settled || started) return;
+        this.stopServer().finally(() => {
+          finalizeFailure('Server start timeout', {
+            healthTimeoutReason: 'startup_timeout',
+          });
+        });
+      }, startupTimeoutMs);
     });
+  }
+
+  getStartupDiagnostics() {
+    return this.startupDiagnostics;
   }
 
   /**

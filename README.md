@@ -3,7 +3,7 @@
 <div align="center">
 
 ![DevForge](https://img.shields.io/badge/DevForge-Local%20AI%20Workstation-8b5cf6?style=for-the-badge&logo=electron&logoColor=white)
-![Electron](https://img.shields.io/badge/Electron-31.x-47848F?style=flat-square&logo=electron&logoColor=white)
+![Electron](https://img.shields.io/badge/Electron-28.x-47848F?style=flat-square&logo=electron&logoColor=white)
 ![React](https://img.shields.io/badge/React-18.x-61DAFB?style=flat-square&logo=react&logoColor=black)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
 ![Status](https://img.shields.io/badge/Status-Active%20Development-orange?style=flat-square)
@@ -39,7 +39,7 @@ It is designed to be the "Forever Brain" that you own, independent of any compan
   - `research/`: Autonomous web research agents (browser automation, content extraction).
   - `intent-compiler/`: Natural language to system action translation.
 - **Frontend:** `src/`
-  - `components/Chat/`: Main chat interface with streaming markdown.
+  - `chat-v2/ui/`: Main chat interface and session surface.
   - `stores/`: Zustand state management for workspace, messages, and settings.
 - **Evaluation:** `scripts/`
   - `casual-eval.js`: Quick sanity check for chat capabilities.
@@ -90,13 +90,8 @@ Turn your desktop into an always-on AI server. Access your personal "brain" from
 | **Code** | Development assistance, debugging, code review |
 | **Private** | Encrypted workspace for sensitive data (journals, notes, personal projects) |
 
-### 🎯 Five View Modes
-Interact with AI the way that works best for you:
-- **Stream** — Traditional chat flow
-- **Canvas** — Visual mind mapping
-- **Document** — Collaborative doc building
-- **Timeline** — Chronological view
-- **Focus** — Distraction-free mode
+### 💬 Chat V2 Surface
+The default chat experience keeps the conversation front and center while preserving access to runtime controls, follow-up suggestions, attachments, and session metadata when you need them.
 
 ### 🤖 Intelligent Model Management
 - **Inference Orchestrator:** Automatically routes tasks to NPU, GPU, or CPU based on efficiency and speed profiles.
@@ -128,8 +123,8 @@ Interact with AI the way that works best for you:
 
 ```bash
 # Clone the repository
-git clone https://github.com/jimmyjon121/legendary-bassoon.git
-cd legendary-bassoon
+git clone https://github.com/jimmyjon121/legendary-bassoon.git devforge
+cd devforge
 
 # Install dependencies
 npm install
@@ -165,7 +160,7 @@ DevForge's **auto-optimization** detects your model and adjusts settings for bes
 
 | Layer | Technology |
 |-------|------------|
-| Desktop | Electron 31 |
+| Desktop | Electron 28 |
 | Frontend | React 18 + Vite |
 | Styling | Tailwind CSS |
 | State | Zustand |
@@ -197,6 +192,10 @@ devforge/
 ## Documentation
 
 - [Wireless Brain Plan](docs/wireless-brain-plan.md) (New!)
+- [Wireless Brain API Spec](docs/wireless-brain-api-spec.md)
+- [Wireless Brain Auth Model](docs/wireless-brain-auth-model.md)
+- [Wireless Brain Threat Model](docs/wireless-brain-threat-model.md)
+- [Performance Baseline](docs/perf/baseline-2026-02.md)
 - [Architecture Guide](docs/architecture.md)
 - [IPC API Reference](docs/ipc-api.md)
 - [User Guide](docs/user-guide.md)

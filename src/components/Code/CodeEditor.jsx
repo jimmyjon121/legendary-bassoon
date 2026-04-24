@@ -1,6 +1,7 @@
 import React, { useRef, useCallback, useEffect, useState, useMemo } from 'react';
 import { Save, Copy, Check, X, Circle, RefreshCw } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore';
+import { shallow } from 'zustand/shallow';
 import Editor, { loader } from '@monaco-editor/react';
 import * as monaco from 'monaco-editor';
 import editorWorker from 'monaco-editor/esm/vs/editor/editor.worker?worker';
@@ -198,7 +199,7 @@ export function CodeEditor({ onSelectionChange }) {
     saveActiveFile: state.saveActiveFile,
     setActiveFile: state.setActiveFile,
     closeFileTab: state.closeFileTab,
-  }));
+  }), shallow);
 
   const editorRef = useRef(null);
   const [copied, setCopied] = useState(false);

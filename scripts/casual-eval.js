@@ -16,26 +16,42 @@ function assertContains(haystack, needle, description, failures) {
 
 function main() {
   const failures = [];
-  const chatArea = read('src/components/Chat/ChatArea.jsx');
-  const smartInput = read('src/components/Chat/SmartInput.jsx');
   const messageSlice = read('src/stores/slices/messageSlice.js');
 
   assertContains(
-    chatArea,
-    "const canUseWebSearch = currentWorkspace === 'research';",
-    'ChatArea must gate web search toggle to research workspace',
-    failures
-  );
-  assertContains(
-    smartInput,
-    "const canUseWebSearch = currentWorkspace === 'research';",
-    'SmartInput must gate web search toggle to research workspace',
+    messageSlice,
+    "(currentWorkspace === 'research' || currentWorkspace === 'casual' || currentWorkspace === 'work')",
+    'Message generation must support web search gating for research/casual/work',
     failures
   );
   assertContains(
     messageSlice,
-    "const canUseWebSearch = currentWorkspace === 'research'",
-    'Message generation must enforce research-only web search',
+    'guardrailMetrics:',
+    'Message slice must expose structured guardrail metrics state',
+    failures
+  );
+  assertContains(
+    messageSlice,
+    'recordGuardrailEvent: (event = {}) =>',
+    'Message slice must track guardrail events with typed metadata',
+    failures
+  );
+  assertContains(
+    messageSlice,
+    'cleanupResponse(fullResponse)',
+    'Stream completion must apply cleanup to model output',
+    failures
+  );
+  assertContains(
+    messageSlice,
+    "I couldn't generate a response. Please try again.",
+    'Empty response must produce a simple user-facing fallback',
+    failures
+  );
+  assertContains(
+    messageSlice,
+    'final_empty_fallback',
+    'Message generation must emit fallback reason codes when output is empty',
     failures
   );
 

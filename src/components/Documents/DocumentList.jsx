@@ -3,7 +3,7 @@ import { Trash2, FileText, Loader } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 
 export function DocumentList() {
-  const { currentWorkspace } = useAppStore();
+  const currentWorkspace = useAppStore((s) => s.currentWorkspace);
   const [docs, setDocs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);

@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { useEditorStore } from './editorStore';
-import { safeCall } from '../utils/electronAPI';
+import { api, safeCall } from '../utils/electronAPI';
 
 /**
  * Agent Store
@@ -270,7 +270,7 @@ export const useAgentStore = create((set, get) => ({
       !change.newPath;
 
     if ((operation === 'create' && change.content !== undefined) || canDirectWriteUpdate) {
-      const writeOk = await safeCall('writeFile', [absolutePath, change.content], false);
+      const writeOk = await api.writeFileScoped(absolutePath, change.content, projectRoot);
       if (!writeOk) {
         get().addLog(`Failed to write file ${change.path}`, 'error');
         return false;

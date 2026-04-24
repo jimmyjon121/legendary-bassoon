@@ -2,7 +2,7 @@
 // Handles conversations, messages, and branches
 
 import { v4 as uuidv4 } from 'uuid';
-import { isElectron, safeCall } from '../../utils/electronAPI';
+import { api, isElectron } from '../../utils/electronAPI';
 
 export const createConversationSlice = (set, get) => ({
   // State
@@ -17,25 +17,32 @@ export const createConversationSlice = (set, get) => ({
     try {
       const workspace = get().currentWorkspace;
       const nsfwPassword = get().nsfwPassword;
-      const result = await window.electronAPI?.dbQuery(
-        'SELECT * FROM conversations WHERE workspace = ? ORDER BY updated_at DESC',
-        [workspace]
-      );
+      const result = await api.data.conversationsList({
+        workspace,
+        limit: 1000,
+      });
       
       // Decrypt titles for Private workspace
       if (workspace === 'nsfw' && nsfwPassword && result?.length > 0) {
         const decrypted = await Promise.all(
           result.map(async (conv) => {
-            if (conv.encrypted && conv.title) {
-              try {
-                const parsed = JSON.parse(conv.title);
-                if (parsed.encrypted && parsed.iv && parsed.salt && parsed.authTag) {
-                  const decryptedTitle = await window.electronAPI?.decrypt(parsed, nsfwPassword);
-                  return { ...conv, title: decryptedTitle };
+            if (conv.encrypted) {
+              const next = { ...conv };
+              const maybeDecryptField = async (value) => {
+                if (!value) return value;
+                try {
+                  const parsed = JSON.parse(value);
+                  if (parsed.encrypted && parsed.iv && parsed.salt && parsed.authTag) {
+                    return await window.electronAPI?.decrypt(parsed, nsfwPassword);
+                  }
+                } catch {
+                  // Field might not be encrypted (legacy) or invalid JSON.
                 }
-              } catch {
-                // Title might not be encrypted (legacy) or invalid JSON
-              }
+                return value;
+              };
+              next.title = await maybeDecryptField(conv.title);
+              next.preview = await maybeDecryptField(conv.preview);
+              return next;
             }
             return conv;
           })
@@ -68,13 +75,23 @@ export const createConversationSlice = (set, get) => ({
         }
       }
       
-      await window.electronAPI?.dbRun(
-        'INSERT INTO conversations (id, workspace, title, model, encrypted) VALUES (?, ?, ?, ?, ?)',
-        [id, workspace, storedTitle, model, isNsfw ? 1 : 0]
-      );
+      await api.data.conversationsCreate({
+        id,
+        workspace,
+        title: storedTitle,
+        model,
+        encrypted: isNsfw ? 1 : 0,
+      });
       
       const conversations = await get().loadConversations();
       set({ conversations, currentConversationId: id, messages: [] });
+
+      // Keep project conversations in sync when a project is active.
+      if (get().activeProjectId) {
+        get().linkConversationToActiveProject?.(id).catch((error) => {
+          console.warn('[conversationSlice] Failed to link new chat to active project:', error?.message || error);
+        });
+      }
       
       return id;
     } catch (error) {
@@ -89,34 +106,22 @@ export const createConversationSlice = (set, get) => ({
       const activeBranchId = branchId || null;
       
       // Load branches
-      const branches = await window.electronAPI?.dbQuery(
-        'SELECT * FROM conversation_branches WHERE conversation_id = ? ORDER BY created_at ASC',
-        [conversationId]
-      );
+      const branches = await api.data.branchesList({ conversationId });
 
       // Load messages
-      let messages;
-      if (activeBranchId) {
-        messages = await window.electronAPI?.dbQuery(
-          'SELECT * FROM messages WHERE conversation_id = ? AND (branch_id IS NULL OR branch_id = ?) ORDER BY created_at ASC',
-          [conversationId, activeBranchId]
-        );
-      } else {
-        messages = await window.electronAPI?.dbQuery(
-          'SELECT * FROM messages WHERE conversation_id = ? AND (branch_id IS NULL OR branch_id = \'\') ORDER BY created_at ASC',
-          [conversationId]
-        );
-      }
+      const messages = await api.data.messagesListByConversation({
+        conversationId,
+        branchId: activeBranchId,
+        includeAllBranches: false,
+        limit: 5000,
+      });
       
       // Decrypt messages if encrypted
       let decryptedMessages = messages || [];
       if (workspace === 'nsfw' && get().nsfwPassword) {
-        const conversation = await window.electronAPI?.dbQuery(
-          'SELECT encrypted FROM conversations WHERE id = ?',
-          [conversationId]
-        );
+        const conversation = await api.data.conversationsGetById({ id: conversationId });
         
-        if (conversation?.[0]?.encrypted) {
+        if (conversation?.encrypted) {
           decryptedMessages = await Promise.all(
             (messages || []).map(async (msg) => {
               try {
@@ -139,33 +144,35 @@ export const createConversationSlice = (set, get) => ({
       let messagesWithAttachments = decryptedMessages;
       try {
         if (Array.isArray(decryptedMessages) && decryptedMessages.length > 0 && isElectron()) {
-          const ids = decryptedMessages.map((m) => m.id);
-          const placeholders = ids.map(() => '?').join(', ');
-          const rows = await window.electronAPI?.dbQuery(
-            `SELECT * FROM message_images WHERE message_id IN (${placeholders}) ORDER BY created_at ASC`,
-            ids
+          const rowsByMessage = await Promise.all(
+            decryptedMessages.map((msg) =>
+              api.data.attachmentsListByMessage({ messageId: msg.id }).catch(() => [])
+            )
           );
 
-          const byMessage = {};
-          (rows || []).forEach((row) => {
-            const list = byMessage[row.message_id] || (byMessage[row.message_id] = []);
-            const isImage =
-              (row.type && String(row.type).startsWith('image')) ||
-              (row.mime_type && String(row.mime_type).startsWith('image/'));
-            list.push({
-              id: row.id,
-              name: row.original_name || row.file_path,
-              kind: isImage ? 'image' : 'file',
-              mimeType: row.mime_type || '',
-              size: row.size,
-              originalPath: row.file_path,
+          messagesWithAttachments = decryptedMessages.map((m, idx) => {
+            const rows = rowsByMessage[idx] || [];
+            const attachments = rows.map((row) => {
+              const mime = row.mime_type || '';
+              const isImage =
+                (row.type && String(row.type).startsWith('image')) ||
+                mime.startsWith('image/');
+              return {
+                id: row.id,
+                name: row.original_name || row.file_path,
+                kind: isImage ? 'image' : 'file',
+                mimeType: mime,
+                size: row.size,
+                originalPath: row.file_path,
+                encrypted: Boolean(row.encrypted),
+              };
             });
-          });
 
-          messagesWithAttachments = decryptedMessages.map((m) => ({
-            ...m,
-            attachments: byMessage[m.id] || [],
-          }));
+            return {
+              ...m,
+              attachments,
+            };
+          });
         }
       } catch (error) {
         console.error('Failed to load message attachments:', error);
@@ -188,10 +195,12 @@ export const createConversationSlice = (set, get) => ({
       const branches = get().branches || [];
       const defaultName = name || `Branch ${branches.length + 1}`;
 
-      await window.electronAPI?.dbRun(
-        'INSERT INTO conversation_branches (id, conversation_id, parent_branch_id, name) VALUES (?, ?, ?, ?)',
-        [branchId, conversationId, get().currentBranchId, defaultName]
-      );
+      await api.data.branchesCreate({
+        id: branchId,
+        conversationId,
+        parentBranchId: get().currentBranchId,
+        name: defaultName,
+      });
 
       await get().selectConversation(conversationId, branchId);
     } catch (error) {
@@ -207,10 +216,7 @@ export const createConversationSlice = (set, get) => ({
 
   deleteConversation: async (conversationId) => {
     try {
-      await window.electronAPI?.dbRun(
-        'DELETE FROM conversations WHERE id = ?',
-        [conversationId]
-      );
+      await api.data.conversationsDelete({ id: conversationId });
       
       const conversations = await get().loadConversations();
       
@@ -219,6 +225,10 @@ export const createConversationSlice = (set, get) => ({
       }
       
       set({ conversations });
+
+      if (get().activeProjectId) {
+        get().refreshActiveProjectLinks?.().catch(() => {});
+      }
     } catch (error) {
       console.error('Failed to delete conversation:', error);
     }
@@ -250,14 +260,15 @@ export const createConversationSlice = (set, get) => ({
     };
 
     try {
-      await window.electronAPI?.dbRun(
-        'INSERT INTO messages (id, conversation_id, role, content, model, branch_id, parent_message_id) VALUES (?, ?, ?, ?, ?, ?, ?)',
-        [assistantMessageId, conversationId, 'assistant', content, model, branchId, parentId]
-      );
-      await window.electronAPI?.dbRun(
-        'UPDATE conversations SET updated_at = CURRENT_TIMESTAMP WHERE id = ?',
-        [conversationId]
-      );
+      await api.data.messagesAppend({
+        id: assistantMessageId,
+        conversationId,
+        role: 'assistant',
+        content,
+        model,
+        branchId,
+        parentMessageId: parentId,
+      });
     } catch (error) {
       console.error('Failed to append compare message:', error);
     }

@@ -64,6 +64,38 @@ export async function safeCall(method, args = [], defaultValue = null) {
   }
 }
 
+function resolveNestedMethod(pathExpr) {
+  if (!isElectron()) return null;
+  const pathParts = String(pathExpr || '').split('.').filter(Boolean);
+  if (pathParts.length === 0) return null;
+
+  let current = window.electronAPI;
+  for (const part of pathParts) {
+    if (!current || !(part in current)) {
+      return null;
+    }
+    current = current[part];
+  }
+
+  return typeof current === 'function' ? current : null;
+}
+
+export async function safeNestedCall(pathExpr, args = [], defaultValue = null) {
+  if (!isElectron()) return defaultValue;
+  const fn = resolveNestedMethod(pathExpr);
+  if (!fn) {
+    console.warn(`[ElectronAPI] Nested method not available: ${pathExpr}`);
+    return defaultValue;
+  }
+  try {
+    const result = await fn(...args);
+    return result ?? defaultValue;
+  } catch (error) {
+    console.error(`[ElectronAPI] Error calling ${pathExpr}:`, error);
+    return defaultValue;
+  }
+}
+
 /**
  * Safely call an Electron API method with error propagation
  * Throws if the call fails (for cases where you need to handle errors)
@@ -112,11 +144,24 @@ async function safeResearchCall(method, args = [], defaultValue = null) {
   }
 }
 
+function inferParentDirectory(targetPath) {
+  const raw = String(targetPath || '').trim();
+  if (!raw) return null;
+  const normalized = raw.replace(/\\/g, '/');
+  const idx = normalized.lastIndexOf('/');
+  if (idx <= 0) return null;
+  return normalized.slice(0, idx);
+}
+
 // Pre-bound safe callers for common operations
 export const api = {
   // Settings
   getSettings: (key) => safeCall('getSettings', [key]),
   setSettings: (key, value) => safeCall('setSettings', [key, value]),
+  minimizeWindow: () => safeCall('minimizeWindow', [], null),
+  maximizeWindow: () => safeCall('maximizeWindow', [], null),
+  closeWindow: () => safeCall('closeWindow', [], null),
+  isMaximized: () => safeCall('isMaximized', [], false),
 
   // Hardware
   detectHardware: () => safeCall('detectHardware', [], { error: 'Not available' }),
@@ -127,14 +172,33 @@ export const api = {
   startOllama: () => safeCall('startOllama', [], { success: false }),
   stopOllama: () => safeCall('stopOllama', [], { success: false }),
   getModels: () => safeCall('getModels', [], []),
+  getModelInfo: (modelNameOrRequest) => safeCall('getModelInfo', [modelNameOrRequest], { success: false }),
 
   // NPU
-  getNpuStatus: (options = {}) => safeCall('getNpuStatus', [options], { openvinoInstalled: false, npuAvailable: false, serverRunning: false }),
+  getNpuStatus: (options = {}) => safeCall('getNpuStatus', [options], {
+    openvinoInstalled: false,
+    npuAvailable: false,
+    serverRunning: false,
+    model: null,
+    modelPath: null,
+    modelLoaded: false,
+    autoStart: false,
+    hybridEnabled: false,
+    hybridMode: null,
+  }),
   startNpuServer: (options = {}) => safeCall('startNpuServer', [options], { success: false }),
   stopNpuServer: () => safeCall('stopNpuServer', [], { success: false }),
+  unloadNpuModel: () => safeCall('unloadNpuModel', [], { success: false }),
   setupNpu: () => safeCall('setupNpu', [], { success: false }),
   autoConfigureNpuModel: (options = {}) => safeCall('autoConfigureNpuModel', [options], { configured: false }),
+  configureNpuModel: (payload = {}) => safeCall('configureNpuModel', [payload], { configured: false }),
   clearNpuCache: () => safeCall('clearNpuCache', [], { success: false }),
+
+  // Unified Brain (Hybrid GPU+NPU)
+  getHybridCapabilities: () => safeCall('getHybridCapabilities', [], { available: false, modes: [], canHetero: false, canAuto: false }),
+  getHybridStatus: () => safeCall('getHybridStatus', [], { enabled: false, mode: null, device: 'NPU' }),
+  enableHybridMode: (modeId) => safeCall('enableHybridMode', [modeId], { success: false }),
+  disableHybridMode: () => safeCall('disableHybridMode', [], { success: false }),
 
   // Models
   scanSystemForModels: (options) => safeCall('scanSystemForModels', [options], { models: [], locations: [] }),
@@ -148,6 +212,14 @@ export const api = {
   setBackend: (id) => safeCall('setBackend', [id]),
   getPerformanceProfile: () => safeCall('getPerformanceProfile', [], 'balanced'),
   setPerformanceProfile: (profile) => safeCall('setPerformanceProfile', [profile]),
+  getDeviceUtilization: (windowMs) => safeCall('getDeviceUtilization', [windowMs], {
+    available: false,
+    devices: [],
+    warmloop: { active: false, available: false },
+    streams: { firstTokenMs: null, last: null, aborts: {}, warmloopTransitions: [] },
+  }),
+  recordStreamEvent: (payload = {}) =>
+    safeCall('recordStreamEvent', [payload], { success: false }),
 
   // Power Mode
   getPowerModeStatus: () => safeCall('getPowerModeStatus', [], { enabled: false }),
@@ -173,13 +245,140 @@ export const api = {
   exportConversation: (payload) => safeCall('exportConversation', [payload], { success: false }),
   exportAllConversations: (payload) => safeCall('exportAllConversations', [payload], { success: false }),
   selectExportDestination: (options) => safeCall('selectExportDestination', [options], null),
+  openExternal: (url) => safeCall('openExternal', [url], { success: false }),
+  openPath: (targetPath) => safeCall('openPath', [targetPath], { success: false }),
+  openInExplorer: (targetPath) => safeCall('openInExplorer', [targetPath], { success: false }),
 
   // Backup
   createBackup: (payload) => safeCall('createBackup', [payload], { success: false }),
   restoreBackup: (payload) => safeCall('restoreBackup', [payload], { success: false }),
   listBackups: () => safeCall('listBackups', [], []),
+  getIpcDeprecationStats: () => safeCall('getIpcDeprecationStats', [], {}),
+  perfGetSnapshot: () => safeCall('perfGetSnapshot', [], {}),
+  perfSubscribe: () => safeCall('perfSubscribe', [], { success: false }),
+  perfUnsubscribe: () => safeCall('perfUnsubscribe', [], { success: false }),
+  perfUpdateRenderer: (payload = {}) => safeCall('perfUpdateRenderer', [payload], { success: false }),
+  onPerfSnapshot: (callback) => {
+    const raw = getAPI();
+    if (!raw?.onPerfSnapshot || typeof callback !== 'function') return () => {};
+    try {
+      const unsubscribe = raw.onPerfSnapshot(callback);
+      return typeof unsubscribe === 'function' ? unsubscribe : () => {};
+    } catch (error) {
+      console.error('[ElectronAPI] Failed to subscribe to perf snapshots:', error);
+      return () => {};
+    }
+  },
 
-  // File System
+  // Typed data API v2
+  data: {
+    conversationsList: (payload = {}) =>
+      safeNestedCall('data.conversationsList', [payload], []),
+    conversationsCreate: (payload = {}) =>
+      safeNestedCall('data.conversationsCreate', [payload], null),
+    conversationsGetById: (idOrPayload) =>
+      safeNestedCall('data.conversationsGetById', [idOrPayload], null),
+    conversationsUpdateMeta: (payload = {}) =>
+      safeNestedCall('data.conversationsUpdateMeta', [payload], null),
+    conversationsDelete: (idOrPayload) =>
+      safeNestedCall('data.conversationsDelete', [idOrPayload], { success: false }),
+
+    messagesListByConversation: (payload = {}) =>
+      safeNestedCall('data.messagesListByConversation', [payload], []),
+    messagesAppend: (payload = {}) =>
+      safeNestedCall('data.messagesAppend', [payload], null),
+    messagesUpdate: (payload = {}) =>
+      safeNestedCall('data.messagesUpdate', [payload], null),
+    messagesDelete: (idOrPayload) =>
+      safeNestedCall('data.messagesDelete', [idOrPayload], { success: false }),
+    messagesDeleteMany: (payload = {}) =>
+      safeNestedCall('data.messagesDeleteMany', [payload], { success: false }),
+    messagesSearch: (payload = {}) =>
+      safeNestedCall('data.messagesSearch', [payload], []),
+
+    attachmentsListByMessage: (messageIdOrPayload) =>
+      safeNestedCall('data.attachmentsListByMessage', [messageIdOrPayload], []),
+    attachmentsSave: (payload = {}) =>
+      safeNestedCall('data.attachmentsSave', [payload], { success: false, saved: [] }),
+    attachmentsRead: (payload = {}) =>
+      safeNestedCall('data.attachmentsRead', [payload], { success: false }),
+
+    branchesList: (conversationIdOrPayload) =>
+      safeNestedCall('data.branchesList', [conversationIdOrPayload], []),
+    branchesCreate: (payload = {}) =>
+      safeNestedCall('data.branchesCreate', [payload], null),
+    branchesSwitch: (payload = {}) =>
+      safeNestedCall('data.branchesSwitch', [payload], null),
+
+    searchConversations: (payload = {}) =>
+      safeNestedCall('data.searchConversations', [payload], []),
+    searchMessages: (payload = {}) =>
+      safeNestedCall('data.searchMessages', [payload], []),
+  },
+
+  // Scoped filesystem API v2
+  fsScoped: {
+    grantRoot: (rootPath, label = null) =>
+      safeNestedCall('fsScoped.grantRoot', [rootPath, label], { success: false }),
+    listGrantedRoots: () =>
+      safeNestedCall('fsScoped.listGrantedRoots', [], []),
+    revokeRoot: (rootPath) =>
+      safeNestedCall('fsScoped.revokeRoot', [rootPath], { success: false }),
+    read: (targetPath, encoding = 'utf-8') =>
+      safeNestedCall('fsScoped.read', [targetPath, encoding], { success: false, content: '' }),
+    write: (targetPath, content, encoding = 'utf-8') =>
+      safeNestedCall('fsScoped.write', [targetPath, content, encoding], { success: false }),
+    list: (targetPath, options = {}) =>
+      safeNestedCall('fsScoped.list', [targetPath, options], { success: false, entries: [] }),
+    mkdir: (targetPath, recursive = true) =>
+      safeNestedCall('fsScoped.mkdir', [targetPath, recursive], { success: false }),
+  },
+
+  // Convenience scoped FS wrappers
+  grantFsRoot: (rootPath, label = null) =>
+    safeNestedCall('fsScoped.grantRoot', [rootPath, label], { success: false }),
+  listFsGrantedRoots: () =>
+    safeNestedCall('fsScoped.listGrantedRoots', [], []),
+  revokeFsRoot: (rootPath) =>
+    safeNestedCall('fsScoped.revokeRoot', [rootPath], { success: false }),
+  readFileScoped: async (filePath, rootPath = null) => {
+    const root = rootPath || inferParentDirectory(filePath);
+    if (root) {
+      await safeNestedCall('fsScoped.grantRoot', [root, 'auto-from-read'], null);
+    }
+    const result = await safeNestedCall(
+      'fsScoped.read',
+      [filePath, 'utf-8'],
+      { success: false, content: '' }
+    );
+    return result?.content ?? '';
+  },
+  writeFileScoped: async (filePath, content, rootPath = null) => {
+    const root = rootPath || inferParentDirectory(filePath);
+    if (root) {
+      await safeNestedCall('fsScoped.grantRoot', [root, 'auto-from-write'], null);
+    }
+    const result = await safeNestedCall(
+      'fsScoped.write',
+      [filePath, content, 'utf-8'],
+      { success: false }
+    );
+    return Boolean(result?.success);
+  },
+  createFolderScoped: async (folderPath, rootPath = null) => {
+    const root = rootPath || inferParentDirectory(folderPath) || folderPath;
+    if (root) {
+      await safeNestedCall('fsScoped.grantRoot', [root, 'auto-from-mkdir'], null);
+    }
+    const result = await safeNestedCall(
+      'fsScoped.mkdir',
+      [folderPath, true],
+      { success: false }
+    );
+    return Boolean(result?.success);
+  },
+
+  // Legacy File System wrappers (compat bridge)
   selectFile: (options) => safeCall('selectFile', [options], null),
   selectFolder: (options) => safeCall('selectFolder', [options], null),
   browseForModelsDirectory: () => safeCall('browseForModelsDirectory', [], null),
@@ -187,16 +386,28 @@ export const api = {
   writeFile: (filePath, content) => safeCall('writeFile', [filePath, content], false),
   createFolder: (folderPath) => safeCall('createFolder', [folderPath], false),
   checkPath: (targetPath) => safeCall('checkPath', [targetPath], { exists: false }),
-  scanLMStudioModels: () => safeCall('scanLMStudioModels', [], { models: [], searchedPaths: [] }),
+  scanLMStudioModels: () => safeCall('scanLMStudioModels', [], { models: [], scannedPaths: [] }),
   scanFolderForModels: (folderPath) => safeCall('scanFolderForModels', [folderPath], { models: [], error: null }),
 
-  // Message attachments (with optional encryption for Private workspace)
-  saveMessageAttachments: (messageId, files, password = null) =>
-    safeCall('saveMessageAttachments', [messageId, files, password], { success: false, saved: [] }),
-  
-  // Read attachment (with decryption for Private workspace)
-  readAttachment: (filePath, password = null) =>
-    safeCall('readAttachment', [filePath, password], { success: false }),
+  // Attachments (v2 first, legacy fallback)
+  saveMessageAttachments: async (messageId, files, password = null) => {
+    const result = await safeNestedCall(
+      'data.attachmentsSave',
+      [{ messageId, files, password }],
+      null
+    );
+    if (result) return result;
+    return safeCall('saveMessageAttachments', [messageId, files, password], { success: false, saved: [] });
+  },
+  readAttachment: async (filePath, password = null) => {
+    const result = await safeNestedCall(
+      'data.attachmentsRead',
+      [{ filePath, password, encoding: 'base64' }],
+      null
+    );
+    if (result) return result;
+    return safeCall('readAttachment', [filePath, password], { success: false });
+  },
 
   // Screenshot
   captureScreenshot: () =>
@@ -254,6 +465,43 @@ export const api = {
       network: { totalRequests: 0, externalRequests: 0, blockedExternalRequests: 0, lastExternal: null },
     }),
   setLocalOnlyMode: (enabled) => safeCall('setLocalOnlyMode', [enabled], { success: false, localOnly: enabled }),
+
+  // Vault Safety: safeword, aftercare, dead switch
+  vaultSafetyGetConfig: () => safeCall('vaultSafetyGetConfig', [], { success: false, config: null }),
+  vaultSafetySetConfig: (patch) => safeCall('vaultSafetySetConfig', [patch], { success: false }),
+  vaultDeadSwitchPrepare: () => safeCall('vaultDeadSwitchPrepare', [], { success: false }),
+  vaultDeadSwitchExecute: (code) => safeCall('vaultDeadSwitchExecute', [code], { success: false }),
+  vaultDeadSwitchCancel: () => safeCall('vaultDeadSwitchCancel', [], { success: false }),
+  vaultGetProfile: () => safeCall('vaultGetProfile', [], { success: false, profile: null }),
+  vaultSetProfile: (patch) => safeCall('vaultSetProfile', [patch], { success: false }),
+  vaultLoreList: (payload) => safeCall('vaultLoreList', [payload || {}], { success: false, entries: [] }),
+  vaultLoreSave: (entry) => safeCall('vaultLoreSave', [entry], { success: false }),
+  vaultLoreDelete: (id) => safeCall('vaultLoreDelete', [id], { success: false }),
+  vaultLoreLinks: () => safeCall('vaultLoreLinks', [], { success: false, links: [] }),
+  vaultLoreLinkSave: (link) => safeCall('vaultLoreLinkSave', [link], { success: false }),
+  vaultLoreLinkDelete: (id) => safeCall('vaultLoreLinkDelete', [id], { success: false }),
+  audioGetConfig: () => safeCall('audioGetConfig', [], { success: false, config: null }),
+  audioSetConfig: (patch) => safeCall('audioSetConfig', [patch], { success: false }),
+  audioSynthesize: (payload) => safeCall('audioSynthesize', [payload], { success: false }),
+  audioAmbience: (payload) => safeCall('audioAmbience', [payload], { success: false }),
+  audioStop: () => safeCall('audioStop', [], { success: true }),
+  audioCleanup: () => safeCall('audioCleanup', [], { success: true }),
+  hapticGetConfig: () => safeCall('hapticGetConfig', [], { success: false, config: null }),
+  hapticSetConfig: (patch) => safeCall('hapticSetConfig', [patch], { success: false }),
+  hapticStatus: () => safeCall('hapticStatus', [], { success: false, connected: false, devices: [] }),
+  hapticConnect: () => safeCall('hapticConnect', [], { success: false }),
+  hapticDisconnect: () => safeCall('hapticDisconnect', [], { success: true }),
+  hapticScan: (payload) => safeCall('hapticScan', [payload], { success: false, devices: [] }),
+  hapticList: () => safeCall('hapticList', [], { success: true, devices: [] }),
+  hapticVibrate: (payload) => safeCall('hapticVibrate', [payload], { success: false }),
+  hapticStop: () => safeCall('hapticStop', [], { success: true }),
+  charEvolutionGetState: (characterId) => safeCall('charEvolutionGetState', [characterId], { success: false }),
+  charEvolutionSetEnabled: (payload) => safeCall('charEvolutionSetEnabled', [payload], { success: false }),
+  charEvolutionListHistory: (payload) => safeCall('charEvolutionListHistory', [payload], { success: false, history: [] }),
+  charEvolutionSnapshot: (payload) => safeCall('charEvolutionSnapshot', [payload], { success: false }),
+  charEvolutionRevertTo: (payload) => safeCall('charEvolutionRevertTo', [payload], { success: false }),
+  charEvolutionCurrentTraits: (characterId) => safeCall('charEvolutionCurrentTraits', [characterId], { success: false }),
+  charEvolutionExportJsonl: (characterId) => safeCall('charEvolutionExportJsonl', [characterId], { success: false }),
 
   // Model inspection / auto-tune
   inspectModel: (filePath) =>

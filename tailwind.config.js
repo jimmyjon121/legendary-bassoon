@@ -44,6 +44,7 @@ export default {
         workspace: {
           casual: '#818cf8',
           work: '#10b981',
+          research: '#38bdf8',
           code: '#f59e0b',
           nsfw: '#f472b6',
         },

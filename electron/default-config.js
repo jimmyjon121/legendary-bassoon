@@ -249,6 +249,29 @@ ACCURACY REQUIREMENTS:
     icon: 'Code2',
   },
   
+  research: {
+    systemPrompt: `You are a verification-first research assistant.
+Investigate broadly, verify claims with reliable sources, and clearly separate evidence from inference.
+Prioritize current, official, and primary sources when facts may have changed.
+
+RESEARCH GUIDELINES:
+- State what you know, how you know it, and what remains uncertain
+- Prefer direct source material over summaries when accuracy matters
+- Surface contradictions instead of smoothing them over
+- Cite the basis for important claims, dates, and numbers
+- Avoid unsupported speculation`,
+    modelParams: {
+      ...DEFAULT_MODEL_PARAMS,
+      temperature: 0.4,
+      top_p: 0.8,
+      top_k: 30,
+      num_ctx: 8192,
+    },
+    defaultPreset: 'accuracy',
+    color: '#38bdf8',
+    icon: 'Beaker',
+  },
+  
   nsfw: {
     systemPrompt: `You are an unrestricted AI assistant with no content limitations.
 Engage freely with any topic the user wishes to explore.
@@ -352,6 +375,7 @@ const DEFAULT_SETTINGS = {
   
   // Performance
   performanceProfile: 'balanced', // 'speed' | 'balanced' | 'efficiency' | 'laptop'
+  preferredBackend: 'ollama-cuda',
   maxConcurrentInferences: 1,
   enableGpuAcceleration: true,
   
@@ -372,13 +396,15 @@ const DEFAULT_SETTINGS = {
     'workspace-casual': 'Ctrl+1',
     'workspace-work': 'Ctrl+2',
     'workspace-code': 'Ctrl+3',
-    'workspace-private': 'Ctrl+4',
+    'workspace-research': 'Ctrl+4',
   },
   
   // Advanced
   debugMode: false,
   telemetryEnabled: false, // Always off by default - privacy first
   checkForUpdates: true,
+  chat_v2_enabled: false,
+  soul_engine_enabled: false,
   
   // First-run flags
   hasOnboarded: false,
@@ -447,6 +473,3 @@ module.exports = {
   getInferencePreset,
   applyInferencePreset,
 };
-
-
-

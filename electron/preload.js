@@ -1,5 +1,29 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
+const warnedDeprecated = new Set();
+function warnDeprecated(apiName, replacement = '') {
+  if (warnedDeprecated.has(apiName)) return;
+  warnedDeprecated.add(apiName);
+  const suffix = replacement ? ` Use ${replacement} instead.` : '';
+  console.warn(`[electronAPI][Deprecated] ${apiName} called.${suffix}`);
+}
+
+// Generate a collision-proof stream channel id even when multiple streams are
+// opened in the same millisecond. The preload runs in a sandboxed context, so
+// we use the Web Crypto API (globalThis.crypto) — not the Node `crypto`
+// module, which isn't available here — and fall back to timestamp+random.
+function makeStreamChannelId() {
+  try {
+    const webCrypto = globalThis.crypto;
+    if (webCrypto && typeof webCrypto.randomUUID === 'function') {
+      return `llm:stream:${webCrypto.randomUUID()}`;
+    }
+  } catch (_) {
+    // non-blocking; fall through to fallback
+  }
+  return `llm:stream:${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
 // Expose protected methods to renderer process
 contextBridge.exposeInMainWorld('electronAPI', {
   // Window controls
@@ -7,6 +31,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   maximizeWindow: () => ipcRenderer.invoke('window:maximize'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
   isMaximized: () => ipcRenderer.invoke('window:isMaximized'),
+  reloadWindow: (options = {}) => ipcRenderer.invoke('window:reload', options),
+  restartApp: () => ipcRenderer.invoke('app:restart'),
 
   // Settings/Store
   getSettings: (key) => ipcRenderer.invoke('store:get', key),
@@ -19,15 +45,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // LLM Communication
   sendToLLM: (payload) => ipcRenderer.invoke('llm:send', payload),
   streamFromLLM: (payload, callback) => {
-    const channel = `llm:stream:${Date.now()}`;
+    const channel = makeStreamChannelId();
     ipcRenderer.on(channel, (_, chunk) => callback(chunk));
-    ipcRenderer.invoke('llm:stream', { ...payload, channel });
+    ipcRenderer.invoke('llm:stream', { ...payload, channel }).catch((error) => {
+      callback({ error: error?.message || 'Failed to start stream' });
+    });
     return () => {
       ipcRenderer.removeAllListeners(channel);
       ipcRenderer.invoke('llm:cancel', channel);
     };
   },
   cancelLLMStream: (channel) => ipcRenderer.invoke('llm:cancel', channel),
+
+  // Ensemble cast — multiple personas stream in parallel, multiplexed on
+  // one channel. Each chunk has { castId, ... } so the UI can route it.
+  parallelStreamFromLLM: (payload, callback) => {
+    const channel = `llm:parallel:${typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}`;
+    ipcRenderer.on(channel, (_, chunk) => callback(chunk));
+    ipcRenderer.invoke('llm:parallelStream', { ...payload, channel }).catch((error) => {
+      callback({ error: error?.message || 'Failed to start parallel stream' });
+    });
+    return () => {
+      ipcRenderer.removeAllListeners(channel);
+    };
+  },
   getModels: () => ipcRenderer.invoke('llm:models'),
   loadModel: (modelPath) => ipcRenderer.invoke('llm:load', modelPath),
   unloadModel: () => ipcRenderer.invoke('llm:unload'),
@@ -45,21 +86,107 @@ contextBridge.exposeInMainWorld('electronAPI', {
   imageRawInterrupt: () => ipcRenderer.invoke('image:interrupt'),
   checkImageHealth: () => ipcRenderer.invoke('image:health'),
   
-  // File System
+  // File System (scoped v2)
+  fsScoped: {
+    grantRoot: (rootPath, label) => ipcRenderer.invoke('fs:grantRoot', { rootPath, label }),
+    listGrantedRoots: () => ipcRenderer.invoke('fs:listGrantedRoots'),
+    revokeRoot: (rootPath) => ipcRenderer.invoke('fs:revokeRoot', { rootPath }),
+    read: (targetPath, encoding = 'utf-8') => ipcRenderer.invoke('fs:readScoped', { path: targetPath, encoding }),
+    write: (targetPath, content, encoding = 'utf-8') =>
+      ipcRenderer.invoke('fs:writeScoped', { path: targetPath, content, encoding }),
+    list: (targetPath, options = {}) =>
+      ipcRenderer.invoke('fs:listScoped', { path: targetPath, ...(options || {}) }),
+    mkdir: (targetPath, recursive = true) =>
+      ipcRenderer.invoke('fs:mkdirScoped', { path: targetPath, recursive }),
+  },
+
+  // Typed data IPC (v2)
+  data: {
+    conversationsList: (payload) => ipcRenderer.invoke('conversations:list', payload || {}),
+    conversationsCreate: (payload) => ipcRenderer.invoke('conversations:create', payload || {}),
+    conversationsGetById: (idOrPayload) =>
+      ipcRenderer.invoke(
+        'conversations:getById',
+        typeof idOrPayload === 'string' ? { id: idOrPayload } : (idOrPayload || {})
+      ),
+    conversationsUpdateMeta: (payload) => ipcRenderer.invoke('conversations:updateMeta', payload || {}),
+    conversationsDelete: (idOrPayload) =>
+      ipcRenderer.invoke(
+        'conversations:delete',
+        typeof idOrPayload === 'string' ? { id: idOrPayload } : (idOrPayload || {})
+      ),
+
+    messagesListByConversation: (payload) => ipcRenderer.invoke('messages:listByConversation', payload || {}),
+    messagesAppend: (payload) => ipcRenderer.invoke('messages:append', payload || {}),
+    messagesUpdate: (payload) => ipcRenderer.invoke('messages:update', payload || {}),
+    messagesDelete: (idOrPayload) =>
+      ipcRenderer.invoke(
+        'messages:delete',
+        typeof idOrPayload === 'string' ? { id: idOrPayload } : (idOrPayload || {})
+      ),
+    messagesDeleteMany: (payload) => ipcRenderer.invoke('messages:deleteMany', payload || {}),
+    messagesSearch: (payload) => ipcRenderer.invoke('messages:search', payload || {}),
+
+    attachmentsListByMessage: (messageIdOrPayload) =>
+      ipcRenderer.invoke(
+        'attachments:listByMessage',
+        typeof messageIdOrPayload === 'string'
+          ? { messageId: messageIdOrPayload }
+          : (messageIdOrPayload || {})
+      ),
+    attachmentsSave: (payload) => ipcRenderer.invoke('attachments:save', payload || {}),
+    attachmentsRead: (payload) => ipcRenderer.invoke('attachments:read', payload || {}),
+
+    branchesList: (conversationIdOrPayload) =>
+      ipcRenderer.invoke(
+        'branches:list',
+        typeof conversationIdOrPayload === 'string'
+          ? { conversationId: conversationIdOrPayload }
+          : (conversationIdOrPayload || {})
+      ),
+    branchesCreate: (payload) => ipcRenderer.invoke('branches:create', payload || {}),
+    branchesSwitch: (payload) => ipcRenderer.invoke('branches:switch', payload || {}),
+
+    searchConversations: (payload) => ipcRenderer.invoke('search:conversations', payload || {}),
+    searchMessages: (payload) => ipcRenderer.invoke('search:messages', payload || {}),
+  },
+
+  // Legacy File System (deprecated compatibility window)
   selectFile: (options) => ipcRenderer.invoke('fs:selectFile', options),
   selectFolder: (options) => ipcRenderer.invoke('fs:selectFolder', options),
-  readFile: (filePath) => ipcRenderer.invoke('fs:readFile', filePath),
-  readFileBase64: (filePath) => ipcRenderer.invoke('fs:readFileBase64', filePath),
-  writeFile: (filePath, content) => ipcRenderer.invoke('fs:writeFile', filePath, content),
-  createFolder: (folderPath) => ipcRenderer.invoke('fs:createFolder', folderPath),
-  listModels: (directory) => ipcRenderer.invoke('fs:listModels', directory),
+  readFile: (filePath) => {
+    warnDeprecated('readFile', 'fsScoped.read');
+    return ipcRenderer.invoke('fs:readFile', filePath);
+  },
+  readFileBase64: (filePath) => {
+    warnDeprecated('readFileBase64', 'fsScoped.read');
+    return ipcRenderer.invoke('fs:readFileBase64', filePath);
+  },
+  writeFile: (filePath, content) => {
+    warnDeprecated('writeFile', 'fsScoped.write');
+    return ipcRenderer.invoke('fs:writeFile', filePath, content);
+  },
+  createFolder: (folderPath) => {
+    warnDeprecated('createFolder', 'fsScoped.mkdir');
+    return ipcRenderer.invoke('fs:createFolder', folderPath);
+  },
+  listModels: (directory) => {
+    warnDeprecated('listModels', 'fsScoped.list');
+    return ipcRenderer.invoke('fs:listModels', directory);
+  },
   
   // Project Scanning (Code Workspace)
   scanProject: (rootPath, options) => ipcRenderer.invoke('project:scan', rootPath, options),
   
-  // Database
-  dbQuery: (sql, params) => ipcRenderer.invoke('db:query', sql, params),
-  dbRun: (sql, params) => ipcRenderer.invoke('db:run', sql, params),
+  // Legacy raw SQL IPC (deprecated compatibility window)
+  dbQuery: (sql, params) => {
+    warnDeprecated('dbQuery', 'data.* typed endpoints');
+    return ipcRenderer.invoke('db:query', sql, params);
+  },
+  dbRun: (sql, params) => {
+    warnDeprecated('dbRun', 'data.* typed endpoints');
+    return ipcRenderer.invoke('db:run', sql, params);
+  },
   
   // ============================================
   // Organization System - Folders, Tags, Pin/Star
@@ -95,7 +222,48 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setNsfwPassword: (password) => ipcRenderer.invoke('nsfw:setPassword', password),
   verifyNsfwPassword: (password) => ipcRenderer.invoke('nsfw:verifyPassword', password),
   hasNsfwPassword: () => ipcRenderer.invoke('nsfw:hasPassword'),
-  
+  rememberNsfwPassword: (password, durationMs) => ipcRenderer.invoke('nsfw:remember', { password, durationMs }),
+  getRememberedNsfwPassword: () => ipcRenderer.invoke('nsfw:getRemembered'),
+  forgetNsfwPassword: () => ipcRenderer.invoke('nsfw:forget'),
+
+  // Vault Safety: safeword/aftercare configuration and dead switch.
+  // Dead switch is two-step (prepare returns a code, execute requires the code).
+  vaultSafetyGetConfig: () => ipcRenderer.invoke('vault:safetyGetConfig'),
+  vaultSafetySetConfig: (patch) => ipcRenderer.invoke('vault:safetySetConfig', patch),
+  vaultDeadSwitchPrepare: () => ipcRenderer.invoke('vault:deadSwitchPrepare'),
+  vaultDeadSwitchExecute: (code) => ipcRenderer.invoke('vault:deadSwitchExecute', { code }),
+  vaultDeadSwitchCancel: () => ipcRenderer.invoke('vault:deadSwitchCancel'),
+  vaultGetProfile: () => ipcRenderer.invoke('vault:getProfile'),
+  vaultSetProfile: (patch) => ipcRenderer.invoke('vault:setProfile', patch),
+  vaultLoreList: (payload) => ipcRenderer.invoke('vault:loreList', payload),
+  vaultLoreSave: (entry) => ipcRenderer.invoke('vault:loreSave', entry),
+  vaultLoreDelete: (id) => ipcRenderer.invoke('vault:loreDelete', id),
+  vaultLoreLinks: () => ipcRenderer.invoke('vault:loreLinks'),
+  vaultLoreLinkSave: (link) => ipcRenderer.invoke('vault:loreLinkSave', link),
+  vaultLoreLinkDelete: (id) => ipcRenderer.invoke('vault:loreLinkDelete', id),
+  audioGetConfig: () => ipcRenderer.invoke('audio:getConfig'),
+  audioSetConfig: (patch) => ipcRenderer.invoke('audio:setConfig', patch),
+  audioSynthesize: (payload) => ipcRenderer.invoke('audio:synthesize', payload),
+  audioAmbience: (payload) => ipcRenderer.invoke('audio:ambience', payload),
+  audioStop: () => ipcRenderer.invoke('audio:stop'),
+  audioCleanup: () => ipcRenderer.invoke('audio:cleanup'),
+  hapticGetConfig: () => ipcRenderer.invoke('haptic:getConfig'),
+  hapticSetConfig: (patch) => ipcRenderer.invoke('haptic:setConfig', patch),
+  hapticStatus: () => ipcRenderer.invoke('haptic:status'),
+  hapticConnect: () => ipcRenderer.invoke('haptic:connect'),
+  hapticDisconnect: () => ipcRenderer.invoke('haptic:disconnect'),
+  hapticScan: (payload) => ipcRenderer.invoke('haptic:scan', payload),
+  hapticList: () => ipcRenderer.invoke('haptic:list'),
+  hapticVibrate: (payload) => ipcRenderer.invoke('haptic:vibrate', payload),
+  hapticStop: () => ipcRenderer.invoke('haptic:stop'),
+  charEvolutionGetState: (characterId) => ipcRenderer.invoke('charEvolution:getState', characterId),
+  charEvolutionSetEnabled: (payload) => ipcRenderer.invoke('charEvolution:setEnabled', payload),
+  charEvolutionListHistory: (payload) => ipcRenderer.invoke('charEvolution:listHistory', payload),
+  charEvolutionSnapshot: (payload) => ipcRenderer.invoke('charEvolution:snapshot', payload),
+  charEvolutionRevertTo: (payload) => ipcRenderer.invoke('charEvolution:revertTo', payload),
+  charEvolutionCurrentTraits: (characterId) => ipcRenderer.invoke('charEvolution:currentTraits', characterId),
+  charEvolutionExportJsonl: (characterId) => ipcRenderer.invoke('charEvolution:exportJsonl', characterId),
+
   // Encryption (for NSFW workspace)
   encrypt: (data, password) => ipcRenderer.invoke('crypto:encrypt', data, password),
   decrypt: (data, password) => ipcRenderer.invoke('crypto:decrypt', data, password),
@@ -121,6 +289,17 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // App Info
   getAppPath: () => ipcRenderer.invoke('app:getPath'),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
+  isPackaged: () => ipcRenderer.invoke('app:isPackaged'),
+  getIpcDeprecationStats: () => ipcRenderer.invoke('ipc:getDeprecationStats'),
+  perfGetSnapshot: () => ipcRenderer.invoke('perf:getSnapshot'),
+  perfSubscribe: () => ipcRenderer.invoke('perf:subscribe'),
+  perfUnsubscribe: () => ipcRenderer.invoke('perf:unsubscribe'),
+  perfUpdateRenderer: (payload) => ipcRenderer.invoke('perf:updateRenderer', payload || {}),
+  onPerfSnapshot: (callback) => {
+    const handler = (_, snapshot) => callback(snapshot);
+    ipcRenderer.on('perf:snapshot', handler);
+    return () => ipcRenderer.removeListener('perf:snapshot', handler);
+  },
   getPlatform: () => process.platform,
   
   // GPU Info (legacy)
@@ -158,6 +337,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
   startOllama: () => ipcRenderer.invoke('ollama:start'),
   stopOllama: () => ipcRenderer.invoke('ollama:stop'),
   createOllamaModelFromFile: (payload) => ipcRenderer.invoke('ollama:createFromFile', payload),
+  loadLocalGguf: (payload) => ipcRenderer.invoke('model:loadLocalGguf', payload),
+  listLocalGgufs: () => ipcRenderer.invoke('model:listLocalGgufs'),
+  unregisterLocalGguf: (payload) => ipcRenderer.invoke('model:unregisterLocalGguf', payload),
+  scanLmStudioImportedDuplicates: () => ipcRenderer.invoke('lmstudio:scanImportedDuplicates'),
+  reclaimLmStudioImportedDuplicates: (payload) => ipcRenderer.invoke('lmstudio:reclaim', payload),
   getImageBackendStatus: () => ipcRenderer.invoke('imageBackend:status'),
   installImageBackend: () => ipcRenderer.invoke('imageBackend:install'),
   startImageBackend: (command) => ipcRenderer.invoke('imageBackend:start', command),
@@ -165,11 +349,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // NPU / OpenVINO
   getNpuStatus: (options) => ipcRenderer.invoke('npu:getStatus', options),
+  getNpuServerStatus: () => ipcRenderer.invoke('npu:getServerStatus'),
   setupNpu: () => ipcRenderer.invoke('npu:setup'),
   startNpuServer: (options) => ipcRenderer.invoke('npu:startServer', options),
   stopNpuServer: () => ipcRenderer.invoke('npu:stopServer'),
+  unloadNpuModel: () => ipcRenderer.invoke('npu:unloadModel'),
   autoConfigureNpuModel: (options) => ipcRenderer.invoke('npu:autoConfigureModel', options),
+  configureNpuModel: (payload) => ipcRenderer.invoke('npu:configureModel', payload || {}),
+  loadNpuModel: (payload) => ipcRenderer.invoke('npu:loadModel', payload || {}),
   clearNpuCache: () => ipcRenderer.invoke('npu:clearCache'),
+
+  // Unified Brain (Hybrid GPU+NPU)
+  getHybridCapabilities: () => ipcRenderer.invoke('npu:getHybridCapabilities'),
+  getHybridStatus: () => ipcRenderer.invoke('npu:getHybridStatus'),
+  enableHybridMode: (modeId) => ipcRenderer.invoke('npu:enableHybridMode', modeId),
+  disableHybridMode: () => ipcRenderer.invoke('npu:disableHybridMode'),
 
   // ============================================
   // Power Mode
@@ -195,6 +389,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setBackend: (backendId) => ipcRenderer.invoke('llm:setBackend', backendId),
   getPerformanceProfile: () => ipcRenderer.invoke('llm:getProfile'),
   setPerformanceProfile: (profile) => ipcRenderer.invoke('llm:setProfile', profile),
+  getDeviceUtilization: (windowMs) => ipcRenderer.invoke('orchestrator:getDeviceUtilization', windowMs),
+  recordStreamEvent: (payload) => ipcRenderer.invoke('orchestrator:recordStreamEvent', payload || {}),
 
   // ============================================
   // Model Manager
@@ -326,10 +522,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // ============================================
   // Message Attachments
   // ============================================
-  saveMessageAttachments: (messageId, files, password) =>
-    ipcRenderer.invoke('saveMessageAttachments', messageId, files, password),
-  readAttachment: (filePath, password) =>
-    ipcRenderer.invoke('readAttachment', filePath, password),
+  saveMessageAttachments: (messageId, files, password) => {
+    warnDeprecated('saveMessageAttachments', 'data.attachmentsSave');
+    return ipcRenderer.invoke('saveMessageAttachments', messageId, files, password);
+  },
+  readAttachment: (filePath, password) => {
+    warnDeprecated('readAttachment', 'data.attachmentsRead');
+    return ipcRenderer.invoke('readAttachment', filePath, password);
+  },
 
   // ============================================
   // Screenshot
@@ -734,7 +934,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   providersSearchAll: (query, options) => ipcRenderer.invoke('providers:searchAll', query, options),
   
   // Get Ollama library models
-  providersGetOllamaModels: (category) => ipcRenderer.invoke('providers:getOllamaModels', category),
+  providersGetOllamaModels: (category, options) => ipcRenderer.invoke('providers:getOllamaModels', category, options),
   
   // Get image generation models (CivitAI)
   providersGetImageModels: (category) => ipcRenderer.invoke('providers:getImageModels', category),
@@ -742,8 +942,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Get vision models (LLaVA, etc.)
   providersGetVisionModels: () => ipcRenderer.invoke('providers:getVisionModels'),
 
-  // Get NSFW models from all providers
-  providersGetNSFWModels: (type) => ipcRenderer.invoke('providers:getNSFWModels', type),
+  // Get protected catalog models from all providers
+  providersGetNSFWModels: (type, password = null) => ipcRenderer.invoke('providers:getNSFWModels', type, password),
 
   // Get all provider categories
   providersGetAllCategories: () => ipcRenderer.invoke('providers:getAllCategories'),
@@ -754,14 +954,14 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Get hardware-based recommendations
   providersGetRecommendations: (vramGB, ramGB) => ipcRenderer.invoke('providers:getRecommendations', vramGB, ramGB),
   
-  // Get NSFW models for Private Vault
-  providersGetPrivateVaultModels: () => ipcRenderer.invoke('providers:getPrivateVaultModels'),
+  // Get protected catalog models for the vault
+  providersGetPrivateVaultModels: (password = null) => ipcRenderer.invoke('providers:getPrivateVaultModels', password),
   
   // Pull an Ollama model
   providersPullOllamaModel: (modelName) => ipcRenderer.invoke('providers:pullOllamaModel', modelName),
 
-  // Download NSFW model from various sources
-  providersDownloadNsfwModel: (modelData) => ipcRenderer.invoke('providers:downloadNsfwModel', modelData),
+  // Download protected catalog model from various sources
+  providersDownloadNsfwModel: (modelData, password = null) => ipcRenderer.invoke('providers:downloadNsfwModel', modelData, password),
   providersDownloadModel: (modelData) => ipcRenderer.invoke('providers:downloadModel', modelData),
 
   // Listen for Ollama pull progress
@@ -857,6 +1057,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const handler = (_, job) => callback(job);
     ipcRenderer.on('downloads:jobCancelled', handler);
     return () => ipcRenderer.removeListener('downloads:jobCancelled', handler);
+  },
+  onDownloadsModelAutoImported: (callback) => {
+    const handler = (_, payload) => callback(payload);
+    ipcRenderer.on('downloads:modelAutoImported', handler);
+    return () => ipcRenderer.removeListener('downloads:modelAutoImported', handler);
   },
 
   // ============================================

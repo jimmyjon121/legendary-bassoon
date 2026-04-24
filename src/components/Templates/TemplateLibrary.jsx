@@ -6,7 +6,7 @@ import { useAppStore } from '../../stores/appStore';
 import { TemplateEditor } from './TemplateEditor';
 
 export function TemplateLibrary({ isOpen, onClose, onApply }) {
-  const { currentWorkspace } = useAppStore();
+  const currentWorkspace = useAppStore((s) => s.currentWorkspace);
   const { templates, isLoading, loadTemplates, deleteTemplate, saveTemplate } = useTemplatesStore();
 
   const [editingTemplate, setEditingTemplate] = useState(null);
@@ -169,5 +169,4 @@ export function TemplateLibrary({ isOpen, onClose, onApply }) {
 }
 
 export default TemplateLibrary;
-
 

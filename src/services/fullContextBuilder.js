@@ -14,6 +14,7 @@
  */
 
 import { api } from '../utils/electronAPI';
+import { MODEL_FAMILIES, parseModelName } from './modelOptimizer';
 
 // Token estimation (4 chars ≈ 1 token for English)
 const estimateTokens = (text) => Math.ceil((text?.length || 0) / 4);
@@ -38,7 +39,6 @@ const CONTEXT_ALLOCATION = {
 async function getModelContextSize(modelName) {
   // Try to get from model optimizer
   try {
-    const { parseModelName, MODEL_FAMILIES } = await import('./modelOptimizer');
     const parsed = parseModelName(modelName);
     
     if (parsed.family && MODEL_FAMILIES[parsed.family]) {
@@ -70,6 +70,7 @@ export async function buildFullContext(options) {
     systemPromptBase = '',
     projectContext = null,      // For code workspace
     projectContextMode = 'full', // 'full' | 'light' for code workspace
+    chatProjectContext = null,  // For workspace-level project memory/instructions
     ragQuery = null,            // Query for document search
     modelContextLength = null,  // Real context length from /api/show (overrides guessing)
   } = options;
@@ -100,25 +101,30 @@ export async function buildFullContext(options) {
   // ═══════════════════════════════════════════════════════════════════════════
   // 2. PERSISTENT MEMORIES
   // ═══════════════════════════════════════════════════════════════════════════
-  try {
-    const memories = await api.memoryGetMemories?.({ workspace });
-    
-    if (memories?.length > 0) {
-      // Sort by importance and recency
-      const sortedMemories = memories
-        .sort((a, b) => (b.importance || 0) - (a.importance || 0))
-        .slice(0, 20); // Top 20 memories
+  const hasProjectScopedLinks = Array.isArray(chatProjectContext?.linkedConversationIds)
+    && chatProjectContext.linkedConversationIds.length > 0;
+
+  if (!hasProjectScopedLinks) {
+    try {
+      const memories = await api.memoryGetMemories?.({ workspace });
       
-      const memoryText = `## Things I Remember\n${sortedMemories.map(m => `- ${m.content}`).join('\n')}\n`;
-      const tokens = estimateTokens(memoryText);
-      
-      if (tokens <= budget.memories) {
-        contextParts.push({ type: 'memories', content: memoryText, tokens });
-        totalTokensUsed += tokens;
+      if (memories?.length > 0) {
+        // Sort by importance and recency
+        const sortedMemories = memories
+          .sort((a, b) => (b.importance || 0) - (a.importance || 0))
+          .slice(0, 20); // Top 20 memories
+        
+        const memoryText = `## Things I Remember\n${sortedMemories.map(m => `- ${m.content}`).join('\n')}\n`;
+        const tokens = estimateTokens(memoryText);
+        
+        if (tokens <= budget.memories) {
+          contextParts.push({ type: 'memories', content: memoryText, tokens });
+          totalTokensUsed += tokens;
+        }
       }
+    } catch (e) {
+      console.warn('[FullContext] Memories unavailable:', e);
     }
-  } catch (e) {
-    console.warn('[FullContext] Memories unavailable:', e);
   }
   
   // ═══════════════════════════════════════════════════════════════════════════
@@ -142,11 +148,48 @@ export async function buildFullContext(options) {
   }
   
   // ═══════════════════════════════════════════════════════════════════════════
+  // 4. CHAT PROJECT CONTEXT (Workspace project instructions + linked chats/docs)
+  // ═══════════════════════════════════════════════════════════════════════════
+  if (chatProjectContext && typeof chatProjectContext === 'object') {
+    const projectName = String(chatProjectContext.projectName || '').trim();
+    const projectInstructions = String(chatProjectContext.permanentInstructions || '').trim();
+    const conversationDigest = String(chatProjectContext.conversationDigest || '').trim();
+    const documentDigest = String(chatProjectContext.documentDigest || '').trim();
+
+    if (projectName) {
+      const projectText = [
+        `## Active Project Context: ${projectName}`,
+        projectInstructions ? `### Instructions\n${projectInstructions}` : '',
+        conversationDigest ? `### Linked Chats\n${conversationDigest}` : '',
+        documentDigest ? `### Linked Documents\n${documentDigest}` : '',
+      ].filter(Boolean).join('\n\n');
+
+      const tokens = estimateTokens(projectText);
+      const projectBudget = Math.max(budget.projectContext, Math.floor(budget.ragContext * 1.5));
+      if (tokens <= projectBudget) {
+        contextParts.push({ type: 'chatProjectContext', content: projectText, tokens, priority: 'high' });
+        totalTokensUsed += tokens;
+      }
+    }
+  }
+  
+  // ═══════════════════════════════════════════════════════════════════════════
   // 4. RAG CONTEXT (Relevant documents)
   // ═══════════════════════════════════════════════════════════════════════════
   if (ragQuery) {
     try {
-      const ragResults = await api.searchDocuments?.(workspace, ragQuery, 5);
+      let ragResults = await api.searchDocuments?.(workspace, ragQuery, 8);
+      const linkedDocIds = new Set(
+        Array.isArray(chatProjectContext?.linkedDocumentIds)
+          ? chatProjectContext.linkedDocumentIds.map((item) => String(item || '').trim()).filter(Boolean)
+          : []
+      );
+      if (linkedDocIds.size > 0 && Array.isArray(ragResults) && ragResults.length > 0) {
+        const focused = ragResults.filter((item) => linkedDocIds.has(String(item?.document_id || '').trim()));
+        if (focused.length > 0) {
+          ragResults = focused;
+        }
+      }
       
       if (ragResults?.length > 0) {
         const ragText = `## Relevant Documents\n${ragResults.map((r, i) => 
@@ -340,7 +383,7 @@ export async function buildFullContext(options) {
   const priorityOrder = { critical: 0, high: 1, normal: 2 };
   const typeOrder = [
     'userProfile', 'memories', 'pinnedMessages', 
-    'conversationSummary', 'projectContext', 'ragContext', 'recentMessages'
+    'conversationSummary', 'chatProjectContext', 'projectContext', 'ragContext', 'recentMessages'
   ];
   
   contextParts.sort((a, b) => {

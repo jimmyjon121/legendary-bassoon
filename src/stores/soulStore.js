@@ -199,10 +199,11 @@ export const useSoulStore = create(
           // Update circadian
           get().updateCircadian();
           
-          // Start circadian update interval
-          setInterval(() => {
+          if (get()._circadianTimer) clearInterval(get()._circadianTimer);
+          const timer = setInterval(() => {
             get().updateCircadian();
-          }, 60000); // Check every minute
+          }, 60000);
+          set({ _circadianTimer: timer });
           
         } catch (error) {
           console.error('[Soul] Failed to initialize:', error);

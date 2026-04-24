@@ -60,6 +60,10 @@ function truncateText(input = '', maxLen = 1200) {
   return `${text.slice(0, maxLen)}...`;
 }
 
+function isSyntheticModelSelection(model = '') {
+  return String(model || '').trim().toLowerCase().startsWith('npu:');
+}
+
 function unwrapToolPayload(result, fallbackError = 'Tool not available') {
   if (!result) {
     return { ok: false, error: fallbackError };
@@ -452,6 +456,18 @@ class AgentOrchestrator {
 
   async resolveToolExecutionModel(requestedModel) {
     const agentStore = useAgentStore.getState();
+    if (isSyntheticModelSelection(requestedModel)) {
+      agentStore.addLog(
+        `Model "${requestedModel}" uses the OpenVINO/NPU path. Skipping Ollama native-tool probing and forcing text-tool mode.`,
+        'info'
+      );
+      return {
+        model: requestedModel,
+        forceTextToolMode: true,
+        reason: 'synthetic_text_mode'
+      };
+    }
+
     const installed = await this.fetchInstalledModels();
     const resolvedRequested = this.resolveModelAlias(requestedModel, installed);
 
@@ -1682,6 +1698,28 @@ class AgentOrchestrator {
             agentStore.addLog(
               `Pass ${passNumber}: structured recovery failed: ${recoveryError?.message || 'unknown error'}`,
               'warn'
+            );
+          }
+        }
+
+        const executionReliability = finalImplementationResult?.reliabilityMetrics || implementationResult?.reliabilityMetrics || null;
+        const executionFailureReason = finalImplementationResult?.failureReasonCode || implementationResult?.failureReasonCode || null;
+        if (executionFailureReason) {
+          agentStore.addLog(
+            `Pass ${passNumber} reliability reason: ${executionFailureReason}`,
+            executionFailureReason.includes('max_') || executionFailureReason.includes('consecutive_') ? 'warn' : 'info'
+          );
+        }
+        if (executionReliability) {
+          const failureCount = Number(executionReliability.toolFailures || 0);
+          const blockedCount = Number(executionReliability.blockedCommands || 0);
+          const rollbackAttempts = Number(executionReliability.rollbackAttempts || 0);
+          const rollbackSucceeded = Number(executionReliability.rollbackSucceeded || 0);
+          const nativeFallbacks = Number(executionReliability.nativeToolFallbacks || 0);
+          if (failureCount > 0 || blockedCount > 0 || nativeFallbacks > 0) {
+            agentStore.addLog(
+              `Pass ${passNumber} reliability metrics: failures=${failureCount}, blocked=${blockedCount}, rollback=${rollbackSucceeded}/${rollbackAttempts}, nativeFallbacks=${nativeFallbacks}.`,
+              failureCount > 0 || blockedCount > 0 ? 'warn' : 'info'
             );
           }
         }

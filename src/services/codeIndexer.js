@@ -168,6 +168,8 @@ export async function buildCodeIndex(rootPath, tree, options = {}) {
     return currentIndex;
   }
 
+  await api.grantFsRoot(rootPath, 'code-indexer-root');
+
   const { forceRebuild = false, extractSymbolsFlag = true } = options;
   
   // Check if we can skip rebuild
@@ -197,7 +199,7 @@ export async function buildCodeIndex(rootPath, tree, options = {}) {
     
     await Promise.all(batch.map(async (filePath) => {
       try {
-        const content = await api.readFile(filePath);
+        const content = await api.readFileScoped(filePath, rootPath);
         if (!content) return;
         
         // Skip very large files (but still track them)

@@ -5,8 +5,10 @@
  * Provides state and hooks for adapting the UI based on the loaded model.
  */
 
+import { useMemo } from 'react';
 import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
+import { shallow } from 'zustand/shallow';
 
 /**
  * Model Experience Store
@@ -90,16 +92,21 @@ export const useModelExperience = create(
  * Hook for model-aware UI components
  */
 export function useModelAwareness() {
-  const { 
-    profile, 
-    modelFamily, 
-    capabilities, 
-    isLoading 
-  } = useModelExperience();
-  
-  return {
+  const { profile, modelFamily, primaryStrength, capabilities, isLoading } = useModelExperience(
+    (s) => ({
+      profile: s.profile,
+      modelFamily: s.modelFamily,
+      primaryStrength: s.primaryStrength,
+      capabilities: s.capabilities,
+      isLoading: s.isLoading,
+    }),
+    shallow
+  );
+
+  return useMemo(() => ({
     isModelLoaded: !!profile,
     modelFamily,
+    primaryStrength,
     capabilities,
     isLoading,
     
@@ -110,6 +117,14 @@ export function useModelAwareness() {
     
     // UI adaptation helpers
     shouldShowCodeActions: modelFamily === 'code' || (capabilities?.codeGeneration || 0) > 0.7,
+    getCapabilityLevel: (capability) => {
+      const score = Number(capabilities?.[capability] ?? 0.5);
+      if (score >= 0.9) return 'excellent';
+      if (score >= 0.75) return 'good';
+      if (score >= 0.55) return 'moderate';
+      if (score >= 0.35) return 'limited';
+      return 'minimal';
+    },
     
     // Get prompt suggestions based on model capabilities
     getPromptSuggestions: () => {
@@ -126,7 +141,7 @@ export function useModelAwareness() {
         'Write a story about...',
       ];
     },
-  };
+  }), [profile, modelFamily, primaryStrength, capabilities, isLoading]);
 }
 
 export default useModelExperience;

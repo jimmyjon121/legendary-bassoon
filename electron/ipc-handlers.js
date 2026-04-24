@@ -1,15 +1,15 @@
 /**
  * IPC Handlers - Main Entry Point
- * 
+ *
  * NOTE: This file is being refactored into modular domain handlers.
  * New handlers should be added to the appropriate file in electron/ipc/:
- * 
+ *
  * - system-handlers.js: Window, hardware, power, settings
  * - storage-handlers.js: Database, backup, export
  * - ai-handlers.js: LLM, RAG, whisper
  * - model-handlers.js: Downloads, conversion, library
  * - image-handlers.js: ComfyUI, image generation
- * 
+ *
  * This file is preserved for backwards compatibility and will be
  * gradually migrated to the modular architecture.
  */
@@ -19,45 +19,67 @@ const path = require('path');
 const fs = require('fs');
 const fsPromises = require('fs').promises;
 const crypto = require('crypto');
-const { spawn, spawnSync } = require('child_process');
+const { spawn } = require('child_process');
 const http = require('http');
 const https = require('https');
 const { setupWebSearchHandlers } = require('./ipc/web-search-handlers');
 const { setupCodeToolsHandlers } = require('./ipc/code-tools-handlers');
 const { setupResearchHandlers } = require('./ipc/research-handlers');
 const { validatePath } = require('./utils/pathValidator');
+const { DataService, registerDataHandlers } = require('./services/ipc/data-service');
+const { FsAccessService, registerFsScopedHandlers } = require('./services/ipc/fs-access-service');
+const { DatabaseWriter } = require('./services/database-writer');
+const deadSwitch = require('./services/dead-switch');
+const vaultSafety = require('./services/vault-safety');
+const vaultProfile = require('./services/vault-profile');
+const vaultLore = require('./services/vault-lore');
+const audioLayer = require('./services/audio-layer');
+const hapticBridge = require('./services/haptic-bridge');
+const characterEvolution = require('./services/character-evolution');
 
 // =============================================================================
 // LAZY SERVICE LOADING - Services are loaded on-demand for faster startup
 // =============================================================================
 const { getService, startIdleCleanup } = require('./services/lazy-loader');
 
-// Core services that need direct require (used at module level)
-const { getPowerMode } = require('./services/power-mode');
+// Lazy service accessors - loaded on first call instead of at startup
+const _getPowerMode = () => {
+  try { return require('./services/power-mode').getPowerMode; }
+  catch { return () => ({ enabled: false, enable: () => {}, disable: () => {} }); }
+};
+const getPowerMode = (...args) => _getPowerMode()(...args);
 
-// Optional model-inspection / model-experience services (graceful fallback)
-let inspectModelFn = null;
-let autoTuneModelFn = null;
-let getModelExperienceManagerFn = null;
-
-try {
-  inspectModelFn = require('./services/model-inspector').inspectModel;
-} catch (error) {
-  console.warn('[IPC] Model inspector unavailable:', error.message);
+let _inspectModelFn;
+function inspectModelFn(...args) {
+  if (_inspectModelFn === undefined) {
+    try { _inspectModelFn = require('./services/model-inspector').inspectModel; }
+    catch { _inspectModelFn = null; }
+  }
+  return _inspectModelFn ? _inspectModelFn(...args) : null;
 }
 
-try {
-  autoTuneModelFn = require('./services/auto-tuner').autoTuneModel;
-} catch (error) {
-  console.warn('[IPC] Auto-tuner unavailable:', error.message);
+let _autoTuneModelFn;
+function autoTuneModelFn(...args) {
+  if (_autoTuneModelFn === undefined) {
+    try { _autoTuneModelFn = require('./services/auto-tuner').autoTuneModel; }
+    catch { _autoTuneModelFn = null; }
+  }
+  return _autoTuneModelFn ? _autoTuneModelFn(...args) : null;
 }
 
-try {
-  getModelExperienceManagerFn =
-    require('./services/model-experience-manager').getModelExperienceManager;
-} catch (error) {
-  console.warn('[IPC] Model Experience Manager unavailable:', error.message);
+let _getModelExperienceManagerFn;
+function getModelExperienceManagerFn(...args) {
+  if (_getModelExperienceManagerFn === undefined) {
+    try { _getModelExperienceManagerFn = require('./services/model-experience-manager').getModelExperienceManager; }
+    catch { _getModelExperienceManagerFn = null; }
+  }
+  return _getModelExperienceManagerFn ? _getModelExperienceManagerFn(...args) : null;
 }
+
+const {
+  buildExecutionPlan,
+  getNormalizedModelInfo,
+} = require('./services/llm-execution-resolver');
 
 // =============================================================================
 // LAZY SERVICE GETTERS - Only load when first accessed
@@ -66,16 +88,133 @@ try {
 // Hardware & System
 const _getHardwareDetection = () => getService('hardware-detection');
 const getNpuBridge = () => getService('npu-bridge')?.getNpuBridge?.() || null;
-const npuSetupService = { 
-  get runOpenVinoSetup() { return getService('npu-setup')?.runOpenVinoSetup; },
-  get checkDrivers() { return getService('npu-setup')?.checkDrivers; },
-  get installDrivers() { return getService('npu-setup')?.installDrivers; },
-  get getInstallationProgress() { return getService('npu-setup')?.getInstallationProgress; },
+const _getNpuSetupService = () => {
+  const moduleValue = getService('npu-setup');
+  if (!moduleValue) return null;
+  if (typeof moduleValue === 'function') {
+    return { runOpenVinoSetup: moduleValue };
+  }
+  if (moduleValue && typeof moduleValue === 'object') {
+    if (moduleValue.default && typeof moduleValue.default === 'object') {
+      return { ...moduleValue.default, ...moduleValue };
+    }
+    return moduleValue;
+  }
+  return null;
+};
+
+const _resolveRunOpenVinoSetup = () => {
+  const fromLazy = _getNpuSetupService();
+  const candidates = [
+    fromLazy?.runOpenVinoSetup,
+    fromLazy?.runOpenVINOSetup,
+  ];
+
+  // Fallback to a direct require in case lazy-loader module shape differs.
+  try {
+    const direct = require('./services/npu-setup');
+    candidates.push(
+      direct?.runOpenVinoSetup,
+      direct?.runOpenVINOSetup,
+      direct?.default?.runOpenVinoSetup,
+      direct?.default?.runOpenVINOSetup,
+    );
+  } catch (_error) {}
+
+  return candidates.find((candidate) => typeof candidate === 'function') || null;
+};
+
+const runOpenVinoSetupWithFallback = async () => {
+  const resolvedAppPath = app.getAppPath();
+  const resourcesPath = process.resourcesPath || null;
+  const directRunner = _resolveRunOpenVinoSetup();
+  if (typeof directRunner === 'function') {
+    return directRunner(resolvedAppPath);
+  }
+
+  // Last-resort fallback: invoke the setup script directly.
+  const candidates = [
+    resolvedAppPath ? path.join(resolvedAppPath, 'scripts', 'setup-openvino.ps1') : null,
+    resolvedAppPath && String(resolvedAppPath).includes('app.asar')
+      ? path.join(String(resolvedAppPath).replace('app.asar', 'app.asar.unpacked'), 'scripts', 'setup-openvino.ps1')
+      : null,
+    resourcesPath ? path.join(resourcesPath, 'app.asar.unpacked', 'scripts', 'setup-openvino.ps1') : null,
+    resourcesPath ? path.join(resourcesPath, 'scripts', 'setup-openvino.ps1') : null,
+    path.join(process.cwd(), 'scripts', 'setup-openvino.ps1'),
+    path.join(__dirname, '../scripts/setup-openvino.ps1'),
+  ].filter(Boolean);
+
+  const scriptPath = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!scriptPath) {
+    const moduleValue = _getNpuSetupService();
+    return {
+      success: false,
+      error: 'OpenVINO setup helper unavailable and setup script not found',
+      diagnostics: {
+        moduleType: typeof moduleValue,
+        moduleKeys: moduleValue && typeof moduleValue === 'object' ? Object.keys(moduleValue) : [],
+        checkedScripts: candidates,
+      },
+    };
+  }
+
+  if (process.platform !== 'win32') {
+    return {
+      success: false,
+      error: 'OpenVINO setup is only supported on Windows',
+      scriptPath,
+    };
+  }
+
+  return new Promise((resolve) => {
+    const workingDir = path.dirname(path.dirname(scriptPath));
+    const child = spawn(
+      'powershell.exe',
+      ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
+      {
+        cwd: workingDir,
+        windowsHide: true,
+      },
+    );
+
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (data) => {
+      stdout += data.toString();
+    });
+
+    child.stderr.on('data', (data) => {
+      stderr += data.toString();
+    });
+
+    child.on('error', (error) => {
+      resolve({
+        success: false,
+        error: error.message,
+        scriptPath,
+        cwd: workingDir,
+        stdout,
+        stderr,
+      });
+    });
+
+    child.on('close', (code) => {
+      resolve({
+        success: code === 0,
+        code,
+        scriptPath,
+        cwd: workingDir,
+        stdout,
+        stderr,
+      });
+    });
+  });
 };
 
 // AI Orchestration
 const getOrchestrator = () => getService('inference-orchestrator')?.getOrchestrator?.() || null;
-const getModelManager = () => getService('model-manager')?.getModelManager?.() || null;
+const getModelManager = (config = undefined) => getService('model-manager')?.getModelManager?.(config) || null;
 // These are factory functions that need arguments
 const getOllamaHelperFactory = () => getService('ollama-helper')?.getOllamaHelper || null;
 const getImageBackendHelperFactory = () => getService('image-backend-helper')?.getImageBackendHelper || null;
@@ -227,21 +366,126 @@ const hardwareDetection = new Proxy({}, {
 let db = null;
 let dbPath = null;
 let SQL = null;
+let dbWriter = null;
 const agentRunProgressState = {
   snapshot: null,
   updatedAt: 0,
 };
+const deprecatedIpcCounters = new Map();
+const perfSubscribers = new Set();
+let perfMainWindow = null;
+const perfState = {
+  renderer: {
+    inputLatencyMs: { p50: null, p95: null, samples: 0 },
+    droppedFrames: { total: 0, recent: 0 },
+    streaming: { updatesPerSecond: 0, longTaskCount: 0 },
+  },
+  main: {
+    eventLoopLagMs: { p50: null, p95: null, max: 0 },
+    dbSaves: { count: 0, avgDurationMs: 0, lastDurationMs: 0, lastReason: null, failed: 0 },
+  },
+  updatedAt: 0,
+};
+const eventLoopLagSamples = [];
+let eventLoopLagTimer = null;
 
-const TERMINAL_ALLOWED_COMMANDS = [
-  /^npm (test|run (lint|build|typecheck|format|dev|start)|install)(\s|$)/i,
-  /^yarn (test|lint|build|typecheck|format|dev|start|install)(\s|$)/i,
-  /^pnpm (test|lint|build|typecheck|format|dev|start|install)(\s|$)/i,
-  /^npx (eslint|prettier|tsc|jest|vitest|playwright)(\s|$)/i,
-  /^git (status|diff|log|branch|show|blame|add|commit)(\s|$)/i,
-  /^node(\s|$)/i,
-  /^python(\s|$)/i,
-  /^python3(\s|$)/i,
-  /^powershell\s+-ExecutionPolicy\s+Bypass\s+-File\s+scripts[\\/]+setup-openvino\.ps1$/i,
+function computePercentile(samples, percentile) {
+  if (!Array.isArray(samples) || samples.length === 0) return null;
+  const sorted = [...samples].sort((a, b) => a - b);
+  const index = Math.max(0, Math.min(sorted.length - 1, Math.ceil((percentile / 100) * sorted.length) - 1));
+  return Math.round(sorted[index] * 100) / 100;
+}
+
+function getPerfSnapshot() {
+  return {
+    ...perfState,
+    updatedAt: Date.now(),
+  };
+}
+
+function emitPerfSnapshot() {
+  if (perfSubscribers.size === 0) return;
+  if (!perfMainWindow || perfMainWindow.isDestroyed()) return;
+  perfMainWindow.webContents.send('perf:snapshot', getPerfSnapshot());
+}
+
+function updateDbSavePerf({ durationMs = 0, reason = 'unknown', success = true } = {}) {
+  const dbStats = perfState.main.dbSaves;
+  const nextCount = dbStats.count + (success ? 1 : 0);
+  if (success) {
+    dbStats.avgDurationMs = nextCount > 0
+      ? Math.round((((dbStats.avgDurationMs * dbStats.count) + durationMs) / nextCount) * 100) / 100
+      : durationMs;
+    dbStats.count = nextCount;
+    dbStats.lastDurationMs = durationMs;
+    dbStats.lastReason = reason;
+  } else {
+    dbStats.failed += 1;
+    dbStats.lastReason = reason;
+  }
+  perfState.updatedAt = Date.now();
+  emitPerfSnapshot();
+}
+
+function updateRendererPerfSnapshot(payload = {}) {
+  if (!payload || typeof payload !== 'object') return;
+  perfState.renderer = {
+    ...perfState.renderer,
+    ...payload,
+  };
+  perfState.updatedAt = Date.now();
+  emitPerfSnapshot();
+}
+
+function startEventLoopLagMonitor() {
+  if (eventLoopLagTimer) return;
+  let expected = Date.now() + 1000;
+
+  eventLoopLagTimer = setInterval(() => {
+    const now = Date.now();
+    const lag = Math.max(0, now - expected);
+    expected = now + 1000;
+
+    eventLoopLagSamples.push(lag);
+    if (eventLoopLagSamples.length > 120) {
+      eventLoopLagSamples.shift();
+    }
+
+    perfState.main.eventLoopLagMs = {
+      p50: computePercentile(eventLoopLagSamples, 50),
+      p95: computePercentile(eventLoopLagSamples, 95),
+      max: Math.round(Math.max(...eventLoopLagSamples, 0) * 100) / 100,
+    };
+    perfState.updatedAt = Date.now();
+    emitPerfSnapshot();
+  }, 1000);
+}
+
+function trackDeprecatedIpc(channel, replacement = '') {
+  const count = (deprecatedIpcCounters.get(channel) || 0) + 1;
+  deprecatedIpcCounters.set(channel, count);
+  if (count <= 3 || count % 25 === 0) {
+    const suffix = replacement ? ` Use ${replacement} instead.` : '';
+    console.warn(`[IPC][Deprecated] ${channel} invoked (${count}).${suffix}`);
+  }
+}
+
+const TERMINAL_BLOCKED_BINARIES = new Set([
+  'format', 'diskpart', 'regedit', 'reg', 'shutdown', 'restart',
+  'bcdedit', 'bcdboot', 'bootrec', 'sfc', 'dism', 'cipher',
+  'takeown', 'icacls', 'cacls', 'net', 'netsh', 'sc', 'runas',
+  'wmic', 'powercfg', 'chkdsk', 'fdisk', 'mkfs', 'dd', 'mount',
+  'umount', 'fsck', 'parted', 'crontab', 'systemctl', 'service',
+  'useradd', 'userdel', 'usermod', 'passwd', 'chown', 'chmod',
+  'iptables', 'ufw', 'firewall-cmd', 'visudo', 'su',
+]);
+
+const TERMINAL_BLOCKED_PATTERNS = [
+  /rm\s+(-[a-z]*f[a-z]*\s+)?[/\\]/i,
+  /del\s+[/\\]/i,
+  /rmdir\s+[/\\]/i,
+  /rd\s+[/\\]/i,
+  />\s*(\/dev\/sd|[A-Z]:\\Windows|[A-Z]:\\System)/i,
 ];
 
 function tokenizeCommand(command = '') {
@@ -255,7 +499,10 @@ function isTerminalCommandAllowed(command = '') {
   if (/[;&|`<>]/.test(trimmed) || /\$\(/.test(trimmed) || /[\r\n]/.test(trimmed)) {
     return false;
   }
-  return TERMINAL_ALLOWED_COMMANDS.some((pattern) => pattern.test(trimmed));
+  const binary = (trimmed.split(/\s+/)[0] || '').toLowerCase().replace(/\.exe$/i, '');
+  if (TERMINAL_BLOCKED_BINARIES.has(binary)) return false;
+  if (TERMINAL_BLOCKED_PATTERNS.some((p) => p.test(trimmed))) return false;
+  return true;
 }
 
 function resolveTerminalCwd(requestedCwd) {
@@ -417,13 +664,13 @@ function parseGitStatusOutput(stdout = '') {
   return status;
 }
 
-async function initDatabase(userDataPath) {
+async function initDatabase(userDataPath, store = null) {
   // Load sql.js
   const initSqlJs = require('sql.js');
   SQL = await initSqlJs();
-  
+
   dbPath = path.join(userDataPath, 'devforge.db');
-  
+
   // Load existing database or create new one
   try {
     if (fs.existsSync(dbPath)) {
@@ -438,7 +685,7 @@ async function initDatabase(userDataPath) {
     console.error('Error loading database, creating new one:', error);
     db = new SQL.Database();
   }
-  
+
   // Create tables
   db.run(`
     CREATE TABLE IF NOT EXISTS conversations (
@@ -451,7 +698,7 @@ async function initDatabase(userDataPath) {
       encrypted INTEGER DEFAULT 0
     )
   `);
-    
+
   db.run(`
     CREATE TABLE IF NOT EXISTS messages (
       id TEXT PRIMARY KEY,
@@ -464,7 +711,7 @@ async function initDatabase(userDataPath) {
       FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
     )
   `);
-    
+
   db.run(`
     CREATE TABLE IF NOT EXISTS generated_images (
       id TEXT PRIMARY KEY,
@@ -479,7 +726,7 @@ async function initDatabase(userDataPath) {
       FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE SET NULL
     )
   `);
-    
+
   db.run(`
     CREATE TABLE IF NOT EXISTS characters (
       id TEXT PRIMARY KEY,
@@ -493,7 +740,7 @@ async function initDatabase(userDataPath) {
       updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
-    
+
   db.run(`
     CREATE TABLE IF NOT EXISTS nsfw_auth (
       id TEXT PRIMARY KEY,
@@ -515,7 +762,7 @@ async function initDatabase(userDataPath) {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
-  
+
   db.run(`
     CREATE TABLE IF NOT EXISTS model_presets (
       id TEXT PRIMARY KEY,
@@ -563,6 +810,21 @@ async function initDatabase(userDataPath) {
       parent_branch_id TEXT,
       name TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
+  db.run(`
+    CREATE TABLE IF NOT EXISTS message_attachments (
+      id TEXT PRIMARY KEY,
+      message_id TEXT NOT NULL,
+      type TEXT,
+      file_path TEXT NOT NULL,
+      mime_type TEXT,
+      original_name TEXT,
+      size INTEGER,
+      encrypted INTEGER DEFAULT 0,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (message_id) REFERENCES messages(id) ON DELETE CASCADE
     )
   `);
 
@@ -710,7 +972,7 @@ async function initDatabase(userDataPath) {
     )
   `);
 
-  // Backwards‑compatible schema migrations for branch support
+  // Backwardsâ€‘compatible schema migrations for branch support
   try {
     db.run(`ALTER TABLE messages ADD COLUMN branch_id TEXT`);
   } catch (error) {
@@ -721,7 +983,7 @@ async function initDatabase(userDataPath) {
   } catch (error) {
     // Ignore if column already exists
   }
-  
+
   // Organization system migrations (folders, tags, pinned, starred)
   try {
     db.run(`ALTER TABLE conversations ADD COLUMN pinned INTEGER DEFAULT 0`);
@@ -753,7 +1015,7 @@ async function initDatabase(userDataPath) {
   } catch (error) {
     // Column already exists
   }
-  
+
   // Folders table for conversation organization (workspace-scoped)
   db.run(`
     CREATE TABLE IF NOT EXISTS folders (
@@ -767,10 +1029,14 @@ async function initDatabase(userDataPath) {
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
-  
+
   // Create indexes
   db.run(`CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_messages_conversation_created_at ON messages(conversation_id, created_at)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_message_attachments_message ON message_attachments(message_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_conversations_workspace ON conversations(workspace)`);
+  db.run(`CREATE INDEX IF NOT EXISTS idx_conversations_workspace_updated_at ON conversations(workspace, updated_at)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_images_workspace ON generated_images(workspace)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_conv_folder ON conversations(folder_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_conv_starred ON conversations(starred)`);
@@ -783,7 +1049,21 @@ async function initDatabase(userDataPath) {
   db.run(`CREATE INDEX IF NOT EXISTS idx_research_evidence_record ON research_evidence(record_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_research_project_conv_project ON research_project_conversations(project_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_research_project_doc_project ON research_project_documents(project_id)`);
-  
+
+  if (!dbWriter && dbPath) {
+    try {
+      dbWriter = new DatabaseWriter({
+        getDb: () => db,
+        dbPath,
+        coalesceMs: 500,
+        logger: console,
+      });
+    } catch (error) {
+      console.error('[DatabaseWriter] Failed to initialize:', error.message);
+      dbWriter = null;
+    }
+  }
+
   // Initialize Memory Engine for long conversation support
   try {
     const { getMemoryEngine } = require('./services/memory-engine');
@@ -793,44 +1073,99 @@ async function initDatabase(userDataPath) {
   } catch (error) {
     console.error('Failed to initialize Memory Engine:', error);
   }
-  
-  // Initialize Soul Engine for personality persistence
-  try {
-    const { getSoulEngine } = require('./services/soul-engine');
-    const soulEngine = getSoulEngine();
-    soulEngine.init(db);
-    console.log('Soul Engine awakened');
-  } catch (error) {
-    console.error('Failed to initialize Soul Engine:', error);
+
+  // Initialize Soul Engine for personality persistence (opt-in, disabled by default)
+  const soulEngineEnabled = Boolean(store?.get?.('soul_engine_enabled'));
+  if (soulEngineEnabled) {
+    try {
+      const { getSoulEngine } = require('./services/soul-engine');
+      const soulEngine = getSoulEngine();
+      soulEngine.init(db);
+      console.log('Soul Engine awakened');
+    } catch (error) {
+      console.error('Failed to initialize Soul Engine:', error);
+    }
+  } else {
+    console.log('Soul Engine initialization skipped (disabled)');
   }
-  
+
   // Save to disk
-  saveDatabase();
-  
+  await saveDatabase({ reason: 'db-init', priority: 'high', sync: true });
+
   return db;
 }
 
-function saveDatabase() {
-  if (db && dbPath) {
-    try {
-      const data = db.export();
-      const buffer = Buffer.from(data);
-      fs.writeFileSync(dbPath, buffer);
-    } catch (error) {
-      console.error('Failed to save database:', error);
-    }
+function saveDatabaseSync(reason = 'manual-sync') {
+  if (!db || !dbPath) {
+    return { success: false, skipped: true, reason: 'db_not_ready' };
+  }
+
+  const startedAt = Date.now();
+  try {
+    const data = db.export();
+    const buffer = Buffer.from(data);
+    fs.writeFileSync(dbPath, buffer);
+    updateDbSavePerf({ durationMs: Date.now() - startedAt, reason, success: true });
+    return { success: true, sync: true };
+  } catch (error) {
+    console.error('Failed to save database (sync):', error);
+    updateDbSavePerf({ reason, success: false });
+    return { success: false, error: error.message };
   }
 }
 
+function saveDatabase(options = {}) {
+  const normalized = options && typeof options === 'object' ? options : {};
+  const reason = normalized.reason || 'manual';
+  const priority = normalized.priority || 'normal';
+  const forceSync = normalized.sync === true;
+
+  if (forceSync || !dbWriter) {
+    return saveDatabaseSync(reason);
+  }
+
+  return dbWriter
+    .enqueueDbSave({ reason, priority })
+    .then((result) => {
+      updateDbSavePerf({
+        durationMs: Number(result?.durationMs) || 0,
+        reason,
+        success: true,
+      });
+      return { success: true, ...result };
+    })
+    .catch((error) => {
+      console.error('Failed to save database:', error);
+      updateDbSavePerf({ reason, success: false });
+      return { success: false, error: error.message };
+    });
+}
+
+function flushDbSaves() {
+  const result = saveDatabase({ reason: 'flush', priority: 'high' });
+  return result && typeof result.then === 'function'
+    ? result
+    : Promise.resolve(result);
+}
+
+function shutdownDbWriter() {
+  if (!dbWriter) {
+    return Promise.resolve({ success: true, skipped: true });
+  }
+  return dbWriter.shutdownDbWriter();
+}
+
 // Auto-save database periodically
-setInterval(saveDatabase, 30000); // Every 30 seconds
+setInterval(() => {
+  void saveDatabase({ reason: 'autosave', priority: 'low' });
+}, 30000);
 
 // HTTP/HTTPS request helper
 function makeRequest(url, options = {}) {
   return new Promise((resolve, reject) => {
     const protocol = url.startsWith('https') ? https : http;
     const urlObj = new URL(url);
-    
+
     const reqOptions = {
       hostname: urlObj.hostname,
       port: urlObj.port,
@@ -839,7 +1174,7 @@ function makeRequest(url, options = {}) {
       headers: options.headers || {},
       timeout: options.timeout || 30000
     };
-    
+
     const req = protocol.request(reqOptions, (res) => {
       let data = '';
       res.on('data', chunk => data += chunk);
@@ -851,23 +1186,108 @@ function makeRequest(url, options = {}) {
         }
       });
     });
-    
+
     req.on('error', reject);
     req.on('timeout', () => {
       req.destroy();
       reject(new Error('Request timeout'));
     });
-    
+
     if (options.body) {
       req.write(JSON.stringify(options.body));
     }
-    
+
     req.end();
   });
 }
 
 // Track active streaming requests for cancellation
 const activeStreams = new Map();
+
+/**
+ * Cancel all in-flight LLM streams (used at app shutdown / window close so we
+ * don't leave orphaned inferences consuming GPU memory on the backend).
+ * Best-effort and synchronous-by-default: we kick off orchestrator.cancel()
+ * without awaiting to avoid delaying quit.
+ */
+function cancelAllActiveStreams(reason = 'shutdown') {
+  if (!activeStreams || activeStreams.size === 0) return 0;
+  const entries = Array.from(activeStreams.entries());
+  activeStreams.clear();
+  for (const [channel, req] of entries) {
+    try {
+      if (req?.kind === 'orchestrator' && req.requestId && typeof orchestrator?.cancel === 'function') {
+        // Fire and forget - don't block quit on orchestrator cancellation
+        Promise.resolve(orchestrator.cancel(req.requestId)).catch(() => {});
+      } else if (typeof req?.destroy === 'function') {
+        req.destroy();
+      } else if (typeof req?.request?.destroy === 'function') {
+        req.request.destroy();
+      }
+    } catch (error) {
+      // Log but do not throw - shutdown must continue
+      try { console.warn(`[LLM Stream] Cancel-on-${reason} failed for ${channel}:`, error.message); } catch (_) { /* noop */ }
+    }
+  }
+  try { console.log(`[LLM Stream] Cancelled ${entries.length} active stream(s) on ${reason}`); } catch (_) { /* noop */ }
+  try { hapticBridge.stop(); } catch (_) { /* noop */ }
+  try { audioLayer.stop(); } catch (_) { /* noop */ }
+  return entries.length;
+}
+
+/**
+ * Classify a raw LLM/backend error into a user-actionable message.
+ * Kept in one place so llm:send and llm:stream report the same UX.
+ */
+function classifyLlmError(error, context = {}) {
+  const { endpoint, model, backendId } = context || {};
+  const rawMessage = error?.message || String(error) || 'unknown error';
+  const code = error?.code || error?.cause?.code || null;
+  const displayModel = model || '(unspecified)';
+
+  let friendly;
+  if (code === 'ECONNREFUSED' || /ECONNREFUSED|connect ECONNREFUSED/i.test(rawMessage)) {
+    friendly = `LLM backend is not reachable${endpoint ? ` at ${endpoint}` : ''}. The local model service may still be starting up — try again in a few seconds.`;
+  } else if (code === 'ETIMEDOUT' || /ETIMEDOUT|timed out|timeout/i.test(rawMessage)) {
+    friendly = `LLM request timed out while generating with model "${displayModel}". Try a shorter prompt, smaller context, or a faster model.`;
+  } else if (/model .* not found|pull .* model|no such (file|model)/i.test(rawMessage)) {
+    friendly = `Model "${displayModel}" is not installed. Download it from the Model Hub or run "ollama pull ${displayModel}".`;
+  } else if (/out of memory|oom|cuda.*memory/i.test(rawMessage)) {
+    friendly = `Ran out of memory while loading "${displayModel}". Try a smaller model or reduce context length.`;
+  } else if (/ECONNRESET|socket hang up/i.test(rawMessage)) {
+    friendly = `Connection to the LLM backend was reset mid-request. The backend may have crashed — check logs or retry.`;
+  } else {
+    friendly = `LLM request failed (model="${displayModel}"${backendId ? `, backend=${backendId}` : ''}): ${rawMessage}`;
+  }
+
+  const wrapped = new Error(friendly);
+  wrapped.code = code || 'LLM_REQUEST_FAILED';
+  wrapped.cause = error;
+  wrapped.classified = true;
+  return wrapped;
+}
+
+/**
+ * Poll the Ollama /api/tags endpoint until it responds or we time out.
+ * Used as a short readiness wait so a chat sent while the backend is still
+ * booting doesn't hard-fail - instead we give it up to ~8 seconds to come up.
+ */
+async function waitForBackendReady(endpoint, maxWaitMs = 8000) {
+  if (!endpoint) return false;
+  const deadline = Date.now() + Math.max(500, maxWaitMs);
+  let delay = 400;
+  while (Date.now() < deadline) {
+    try {
+      const res = await makeRequest(`${endpoint}/api/tags`, { timeout: 1500 });
+      if (res && res.status >= 200 && res.status < 500) return true;
+    } catch (_) {
+      // keep polling
+    }
+    await new Promise((r) => setTimeout(r, delay));
+    delay = Math.min(Math.round(delay * 1.5), 1500);
+  }
+  return false;
+}
 
 // Retry configuration
 const RETRY_CONFIG = {
@@ -891,24 +1311,24 @@ const RETRY_CONFIG = {
 function isRetryableError(error) {
   const errorMsg = error?.message?.toLowerCase() || '';
   const errorCode = error?.code || '';
-  
+
   // Check error codes
   if (RETRY_CONFIG.retryableErrors.includes(errorCode)) {
     return true;
   }
-  
+
   // Check error messages
   for (const retryable of RETRY_CONFIG.retryableErrors) {
     if (errorMsg.includes(retryable.toLowerCase())) {
       return true;
     }
   }
-  
+
   // Also retry on generic connection errors
   if (errorMsg.includes('connect') || errorMsg.includes('network') || errorMsg.includes('timeout')) {
     return true;
   }
-  
+
   return false;
 }
 
@@ -920,26 +1340,26 @@ function isRetryableError(error) {
  */
 async function withRetry(fn, options = {}, onRetry = null) {
   const { maxRetries = RETRY_CONFIG.maxRetries, baseDelay = RETRY_CONFIG.baseDelay } = options;
-  
+
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     try {
       return await fn();
     } catch (error) {
       const isLastAttempt = attempt === maxRetries;
       const shouldRetry = !isLastAttempt && isRetryableError(error);
-      
+
       if (!shouldRetry) {
         throw error;
       }
-      
+
       const delay = baseDelay * Math.pow(2, attempt); // Exponential backoff: 1s, 2s, 4s
       console.log(`[LLM] Retry ${attempt + 1}/${maxRetries} after error: ${error.message}. Waiting ${delay}ms...`);
-      
+
       // Notify UI about retry
       if (onRetry) {
         onRetry({ retrying: true, attempt: attempt + 1, maxRetries, delay, error: error.message });
       }
-      
+
       await new Promise(resolve => setTimeout(resolve, delay));
     }
   }
@@ -951,7 +1371,7 @@ function streamRequest(url, body, onChunk, channel) {
     const protocol = url.startsWith('https') ? https : http;
     const urlObj = new URL(url);
     const bodyStr = JSON.stringify(body);
-    
+
     const reqOptions = {
       hostname: urlObj.hostname,
       port: urlObj.port,
@@ -962,10 +1382,10 @@ function streamRequest(url, body, onChunk, channel) {
         'Content-Length': Buffer.byteLength(bodyStr),
       }
     };
-    
+
     // Buffer to handle partial JSON chunks split across TCP packets
     let buffer = '';
-    
+
     const req = protocol.request(reqOptions, (res) => {
       // Validate HTTP status code
       if (res.statusCode !== 200) {
@@ -1017,7 +1437,7 @@ function streamRequest(url, body, onChunk, channel) {
         resolve();
       });
     });
-    
+
     req.on('error', (error) => {
       activeStreams.delete(channel);
       reject(error);
@@ -1029,12 +1449,12 @@ function streamRequest(url, body, onChunk, channel) {
       activeStreams.delete(channel);
       reject(new Error('Request timeout (5 minutes)'));
     });
-    
+
     // Store request for cancellation
     if (channel) {
       activeStreams.set(channel, req);
     }
-    
+
     req.write(bodyStr);
     req.end();
   });
@@ -1174,8 +1594,10 @@ function extractLastUserImages(messages = []) {
 
 function isSimpleGreeting(text) {
   if (!text || typeof text !== 'string') return false;
-  return /^(hi|hello|hey|yo|sup|how are you|good morning|good afternoon|good evening|what's up|whats up)[!.? ]*$/i
-    .test(text.trim());
+  const value = text.trim().toLowerCase();
+  if (!value || value.length > 80) return false;
+  return /^(hi|hello|hey|yo|sup)( there| again)?[!.? ]*$|^(how are you|good morning|good afternoon|good evening|what's up|whats up)[!.? ]*$/i
+    .test(value);
 }
 
 function isLikelyCodeRequest(text) {
@@ -1240,13 +1662,21 @@ async function buildGenerateCompatRequest(endpoint, modelName, systemPrompt, mes
       : 'You are a helpful assistant. Reply naturally and directly in a concise way.')
     : (systemPrompt || '');
 
-  const cappedCtx = isGptOss ? 8192 : 16384;
+  // gpt-oss raw template produces malformed output past 8K tokens, so the
+  // cap is a model-specific workaround, not a general policy. Other raw-
+  // template models get their real num_ctx through — upstream
+  // clampInferenceOptionsToModel already bounds it against n_ctx_train.
   const cappedPredict = greetingLike ? 96 : (isGptOss ? 384 : 768);
+
+  const baseCtx = Number.isFinite(baseOptions.num_ctx) ? baseOptions.num_ctx : null;
+  const resolvedCtx = isGptOss
+    ? Math.min(baseCtx ?? 8192, 8192)
+    : (baseCtx ?? 16384);
 
   const options = {
     ...baseOptions,
     repeat_penalty: Math.max(1.1, baseOptions.repeat_penalty || 1.05),
-    num_ctx: Number.isFinite(baseOptions.num_ctx) ? Math.min(baseOptions.num_ctx, cappedCtx) : cappedCtx,
+    num_ctx: resolvedCtx,
     num_predict: Number.isFinite(baseOptions.num_predict) ? Math.min(baseOptions.num_predict, cappedPredict) : cappedPredict,
     temperature: greetingLike
       ? Math.min(Math.max(baseOptions.temperature ?? 0.2, 0.2), 0.35)
@@ -1297,6 +1727,133 @@ async function buildGenerateCompatRequest(endpoint, modelName, systemPrompt, mes
   };
 }
 
+const INFERENCE_LIMITS = {
+  modelNameMax: 256,
+  promptMaxChars: 160000,
+  systemMaxChars: 64000,
+  messagesMax: 120,
+  messageContentMaxChars: 64000,
+  imagesMax: 8,
+  imageStringMaxChars: 8_500_000,
+  toolsMax: 64,
+};
+
+function clampNumber(value, min, max, fallback = min) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(max, Math.max(min, numeric));
+}
+
+function clampInteger(value, min, max, fallback = min) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(max, Math.max(min, Math.floor(numeric)));
+}
+
+function sanitizeText(value, maxChars) {
+  if (typeof value !== 'string') return '';
+  return value.slice(0, maxChars);
+}
+
+function sanitizeOptionSet(rawOptions = {}) {
+  if (!rawOptions || typeof rawOptions !== 'object') return {};
+
+  const next = { ...rawOptions };
+  if ('temperature' in next) next.temperature = clampNumber(next.temperature, 0, 2, 0.7);
+  if ('top_p' in next) next.top_p = clampNumber(next.top_p, 0, 1, 0.9);
+  if ('top_k' in next) next.top_k = clampInteger(next.top_k, 1, 2000, 40);
+  if ('repeat_penalty' in next) next.repeat_penalty = clampNumber(next.repeat_penalty, 0.8, 2.5, 1.05);
+  if ('num_ctx' in next) next.num_ctx = clampInteger(next.num_ctx, 256, 262144, 8192);
+  if ('num_predict' in next) next.num_predict = clampInteger(next.num_predict, 1, 32768, 512);
+  if ('num_batch' in next) next.num_batch = clampInteger(next.num_batch, 1, 8192, 256);
+  if ('num_gpu' in next) next.num_gpu = clampInteger(next.num_gpu, -1, 4096, -1);
+  if ('num_thread' in next) next.num_thread = clampInteger(next.num_thread, 1, 256, 8);
+  if ('presence_penalty' in next) next.presence_penalty = clampNumber(next.presence_penalty, -2, 2, 0);
+  if ('frequency_penalty' in next) next.frequency_penalty = clampNumber(next.frequency_penalty, -2, 2, 0);
+
+  if (Array.isArray(next.stop)) {
+    next.stop = next.stop
+      .filter((item) => typeof item === 'string' && item.length > 0)
+      .slice(0, 32)
+      .map((item) => item.slice(0, 200));
+  } else if ('stop' in next) {
+    delete next.stop;
+  }
+
+  return next;
+}
+
+function sanitizeInferenceInput(rawPayload = {}) {
+  if (!rawPayload || typeof rawPayload !== 'object') {
+    throw new Error('Inference payload must be an object');
+  }
+
+  const model = String(rawPayload.model || '').trim().slice(0, INFERENCE_LIMITS.modelNameMax);
+  if (!model) {
+    throw new Error('Model is required');
+  }
+
+  const messages = Array.isArray(rawPayload.messages)
+    ? rawPayload.messages
+        .slice(-INFERENCE_LIMITS.messagesMax)
+        .map((msg) => {
+          if (!msg || typeof msg !== 'object') return null;
+          const role = msg.role === 'assistant' ? 'assistant' : (msg.role === 'system' ? 'system' : 'user');
+          const content = sanitizeText(msg.content, INFERENCE_LIMITS.messageContentMaxChars).trim();
+          if (!content) return null;
+
+          const out = { role, content };
+          if (Array.isArray(msg.images) && msg.images.length > 0) {
+            out.images = msg.images
+              .filter((image) => typeof image === 'string' && image.length <= INFERENCE_LIMITS.imageStringMaxChars)
+              .slice(0, INFERENCE_LIMITS.imagesMax);
+          }
+          return out;
+        })
+        .filter(Boolean)
+    : [];
+
+  const images = Array.isArray(rawPayload.images)
+    ? rawPayload.images
+        .filter((image) => typeof image === 'string' && image.length <= INFERENCE_LIMITS.imageStringMaxChars)
+        .slice(0, INFERENCE_LIMITS.imagesMax)
+    : [];
+
+  const tools = Array.isArray(rawPayload.tools) ? rawPayload.tools.slice(0, INFERENCE_LIMITS.toolsMax) : [];
+
+  const options = sanitizeOptionSet(rawPayload.options || {});
+  if ('timeout' in rawPayload) {
+    options.timeout = clampInteger(rawPayload.timeout, 10000, 600000, 300000);
+  }
+  if ('timeout' in options) {
+    options.timeout = clampInteger(options.timeout, 10000, 600000, 300000);
+  }
+
+  const lane = typeof rawPayload.lane === 'string' ? rawPayload.lane : 'lane_interactive';
+  const workloadType = typeof rawPayload.workloadType === 'string' ? rawPayload.workloadType : null;
+  const priority = Number.isFinite(Number(rawPayload.priority)) ? Number(rawPayload.priority) : undefined;
+  const workspace = typeof rawPayload.workspace === 'string' ? rawPayload.workspace.slice(0, 40) : null;
+
+  return {
+    model,
+    prompt: sanitizeText(rawPayload.prompt, INFERENCE_LIMITS.promptMaxChars),
+    system: sanitizeText(rawPayload.system, INFERENCE_LIMITS.systemMaxChars),
+    format: rawPayload.format,
+    messages,
+    images,
+    options,
+    lane,
+    workloadType,
+    priority,
+    workspace,
+    allowFallback: rawPayload.allowFallback !== false,
+    preferNativeChat: rawPayload.preferNativeChat !== false,
+    forceCompatMode: rawPayload.forceCompatMode === true,
+    forceModelFallback: rawPayload.forceModelFallback === true,
+    tools,
+  };
+}
+
 // Guard against double registration during HMR
 let handlersRegistered = false;
 
@@ -1307,19 +1864,54 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     return;
   }
   handlersRegistered = true;
-  
+
   const userDataPath = app.getPath('userData');
   const appPath = app.getAppPath();
-  
+  perfMainWindow = mainWindow;
+  startEventLoopLagMonitor();
+  if (mainWindow?.webContents) {
+    mainWindow.webContents.on('destroyed', () => {
+      perfSubscribers.clear();
+      if (perfMainWindow === mainWindow) {
+        perfMainWindow = null;
+      }
+    });
+  }
+
   // Start automatic idle service cleanup (every 5 min, unload after 10 min idle)
   startIdleCleanup(5 * 60 * 1000, 10 * 60 * 1000);
-  
+
   // Initialize database (must complete before services that depend on it)
   try {
-    await initDatabase(userDataPath);
+    await initDatabase(userDataPath, store);
     console.log('Database initialized successfully');
   } catch (error) {
     console.error('Failed to initialize database:', error);
+  }
+
+  const dataService = new DataService({
+    getDb: () => db,
+    saveDatabase,
+  });
+  const fsAccessService = new FsAccessService({ store });
+
+  try {
+    audioLayer.configure({ store, userDataPath });
+  } catch (err) {
+    console.warn('[AudioLayer] configure failed:', err.message);
+  }
+
+  try {
+    hapticBridge.configure({ store });
+  } catch (err) {
+    console.warn('[HapticBridge] configure failed:', err.message);
+  }
+
+  try {
+    registerDataHandlers(ipcMain, dataService);
+    registerFsScopedHandlers(ipcMain, fsAccessService);
+  } catch (error) {
+    console.error('[IPC] Failed to register data/fs scoped handlers:', error.message);
   }
 
   // Web search IPC (DuckDuckGo-backed tool calls)
@@ -1419,7 +2011,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // Window controls
   ipcMain.handle('window:minimize', () => mainWindow.minimize());
   ipcMain.handle('window:maximize', () => {
@@ -1434,11 +2026,28 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     return true;
   });
   ipcMain.handle('window:isMaximized', () => mainWindow.isMaximized());
-  
+  ipcMain.handle('window:reload', (_, payload = {}) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return false;
+    const ignoreCache = payload?.ignoreCache === true;
+    if (ignoreCache) {
+      mainWindow.webContents.reloadIgnoringCache();
+    } else {
+      mainWindow.webContents.reload();
+    }
+    return true;
+  });
+  ipcMain.handle('app:restart', () => {
+    setImmediate(() => {
+      app.relaunch();
+      app.exit(0);
+    });
+    return true;
+  });
+
   // Settings
   ipcMain.handle('store:get', (_, key) => store.get(key));
   ipcMain.handle('store:set', (_, key, value) => store.set(key, value));
-  
+
   // Batched settings - reduces IPC overhead for multiple settings
   ipcMain.handle('store:getBatch', (_, keys) => {
     if (!Array.isArray(keys)) return {};
@@ -1448,7 +2057,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     }
     return result;
   });
-  
+
   ipcMain.handle('store:setBatch', (_, settings) => {
     if (!settings || typeof settings !== 'object') return false;
     for (const [key, value] of Object.entries(settings)) {
@@ -1733,13 +2342,13 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     manager.clearCache();
     return { success: true };
   });
-  
+
   // Sovereignty Status - reports whether app is running in local-only mode
   ipcMain.handle('sovereignty:getStatus', async () => {
     const settings = store.get('settings') || {};
     const llmEndpoint = store.get('llmEndpoint') || 'http://127.0.0.1:11434';
     const isLocalEndpoint = llmEndpoint.includes('127.0.0.1') || llmEndpoint.includes('localhost');
-    
+
     return {
       localOnly: isLocalEndpoint && settings.localOnly !== false,
       llmEndpoint,
@@ -1748,108 +2357,124 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       timestamp: Date.now(),
     };
   });
-  
+
   // LLM Communication (Ollama API compatible)
   ipcMain.handle('llm:send', async (_, payload) => {
     const endpoint = store.get('llmEndpoint');
     try {
+      const safePayload = sanitizeInferenceInput(payload);
       const requestedTimeout = Number(
-        payload?.timeout ?? payload?.options?.timeout ?? 300000
+        safePayload.options?.timeout ?? 300000
       );
       const requestTimeout = Number.isFinite(requestedTimeout)
         ? Math.max(10000, requestedTimeout)
         : 300000;
+      const executionPlan = await buildExecutionPlan({
+        endpoint,
+        makeRequest,
+        payload: safePayload,
+        stream: false,
+      });
 
-      // Use /api/chat when messages array is provided, else /api/generate.
-      // For raw-template models (notably GPT-OSS imports), force a safe
-      // generate-format compatibility prompt to avoid /api/chat degeneration.
-      const useChatPayload = Array.isArray(payload.messages) && payload.messages.length > 0;
+      const executionMeta = {
+        requestedModel: executionPlan.requestedModel,
+        effectiveModel: executionPlan.effectiveModel,
+        templateMode: executionPlan.templateMode,
+        endpointMode: executionPlan.endpointMode,
+        executionMode: executionPlan.executionMode,
+        effectiveContextLength: executionPlan.effectiveContextLength,
+        effectiveOptions: executionPlan.effectiveOptions,
+        backendId: executionPlan.backendId || null,
+        reasons: Array.isArray(executionPlan.reasons) ? executionPlan.reasons : [],
+      };
 
-      let apiPath;
-      let body;
-      let responseMode = 'generate';
-
-      if (useChatPayload) {
-        const compat = await buildGenerateCompatRequest(
-          endpoint,
-          payload.model,
-          payload.system,
-          payload.messages,
-          payload.options || {},
-          false
-        );
-
-        if (compat) {
-          apiPath = compat.apiPath;
-          body = compat.requestBody;
-          responseMode = 'generate';
-          console.log(`[LLM Send] Using ${compat.reason} for model "${payload.model}"`);
-        } else {
-          apiPath = '/api/chat';
-          const messages = [];
-          if (payload.system) {
-            messages.push({ role: 'system', content: payload.system });
-          }
-          messages.push(...payload.messages);
-          body = {
-            model: payload.model,
-            messages,
-            stream: false,
-            options: payload.options || {},
-            ...(payload.format ? { format: payload.format } : {})
-          };
-          responseMode = 'chat';
-        }
-      } else {
-        apiPath = '/api/generate';
-        body = {
-          model: payload.model,
-          prompt: payload.prompt,
-          system: payload.system,
-          stream: false,
-          options: payload.options || {},
-          ...(payload.format ? { format: payload.format } : {})
-        };
-      }
-      
       const inferencePayload = {
-        model: body.model || payload.model,
-        options: body.options || payload.options || {},
-        format: body.format || payload.format,
-        lane: payload?.lane || 'lane_interactive',
-        priority: payload?.priority,
-        allowFallback: payload?.allowFallback !== false,
-        workloadType: payload?.workloadType || (payload?.tools ? 'agent' : 'chat'),
-        ...(body.messages ? { messages: body.messages } : {}),
-        ...(body.prompt ? { prompt: body.prompt } : {}),
-        ...(body.system ? { system: body.system } : {}),
-        ...(body.images ? { images: body.images } : {}),
-        ...(Array.isArray(payload?.tools) ? { tools: payload.tools } : {}),
+        model: executionPlan.requestBody.model || executionPlan.effectiveModel,
+        options: executionPlan.requestBody.options || executionPlan.effectiveOptions || safePayload.options || {},
+        format: executionPlan.requestBody.format || safePayload.format,
+        lane: safePayload.lane || 'lane_interactive',
+        priority: safePayload.priority,
+        allowFallback: safePayload.allowFallback !== false,
+        workspace: safePayload.workspace || null,
+        workloadType: safePayload.workloadType || (safePayload.tools?.length ? 'agent' : 'chat'),
+        executionPlan: executionMeta,
+        ...(executionPlan.requestBody.messages ? { messages: executionPlan.requestBody.messages } : {}),
+        ...(executionPlan.requestBody.prompt ? { prompt: executionPlan.requestBody.prompt } : {}),
+        ...(executionPlan.requestBody.system ? { system: executionPlan.requestBody.system } : {}),
+        ...(executionPlan.requestBody.images ? { images: executionPlan.requestBody.images } : {}),
+        ...(Array.isArray(safePayload.tools) ? { tools: safePayload.tools } : {}),
+      };
+
+      const invokeBackend = async () => {
+        if (orchestrator) {
+          return await orchestrator.generate(inferencePayload);
+        }
+        const response = await makeRequest(`${endpoint}${executionPlan.endpointMode}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: executionPlan.requestBody,
+          timeout: requestTimeout,
+        });
+        return response.data;
       };
 
       let data = null;
-      if (orchestrator) {
-        data = await orchestrator.generate(inferencePayload);
-      } else {
-        const response = await makeRequest(`${endpoint}${apiPath}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body,
-          timeout: requestTimeout
-        });
-        data = response.data;
+      try {
+        data = await invokeBackend();
+      } catch (backendError) {
+        // If the backend wasn't reachable, give it a short readiness window
+        // (usually Ollama is mid-startup) and retry ONCE before giving up.
+        const bCode = backendError?.code || backendError?.cause?.code || null;
+        const bMsg = backendError?.message || '';
+        const isConnRefused = bCode === 'ECONNREFUSED' || /ECONNREFUSED/i.test(bMsg);
+        if (isConnRefused) {
+          console.log(`[LLM] Backend not reachable; waiting up to 8s for readiness (model=${executionPlan.requestedModel || 'n/a'})`);
+          const ready = await waitForBackendReady(endpoint, 8000);
+          if (ready) {
+            data = await invokeBackend();
+          } else {
+            throw backendError;
+          }
+        } else {
+          throw backendError;
+        }
       }
 
       // Normalize: /api/chat returns { message: { content } }, /api/generate returns { response }
-      if (responseMode === 'chat' && data?.message?.content && !data.response) {
+      if (executionPlan.responseMode === 'chat' && data?.message?.content && !data.response) {
         data.response = data.message.content;
+      }
+      if (data && typeof data === 'object') {
+        let resolvedBackendId = executionMeta.backendId || null;
+        try {
+          resolvedBackendId = orchestrator?.getRuntimeState?.()?.currentBackend?.id
+            || orchestrator?.getRuntimeState?.()?.currentBackend?.name
+            || resolvedBackendId;
+        } catch (_) {
+          // non-blocking
+        }
+        data.meta = {
+          ...(data.meta && typeof data.meta === 'object' ? data.meta : {}),
+          executionPlan: {
+            ...executionMeta,
+            backendId: resolvedBackendId,
+          },
+        };
       }
       return data;
     } catch (error) {
-      throw new Error(`LLM request failed: ${error.message}`);
+      const requestedModel = payload?.model || payload?.options?.model || '(unspecified)';
+      const backendHint = (() => {
+        try {
+          return orchestrator?.getRuntimeState?.()?.currentBackend?.id
+            || orchestrator?.getRuntimeState?.()?.currentBackend?.name
+            || null;
+        } catch (_) { return null; }
+      })();
+      throw classifyLlmError(error, { endpoint, model: requestedModel, backendId: backendHint });
     }
   });
-  
+
   const NON_SERIALIZABLE_IPC_KEYS = new Set(['request', 'fileStream', 'socket', 'connection', 'req', 'res']);
 
   const toIpcSafePayload = (value, depth = 0, seen = new WeakSet()) => {
@@ -1916,27 +2541,188 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
 
   ipcMain.handle('llm:stream', async (_, payload) => {
     const endpoint = store.get('llmEndpoint');
-    const { channel, ...rest } = payload;
-    
+    const streamChannel = typeof payload?.channel === 'string' && payload.channel.trim()
+      ? payload.channel.trim()
+      : `llm:stream:${typeof crypto?.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}`;
+    const safePayload = sanitizeInferenceInput(payload || {});
+
     // Track whether the stream already sent a done/error signal via Ollama's own done:true
     let streamCompletedByOllama = false;
 
-    // ── Build the request body ──
+    if (typeof buildExecutionPlan === 'function') {
+      const executionPlan = await buildExecutionPlan({
+        endpoint,
+        makeRequest,
+        payload: safePayload,
+        stream: true,
+      });
+      const executionMeta = {
+        requestedModel: executionPlan.requestedModel,
+        effectiveModel: executionPlan.effectiveModel,
+        templateMode: executionPlan.templateMode,
+        endpointMode: executionPlan.endpointMode,
+        executionMode: executionPlan.executionMode,
+        effectiveContextLength: executionPlan.effectiveContextLength,
+        effectiveOptions: executionPlan.effectiveOptions,
+        backendId: executionPlan.backendId || null,
+        reasons: Array.isArray(executionPlan.reasons) ? executionPlan.reasons : [],
+      };
+
+      safeSend(streamChannel, { meta: { executionPlan: executionMeta } });
+
+      try {
+        if (orchestrator) {
+          const inferencePayload = {
+            model: executionPlan.requestBody.model,
+            options: executionPlan.requestBody.options || executionPlan.effectiveOptions || safePayload.options || {},
+            lane: safePayload.lane || 'lane_interactive',
+            priority: safePayload.priority,
+            allowFallback: safePayload.allowFallback !== false,
+            workspace: safePayload.workspace || null,
+            workloadType: safePayload.workloadType || (safePayload.tools?.length ? 'agent' : 'chat'),
+            executionPlan: executionMeta,
+            ...(executionPlan.requestBody.messages ? { messages: executionPlan.requestBody.messages } : {}),
+            ...(executionPlan.requestBody.prompt ? { prompt: executionPlan.requestBody.prompt } : {}),
+            ...(executionPlan.requestBody.system ? { system: executionPlan.requestBody.system } : {}),
+            ...(executionPlan.requestBody.images ? { images: executionPlan.requestBody.images } : {}),
+            ...(Array.isArray(safePayload.tools) ? { tools: safePayload.tools } : {}),
+          };
+
+          const streamResult = await orchestrator.stream(inferencePayload, (chunk) => {
+            if (!chunk) return;
+            if (chunk.meta && typeof chunk.meta === 'object') {
+              safeSend(streamChannel, { meta: chunk.meta });
+            }
+            if (chunk.done) {
+              streamCompletedByOllama = true;
+              safeSend(streamChannel, { done: true });
+              return;
+            }
+            if (chunk.error) {
+              safeSend(streamChannel, { error: chunk.error });
+              return;
+            }
+            if (chunk.message?.content) {
+              safeSend(streamChannel, { response: chunk.message.content });
+              return;
+            }
+            if (chunk.response) {
+              safeSend(streamChannel, { response: chunk.response });
+            }
+          });
+
+          try {
+            const runtimeState = orchestrator.getRuntimeState?.();
+            if (runtimeState?.currentBackend) {
+              safeSend(streamChannel, {
+                meta: {
+                  executionPlan: {
+                    ...executionMeta,
+                    backendId: runtimeState.currentBackend.id || runtimeState.currentBackend.name || null,
+                  },
+                },
+              });
+            }
+          } catch (_) {
+            // Non-blocking.
+          }
+
+          if (streamResult?.requestId) {
+            activeStreams.set(streamChannel, { kind: 'orchestrator', requestId: streamResult.requestId });
+          }
+
+          if (streamResult?.streamTask && typeof streamResult.streamTask.then === 'function') {
+            streamResult.streamTask
+              .then(() => {
+                activeStreams.delete(streamChannel);
+                if (!streamCompletedByOllama) {
+                  safeSend(streamChannel, { done: true });
+                }
+              })
+              .catch((error) => {
+                activeStreams.delete(streamChannel);
+                safeSend(streamChannel, { error: error.message || 'Stream failed' });
+              });
+          } else {
+            activeStreams.delete(streamChannel);
+            if (!streamCompletedByOllama) {
+              safeSend(streamChannel, { done: true });
+            }
+          }
+
+          return { started: true, channel: streamChannel };
+        }
+
+        await withRetry(
+          async () => {
+            await streamRequest(
+              `${endpoint}${executionPlan.endpointMode}`,
+              executionPlan.requestBody,
+              (chunk) => {
+                if (chunk.done) {
+                  streamCompletedByOllama = true;
+                  safeSend(streamChannel, { done: true });
+                  return;
+                }
+                if (executionPlan.responseMode === 'chat' && chunk.message?.content) {
+                  safeSend(streamChannel, { response: chunk.message.content });
+                } else if (chunk.response) {
+                  safeSend(streamChannel, chunk);
+                }
+              },
+              streamChannel
+            );
+          },
+          { maxRetries: 3, baseDelay: 1000 },
+          (retryInfo) => {
+            safeSend(streamChannel, retryInfo);
+          }
+        );
+
+        if (!streamCompletedByOllama) {
+          safeSend(streamChannel, { done: true });
+        }
+        return { started: true, channel: streamChannel };
+      } catch (error) {
+        activeStreams.delete(streamChannel);
+        // Note: the orchestrator handles backend-level failover internally. If
+        // we still got here with ECONNREFUSED it usually means no backend came
+        // up at all - wait briefly so a warmup-timing glitch doesn't kill the
+        // first message of the session, then classify whatever error remains.
+        const code = error?.code || error?.cause?.code || null;
+        const isConnRefused = code === 'ECONNREFUSED' || /ECONNREFUSED/i.test(error?.message || '');
+        if (isConnRefused) {
+          await waitForBackendReady(endpoint, 4000);
+          // We don't re-run the whole stream pipeline here (the orchestrator
+          // already tried failover); we just give the UI a clearer message so
+          // the user can retry with confidence that the backend is now up.
+        }
+        const cls = classifyLlmError(error, {
+          endpoint,
+          model: executionPlan.requestedModel,
+          backendId: executionPlan.backendId,
+        });
+        safeSend(streamChannel, { error: cls.message });
+        return { started: false, error: cls.message, channel: streamChannel };
+      }
+    }
+
+    // â”€â”€ Build the request body â”€â”€
     // Use /api/chat (structured messages) when the frontend sends a messages array,
     // fall back to /api/generate for legacy callers.
-    const useChatPayload = Array.isArray(rest.messages) && rest.messages.length > 0;
+    const useChatPayload = Array.isArray(safePayload.messages) && safePayload.messages.length > 0;
     let effectiveUseChat = useChatPayload;
 
     let requestBody;
     let apiPath;
 
-    if (useChatPayload) {
+      if (useChatPayload && !safePayload.preferNativeChat) {
       const compat = await buildGenerateCompatRequest(
         endpoint,
-        rest.model,
-        rest.system,
-        rest.messages,
-        rest.options || {},
+        safePayload.model,
+        safePayload.system,
+        safePayload.messages,
+        safePayload.options || {},
         true
       );
 
@@ -1944,20 +2730,20 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         effectiveUseChat = false;
         apiPath = compat.apiPath;
         requestBody = compat.requestBody;
-        console.log(`[LLM Stream] Using ${compat.reason} for model "${rest.model}"`);
+        console.log(`[LLM Stream] Using ${compat.reason} for model "${safePayload.model}"`);
       }
     }
 
     if (!requestBody && effectiveUseChat) {
-      // ── /api/chat path (proper chat format — model template applied correctly) ──
+      // â”€â”€ /api/chat path (proper chat format â€” model template applied correctly) â”€â”€
       apiPath = '/api/chat';
-      
-      // Build messages array — system message first, then conversation
+
+      // Build messages array â€” system message first, then conversation
       const messages = [];
-      if (rest.system) {
-        messages.push({ role: 'system', content: rest.system });
+      if (safePayload.system) {
+        messages.push({ role: 'system', content: safePayload.system });
       }
-      for (const msg of rest.messages) {
+      for (const msg of safePayload.messages) {
         const entry = { role: msg.role, content: msg.content };
         // Vision/multimodal: attach images to the last user message
         if (msg.images && Array.isArray(msg.images) && msg.images.length > 0) {
@@ -1966,14 +2752,14 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         }
         messages.push(entry);
       }
-      
+
       // Build options: use frontend-provided values, only apply safety defaults when absent
-      const chatOpts = rest.options || {};
+      const chatOpts = safePayload.options || {};
       // With /api/chat, Ollama's chat template handles stop tokens natively.
-      // Do NOT inject manual stop tokens — they conflict with the template
+      // Do NOT inject manual stop tokens â€” they conflict with the template
       // and cause premature truncation (especially for thinking models).
       requestBody = {
-        model: rest.model,
+        model: safePayload.model,
         messages,
         stream: true,
         options: {
@@ -1985,19 +2771,19 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         }
       };
     } else if (!requestBody) {
-      // ── /api/generate fallback (legacy — raw prompt) ──
+      // â”€â”€ /api/generate fallback (legacy â€” raw prompt) â”€â”€
       apiPath = '/api/generate';
-      
-      const genOpts = rest.options || {};
+
+      const genOpts = safePayload.options || {};
       requestBody = {
-        model: rest.model,
-        prompt: rest.prompt,
-        system: rest.system,
+        model: safePayload.model,
+        prompt: safePayload.prompt,
+        system: safePayload.system,
         stream: true,
         options: {
           ...genOpts,
           // /api/generate fallback: only add turn-leak prevention tokens
-          // (no template tokens — those conflict with the model's own EOS handling)
+          // (no template tokens â€” those conflict with the model's own EOS handling)
           stop: [
             ...(genOpts.stop || []),
             'Human:', 'human:', 'User:', 'user:',
@@ -2011,76 +2797,76 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       };
 
       // Vision/multimodal support for generate endpoint
-      if (rest.images && Array.isArray(rest.images) && rest.images.length > 0) {
-        requestBody.images = rest.images;
-        console.log(`[LLM Stream] Sending ${rest.images.length} image(s) for vision analysis`);
+      if (safePayload.images && Array.isArray(safePayload.images) && safePayload.images.length > 0) {
+        requestBody.images = safePayload.images;
+        console.log(`[LLM Stream] Sending ${safePayload.images.length} image(s) for vision analysis`);
       }
     }
-    
+
     try {
       if (orchestrator) {
         const inferencePayload = {
           model: requestBody.model,
-          options: requestBody.options || rest.options || {},
-          lane: rest?.lane || 'lane_interactive',
-          priority: rest?.priority,
-          allowFallback: rest?.allowFallback !== false,
-          workloadType: rest?.workloadType || (rest?.tools ? 'agent' : 'chat'),
+          options: requestBody.options || safePayload.options || {},
+          lane: safePayload.lane || 'lane_interactive',
+          priority: safePayload.priority,
+          allowFallback: safePayload.allowFallback !== false,
+          workloadType: safePayload.workloadType || (safePayload.tools?.length ? 'agent' : 'chat'),
           ...(requestBody.messages ? { messages: requestBody.messages } : {}),
           ...(requestBody.prompt ? { prompt: requestBody.prompt } : {}),
           ...(requestBody.system ? { system: requestBody.system } : {}),
           ...(requestBody.images ? { images: requestBody.images } : {}),
-          ...(Array.isArray(rest?.tools) ? { tools: rest.tools } : {}),
+          ...(Array.isArray(safePayload.tools) ? { tools: safePayload.tools } : {}),
         };
 
         const streamResult = await orchestrator.stream(inferencePayload, (chunk) => {
           if (!chunk) return;
           if (chunk.done) {
             streamCompletedByOllama = true;
-            safeSend(channel, { done: true });
+            safeSend(streamChannel, { done: true });
             return;
           }
 
           if (chunk.error) {
-            safeSend(channel, { error: chunk.error });
+            safeSend(streamChannel, { error: chunk.error });
             return;
           }
 
           if (chunk.message?.content) {
-            safeSend(channel, { response: chunk.message.content });
+            safeSend(streamChannel, { response: chunk.message.content });
             return;
           }
 
           if (chunk.response) {
-            safeSend(channel, { response: chunk.response });
+            safeSend(streamChannel, { response: chunk.response });
             return;
           }
         });
 
         if (streamResult?.requestId) {
-          activeStreams.set(channel, { kind: 'orchestrator', requestId: streamResult.requestId });
+          activeStreams.set(streamChannel, { kind: 'orchestrator', requestId: streamResult.requestId });
         }
 
         if (streamResult?.streamTask && typeof streamResult.streamTask.then === 'function') {
           streamResult.streamTask
             .then(() => {
-              activeStreams.delete(channel);
+              activeStreams.delete(streamChannel);
               if (!streamCompletedByOllama) {
-                safeSend(channel, { done: true });
+                safeSend(streamChannel, { done: true });
               }
             })
             .catch((error) => {
-              activeStreams.delete(channel);
-              safeSend(channel, { error: error.message || 'Stream failed' });
+              activeStreams.delete(streamChannel);
+              safeSend(streamChannel, { error: error.message || 'Stream failed' });
             });
         } else {
-          activeStreams.delete(channel);
+          activeStreams.delete(streamChannel);
           if (!streamCompletedByOllama) {
-            safeSend(channel, { done: true });
+            safeSend(streamChannel, { done: true });
           }
         }
 
-        return { started: true, channel };
+        return { started: true, channel: streamChannel };
       }
 
       // Use retry wrapper for connection resilience
@@ -2093,40 +2879,40 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
               // Ollama sends { done: true } at the end of a stream
               if (chunk.done) {
                 streamCompletedByOllama = true;
-                safeSend(channel, { done: true });
+                safeSend(streamChannel, { done: true });
                 return;
               }
-              
+
               // Normalize response format:
               // /api/chat returns { message: { content: "..." } }
               // /api/generate returns { response: "..." }
               if (effectiveUseChat && chunk.message?.content) {
-                safeSend(channel, { response: chunk.message.content });
+                safeSend(streamChannel, { response: chunk.message.content });
               } else if (chunk.response) {
-                safeSend(channel, chunk);
+                safeSend(streamChannel, chunk);
               }
             },
-            channel
+            streamChannel
           );
         },
         { maxRetries: 3, baseDelay: 1000 },
         // Notify frontend about retry status
         (retryInfo) => {
-          safeSend(channel, retryInfo);
+          safeSend(streamChannel, retryInfo);
         }
       );
       // Only send our own done signal if Ollama didn't already
       if (!streamCompletedByOllama) {
-        safeSend(channel, { done: true });
+        safeSend(streamChannel, { done: true });
       }
-      return { started: true, channel };
+      return { started: true, channel: streamChannel };
     } catch (error) {
-      activeStreams.delete(channel);
-      safeSend(channel, { error: error.message });
-      return { started: false, error: error.message, channel };
+      activeStreams.delete(streamChannel);
+      safeSend(streamChannel, { error: error.message });
+      return { started: false, error: error.message, channel: streamChannel };
     }
   });
-  
+
   ipcMain.handle('llm:cancel', async (_, channel) => {
     const req = activeStreams.get(channel);
     if (!req) {
@@ -2154,29 +2940,29 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     safeSend(channel, { cancelled: true });
     return { success: true };
   });
-  
+
   ipcMain.handle('llm:unload', async () => {
     return { success: true, message: 'Model unload not required (Ollama manages memory automatically)' };
   });
-  
+
   ipcMain.handle('llm:health', async () => {
     const endpoint = store.get('llmEndpoint');
     try {
       const response = await makeRequest(`${endpoint}/api/tags`, { timeout: 5000 });
-      return { 
-        healthy: true, 
+      return {
+        healthy: true,
         status: response.status === 200 ? 'online' : 'error',
         models: response.data?.models?.length || 0
       };
     } catch (error) {
-      return { 
-        healthy: false, 
+      return {
+        healthy: false,
         status: 'offline',
-        error: error.message 
+        error: error.message
       };
     }
   });
-  
+
   ipcMain.handle('llm:models', async () => {
     const endpoint = store.get('llmEndpoint');
     try {
@@ -2186,7 +2972,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return [];
     }
   });
-  
+
   ipcMain.handle('llm:load', async (_, modelPath) => {
     const endpoint = store.get('llmEndpoint');
     try {
@@ -2199,13 +2985,25 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       throw new Error(`Failed to load model: ${error.message}`);
     }
   });
-  
-  // ── Get real model metadata from Ollama /api/show ──
+
+  // â”€â”€ Get real model metadata from Ollama /api/show â”€â”€
   // Returns family, parameter size, quantization, and context length
   // so the frontend doesn't have to guess from the filename.
   ipcMain.handle('llm:modelInfo', async (_, modelName) => {
     const endpoint = store.get('llmEndpoint');
     try {
+      if (typeof getNormalizedModelInfo === 'function') {
+        const requested = typeof modelName === 'object' && modelName
+          ? modelName
+          : { name: modelName };
+        return await getNormalizedModelInfo(
+          endpoint,
+          makeRequest,
+          requested?.name || requested?.model || '',
+          { forceRefresh: requested?.forceRefresh === true }
+        );
+      }
+
       const response = await makeRequest(`${endpoint}/api/show`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2261,7 +3059,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         _raw: { families: details.families, format: details.format },
       };
     } catch (error) {
-      // Non-fatal — fallback to name-based detection
+      // Non-fatal â€” fallback to name-based detection
       console.warn(`[IPC] llm:modelInfo failed for "${modelName}":`, error.message);
       return { success: false, error: error.message };
     }
@@ -2353,7 +3151,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       };
     }
   });
-  
+
   // Get currently running/loaded models
   ipcMain.handle('llm:running', async () => {
     const endpoint = store.get('llmEndpoint');
@@ -2364,7 +3162,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return [];
     }
   });
-  
+
   // Image Generation (ComfyUI API compatible)
   ipcMain.handle('image:generate', async (_, payload) => {
     const endpoint = store.get('imageGenEndpoint');
@@ -2380,7 +3178,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       throw new Error(`Image generation failed: ${error.message}`);
     }
   });
-  
+
   ipcMain.handle('image:models', async () => {
     const endpoint = store.get('imageGenEndpoint');
     try {
@@ -2390,9 +3188,9 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return [];
     }
   });
-  
+
   const activeImageJobs = new Map();
-  
+
   ipcMain.handle('image:interrupt', async () => {
     const endpoint = store.get('imageGenEndpoint');
     try {
@@ -2406,20 +3204,20 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('image:health', async () => {
     const endpoint = store.get('imageGenEndpoint');
     try {
       const response = await makeRequest(`${endpoint}/system_stats`, { timeout: 5000 });
-      return { 
-        healthy: true, 
+      return {
+        healthy: true,
         status: response.status === 200 ? 'online' : 'error'
       };
     } catch (error) {
-      return { 
-        healthy: false, 
+      return {
+        healthy: false,
         status: 'offline',
-        error: error.message 
+        error: error.message
       };
     }
   });
@@ -2428,7 +3226,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ComfyUI Manager - Local Image Generation
   // Fully offline, unrestricted, NSFW-capable
   // ============================================
-  
+
   ipcMain.handle('comfyui:getStatus', async () => {
     try {
       const manager = getComfyUIManager();
@@ -2476,9 +3274,9 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       const manager = getComfyUIManager();
       if (!manager) throw new Error('ComfyUI manager not available');
       return await manager.downloadModel(model, (progress) => {
-        mainWindow?.webContents?.send('comfyui:downloadProgress', { 
-          modelId: model.id || model.name, 
-          ...progress 
+        mainWindow?.webContents?.send('comfyui:downloadProgress', {
+          modelId: model.id || model.name,
+          ...progress
         });
       });
     } catch (error) {
@@ -2535,12 +3333,12 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         }
         return { running: false, error: 'Image service not available' };
       }
-      
+
       // Initialize if needed
       if (!imageService.isInitialized) {
         await imageService.initialize();
       }
-      
+
       return await imageService.getStatus();
     } catch (error) {
       return { running: false, error: error.message };
@@ -2553,12 +3351,12 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       if (!imageService) {
         throw new Error('Image service not available. Please install ComfyUI first.');
       }
-      
+
       // Initialize if needed
       if (!imageService.isInitialized) {
         await imageService.initialize();
       }
-      
+
       return await imageService.generate(params);
     } catch (error) {
       return { success: false, error: error.message };
@@ -2623,12 +3421,12 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     try {
       const backend = getImageBackendAuto();
       if (!backend) throw new Error('Backend not available');
-      
+
       // Set up event forwarding
       backend.onEvent((event, data) => {
         mainWindow?.webContents?.send('imageAuto:event', { event, ...data });
       });
-      
+
       return await backend.autoSetup(options);
     } catch (error) {
       return { success: false, error: error.message };
@@ -2694,7 +3492,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // =============================================================================
   // MEMORY ENGINE - Long conversation memory support
   // =============================================================================
-  
+
   ipcMain.handle('memory:buildContext', async (_, { conversationId, workspace, messages, options }) => {
     try {
       const { getMemoryEngine } = require('./services/memory-engine');
@@ -2811,7 +3609,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // =============================================================================
   // SOUL ENGINE - Personality persistence and adaptive behavior
   // =============================================================================
-  
+
   ipcMain.handle('soul:getSoul', async () => {
     try {
       const { getSoulEngine } = require('./services/soul-engine');
@@ -2878,22 +3676,42 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false };
     }
   });
-  
+
   // File System
   ipcMain.handle('fs:selectFile', async (_, options = {}) => {
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: options.properties || ['openFile'],
       filters: options.filters || [{ name: 'All Files', extensions: ['*'] }],
     });
-    return result.canceled ? null : result.filePaths[0];
+    if (result.canceled || !result.filePaths[0]) {
+      return null;
+    }
+
+    const selectedPath = result.filePaths[0];
+    try {
+      fsAccessService.grantRoot({ rootPath: path.dirname(selectedPath), label: 'selected-file-parent' });
+    } catch (error) {
+      console.warn('[IPC] Failed to auto-grant selected file parent:', error.message);
+    }
+    return selectedPath;
   });
-  
+
   ipcMain.handle('fs:selectFolder', async (_, options) => {
     const result = await dialog.showOpenDialog(mainWindow, {
       properties: ['openDirectory'],
       ...options
     });
-    return result.canceled ? null : result.filePaths[0];
+    if (result.canceled || !result.filePaths[0]) {
+      return null;
+    }
+
+    const selectedPath = result.filePaths[0];
+    try {
+      fsAccessService.grantRoot({ rootPath: selectedPath, label: 'selected-folder' });
+    } catch (error) {
+      console.warn('[IPC] Failed to auto-grant selected folder:', error.message);
+    }
+    return selectedPath;
   });
 
   /**
@@ -2906,62 +3724,44 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   ipcMain.handle('runTerminalCommand', async (_, payload = {}) => {
     return executeTerminalCommand(payload);
   });
-  
+
   ipcMain.handle('fs:readFile', async (_, filePath) => {
-    const validation = validatePath(filePath, { allowAbsolute: true });
-    if (!validation.valid) {
-      throw new Error(`Invalid path: ${validation.reason}`);
-    }
-    return await fsPromises.readFile(validation.normalizedPath, 'utf-8');
+    trackDeprecatedIpc('fs:readFile', 'fs:readScoped');
+    const result = await fsAccessService.readScoped({ path: filePath, encoding: 'utf-8' });
+    return result.content;
   });
 
   // Read file as base64 - used for vision/multimodal model image input
   ipcMain.handle('fs:readFileBase64', async (_, filePath) => {
     try {
-      const validation = validatePath(filePath, { allowAbsolute: true });
-      if (!validation.valid) {
-        throw new Error(`Invalid path: ${validation.reason}`);
-      }
-      const buffer = await fsPromises.readFile(validation.normalizedPath);
-      return buffer.toString('base64');
+      trackDeprecatedIpc('fs:readFileBase64', 'fs:readScoped');
+      const result = await fsAccessService.readScoped({ path: filePath, encoding: 'buffer' });
+      return Buffer.from(result.content).toString('base64');
     } catch (error) {
       console.error('Failed to read file as base64:', error);
       return null;
     }
   });
-  
+
   ipcMain.handle('fs:writeFile', async (_, filePath, content) => {
-    const validation = validatePath(filePath, { allowAbsolute: true });
-    if (!validation.valid) {
-      throw new Error(`Invalid path: ${validation.reason}`);
-    }
-    const targetPath = validation.normalizedPath;
-    // Ensure parent directory exists
-    const dir = path.dirname(targetPath);
-    await fsPromises.mkdir(dir, { recursive: true });
-    await fsPromises.writeFile(targetPath, content, 'utf-8');
+    trackDeprecatedIpc('fs:writeFile', 'fs:writeScoped');
+    await fsAccessService.writeScoped({ path: filePath, content, encoding: 'utf-8' });
     return true;
   });
 
   ipcMain.handle('fs:createFolder', async (_, folderPath) => {
-    const validation = validatePath(folderPath, { allowAbsolute: true });
-    if (!validation.valid) {
-      throw new Error(`Invalid path: ${validation.reason}`);
-    }
-    await fsPromises.mkdir(validation.normalizedPath, { recursive: true });
+    trackDeprecatedIpc('fs:createFolder', 'fs:mkdirScoped');
+    await fsAccessService.mkdirScoped({ path: folderPath, recursive: true });
     return true;
   });
-  
+
   ipcMain.handle('fs:listModels', async (_, directory) => {
     try {
-      const validation = validatePath(directory, { allowAbsolute: true });
-      if (!validation.valid) {
-        throw new Error(`Invalid path: ${validation.reason}`);
-      }
-      const files = await fsPromises.readdir(validation.normalizedPath, { withFileTypes: true });
-      return files
-        .filter(f => f.isFile() && (f.name.endsWith('.gguf') || f.name.endsWith('.bin')))
-        .map(f => ({ name: f.name, path: path.join(validation.normalizedPath, f.name) }));
+      trackDeprecatedIpc('fs:listModels', 'fs:listScoped');
+      const result = await fsAccessService.listScoped({ path: directory, includeHidden: false });
+      return (result.entries || [])
+        .filter((f) => f.type === 'file' && (f.name.endsWith('.gguf') || f.name.endsWith('.bin')))
+        .map((f) => ({ name: f.name, path: f.path }));
     } catch (error) {
       console.warn('[IPC] fs:listModels failed:', error.message);
       return [];
@@ -2971,12 +3771,12 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ============================================
   // Screenshot Capture
   // ============================================
-  
+
   ipcMain.handle('captureScreenshot', async () => {
     try {
       const { captureScreen } = require('./services/screenshot-service');
       const result = await captureScreen();
-      
+
       if (result.success) {
         // Read the file and return as data URL
         const imageBuffer = await fsPromises.readFile(result.filePath);
@@ -2995,7 +3795,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ============================================
   // Project Scanning (Code Workspace)
   // ============================================
-  
+
   ipcMain.handle('project:scan', async (_, rootPath, options = {}) => {
     try {
       return scanProject(rootPath, options);
@@ -3016,13 +3816,24 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     }
   });
 
+  function spawnAsync(cmd, args, opts) {
+    return new Promise((resolve) => {
+      const child = spawn(cmd, args, { ...opts, windowsHide: true });
+      let stdout = '';
+      let stderr = '';
+      child.stdout?.on('data', (d) => { stdout += d; });
+      child.stderr?.on('data', (d) => { stderr += d; });
+      child.on('error', (err) => resolve({ error: err, status: 1, stdout, stderr }));
+      child.on('close', (code) => resolve({ error: null, status: code, stdout, stderr }));
+    });
+  }
+
   ipcMain.handle('git:status', async (_, rootPath) => {
     try {
       const resolvedRoot = resolveProjectRoot(rootPath);
-      const result = spawnSync('git', ['status', '--porcelain', '--branch'], {
+      const result = await spawnAsync('git', ['status', '--porcelain', '--branch'], {
         cwd: resolvedRoot,
         encoding: 'utf8',
-        windowsHide: true,
       });
 
       if (result.error) {
@@ -3052,10 +3863,9 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         throw new Error('File path must be inside project root');
       }
 
-      const result = spawnSync('git', ['add', '--', relativeFile], {
+      const result = await spawnAsync('git', ['add', '--', relativeFile], {
         cwd: resolvedRoot,
         encoding: 'utf8',
-        windowsHide: true,
       });
 
       if (result.error || result.status !== 0) {
@@ -3078,10 +3888,9 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         throw new Error('Commit message is required');
       }
 
-      const result = spawnSync('git', ['commit', '-m', commitMessage], {
+      const result = await spawnAsync('git', ['commit', '-m', commitMessage], {
         cwd: resolvedRoot,
         encoding: 'utf8',
-        windowsHide: true,
       });
 
       if (result.error || result.status !== 0) {
@@ -3180,7 +3989,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('backup:schedule', (_, schedule) => {
     try {
       store.set('backupSchedule', schedule || null);
@@ -3190,7 +3999,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('backup:list', async () => {
     const backups = [];
     const docsDir = app.getPath('documents');
@@ -3216,9 +4025,21 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     }
     return backups;
   });
-  
+
+  // Legacy attachment channels (compatibility window)
+  ipcMain.handle('saveMessageAttachments', async (_, messageId, files, password) => {
+    trackDeprecatedIpc('saveMessageAttachments', 'attachments:save');
+    return dataService.attachmentsSave({ messageId, files, password });
+  });
+
+  ipcMain.handle('readAttachment', async (_, filePath, password) => {
+    trackDeprecatedIpc('readAttachment', 'attachments:read');
+    return dataService.attachmentsRead({ filePath, password, encoding: 'base64' });
+  });
+
   // Database operations using sql.js
   ipcMain.handle('db:query', (_, sql, params = []) => {
+    trackDeprecatedIpc('db:query', 'conversations:* / messages:* typed endpoints');
     if (!db) return [];
     try {
     const stmt = db.prepare(sql);
@@ -3342,7 +4163,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   });
 
   // ============================================
-  // Auto‑update
+  // Autoâ€‘update
   // ============================================
 
   ipcMain.handle('updater:check', async () => {
@@ -3374,8 +4195,9 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('db:run', (_, sql, params = []) => {
+    trackDeprecatedIpc('db:run', 'conversations:* / messages:* typed endpoints');
     if (!db) return { changes: 0 };
     try {
       db.run(sql, params);
@@ -3386,11 +4208,11 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { changes: 0, error: error.message };
     }
   });
-  
+
   // =============================================================================
   // ORGANIZATION SYSTEM - Folders, Tags, Pin/Star
   // =============================================================================
-  
+
   // Get all folders for a workspace
   ipcMain.handle('folders:list', async (_, workspace) => {
     if (!db) return [];
@@ -3408,17 +4230,17 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return [];
     }
   });
-  
+
   // Create a new folder
   ipcMain.handle('folders:create', async (_, { id, name, color, icon, workspace, parentId }) => {
     if (!db) return { success: false, error: 'Database not initialized' };
     try {
       // Get next sort order
       const countResult = db.exec(`SELECT COUNT(*) as count FROM folders WHERE workspace = ?`, [workspace]);
-      const sortOrder = countResult.length > 0 && countResult[0].values.length > 0 
-        ? countResult[0].values[0][0] 
+      const sortOrder = countResult.length > 0 && countResult[0].values.length > 0
+        ? countResult[0].values[0][0]
         : 0;
-      
+
       db.run(
         `INSERT INTO folders (id, name, color, icon, workspace, parent_id, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [id, name, color || '#6366f1', icon || 'Folder', workspace, parentId || null, sortOrder]
@@ -3430,21 +4252,21 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // Update a folder
   ipcMain.handle('folders:update', async (_, { id, name, color, icon, sortOrder }) => {
     if (!db) return { success: false, error: 'Database not initialized' };
     try {
       const updates = [];
       const params = [];
-      
+
       if (name !== undefined) { updates.push('name = ?'); params.push(name); }
       if (color !== undefined) { updates.push('color = ?'); params.push(color); }
       if (icon !== undefined) { updates.push('icon = ?'); params.push(icon); }
       if (sortOrder !== undefined) { updates.push('sort_order = ?'); params.push(sortOrder); }
-      
+
       if (updates.length === 0) return { success: true };
-      
+
       params.push(id);
       db.run(`UPDATE folders SET ${updates.join(', ')} WHERE id = ?`, params);
       saveDatabase();
@@ -3454,7 +4276,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // Delete a folder (moves conversations to unfiled)
   ipcMain.handle('folders:delete', async (_, folderId) => {
     if (!db) return { success: false, error: 'Database not initialized' };
@@ -3470,7 +4292,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // Move conversation to folder
   ipcMain.handle('conversation:moveToFolder', async (_, { conversationId, folderId }) => {
     if (!db) return { success: false, error: 'Database not initialized' };
@@ -3483,7 +4305,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // Toggle conversation starred status
   ipcMain.handle('conversation:toggleStar', async (_, conversationId) => {
     if (!db) return { success: false, error: 'Database not initialized' };
@@ -3499,7 +4321,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // Toggle conversation pinned status
   ipcMain.handle('conversation:togglePin', async (_, conversationId) => {
     if (!db) return { success: false, error: 'Database not initialized' };
@@ -3515,7 +4337,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // Update conversation tags (JSON array)
   ipcMain.handle('conversation:setTags', async (_, { conversationId, tags }) => {
     if (!db) return { success: false, error: 'Database not initialized' };
@@ -3529,19 +4351,19 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // Update conversation preview and message count
   ipcMain.handle('conversation:updateMeta', async (_, { conversationId, preview, messageCount }) => {
     if (!db) return { success: false, error: 'Database not initialized' };
     try {
       const updates = [];
       const params = [];
-      
+
       if (preview !== undefined) { updates.push('preview = ?'); params.push(preview); }
       if (messageCount !== undefined) { updates.push('message_count = ?'); params.push(messageCount); }
-      
+
       if (updates.length === 0) return { success: true };
-      
+
       params.push(conversationId);
       db.run(`UPDATE conversations SET ${updates.join(', ')} WHERE id = ?`, params);
       saveDatabase();
@@ -3551,7 +4373,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // Get all unique tags for a workspace (for auto-suggest)
   ipcMain.handle('tags:listForWorkspace', async (_, workspace) => {
     if (!db) return [];
@@ -3573,25 +4395,25 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return [];
     }
   });
-  
+
   // NSFW Password Management
   ipcMain.handle('nsfw:setPassword', async (_, password) => {
     if (!password || password.length < 4) {
       throw new Error('Password must be at least 4 characters');
     }
-    
+
     const salt = crypto.randomBytes(32).toString('hex');
     const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-    
+
     try {
       const existing = db.exec("SELECT * FROM nsfw_auth WHERE id = 'nsfw'");
-      
+
       if (existing.length > 0 && existing[0].values.length > 0) {
         db.run("UPDATE nsfw_auth SET password_hash = ?, salt = ?, updated_at = datetime('now') WHERE id = 'nsfw'", [hash, salt]);
       } else {
         db.run("INSERT INTO nsfw_auth (id, password_hash, salt) VALUES ('nsfw', ?, ?)", [hash, salt]);
       }
-      
+
       saveDatabase();
       return { success: true };
     } catch (error) {
@@ -3599,29 +4421,29 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       throw error;
     }
   });
-  
+
   ipcMain.handle('nsfw:verifyPassword', async (_, password) => {
     try {
       const result = db.exec("SELECT password_hash, salt FROM nsfw_auth WHERE id = 'nsfw'");
-      
+
       if (!result.length || !result[0].values.length) {
         return { verified: false, error: 'No password set' };
       }
-      
+
       const [storedHash, salt] = result[0].values[0];
       const hash = crypto.scryptSync(password, salt, 64).toString('hex');
-      
+
       const verified = crypto.timingSafeEqual(
         Buffer.from(hash),
         Buffer.from(storedHash)
       );
-      
+
       return { verified };
     } catch (error) {
       return { verified: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('nsfw:hasPassword', async () => {
     try {
       const result = db.exec("SELECT * FROM nsfw_auth WHERE id = 'nsfw'");
@@ -3630,23 +4452,263 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { hasPassword: false };
     }
   });
-  
+
+  // ─── NSFW "Remember me" (auto-unlock) ────────────────────────────────────
+  // Encrypts the password with Electron safeStorage (OS-bound: DPAPI on Windows,
+  // Keychain on macOS, libsecret on Linux) and persists it in electron-store
+  // alongside an expiry. Another OS user on the same machine cannot decrypt it.
+  // If safeStorage is unavailable, we refuse to persist — no plaintext fallback.
+  const REMEMBER_STORE_KEY = 'nsfwRemember';
+  const REMEMBER_CAP_MS = 1000 * 60 * 60 * 24 * 90; // 90 days
+
+  const getSafeStorage = () => {
+    try { return require('electron').safeStorage; }
+    catch { return null; }
+  };
+
+  ipcMain.handle('nsfw:remember', async (_, payload = {}) => {
+    const password = String(payload?.password || '');
+    const durationMs = Math.max(0, Math.min(REMEMBER_CAP_MS, Number(payload?.durationMs) || 0));
+    if (!password || durationMs <= 0) {
+      store.delete(REMEMBER_STORE_KEY);
+      return { success: true, cleared: true };
+    }
+    const safeStorage = getSafeStorage();
+    if (!safeStorage || !safeStorage.isEncryptionAvailable?.()) {
+      return { success: false, error: 'OS secure storage unavailable — cannot remember password.' };
+    }
+    try {
+      const blob = safeStorage.encryptString(password).toString('base64');
+      store.set(REMEMBER_STORE_KEY, {
+        blob,
+        exp: Date.now() + durationMs,
+        createdAt: Date.now(),
+      });
+      return { success: true, expiresAt: Date.now() + durationMs };
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('nsfw:getRemembered', async () => {
+    const record = store.get(REMEMBER_STORE_KEY);
+    if (!record || typeof record !== 'object' || !record.blob) {
+      return { success: true, password: null, reason: 'none' };
+    }
+    if (Number.isFinite(Number(record.exp)) && Date.now() > Number(record.exp)) {
+      store.delete(REMEMBER_STORE_KEY);
+      return { success: true, password: null, reason: 'expired' };
+    }
+    const safeStorage = getSafeStorage();
+    if (!safeStorage || !safeStorage.isEncryptionAvailable?.()) {
+      return { success: false, password: null, error: 'OS secure storage unavailable' };
+    }
+    try {
+      const buf = Buffer.from(String(record.blob), 'base64');
+      const password = safeStorage.decryptString(buf);
+      return { success: true, password, expiresAt: record.exp };
+    } catch (err) {
+      // Corruption or OS-user mismatch — clear the stale blob.
+      store.delete(REMEMBER_STORE_KEY);
+      return { success: false, password: null, error: err.message };
+    }
+  });
+
+  ipcMain.handle('nsfw:forget', async () => {
+    store.delete(REMEMBER_STORE_KEY);
+    return { success: true };
+  });
+
+  // ─── Vault Safety Configuration ──────────────────────────────────────────
+  // Stores user-controlled safeword strings, aftercare persona, and thresholds.
+  // The renderer engine reads this to intercept safewords client-side.
+  ipcMain.handle('vault:safetyGetConfig', async () => {
+    try { return { success: true, config: vaultSafety.readConfig(store) }; }
+    catch (err) { return { success: false, error: err.message, config: vaultSafety.DEFAULTS }; }
+  });
+
+  ipcMain.handle('vault:safetySetConfig', async (_, patch) => {
+    try { return { success: true, config: vaultSafety.writeConfig(store, patch || {}) }; }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+
+  // ─── Dead Switch (user-controlled vault wipe) ────────────────────────────
+  // Two-step confirmation: prepare returns a random code that the user must
+  // type and send back with execute. Never invoked autonomously.
+  ipcMain.handle('vault:deadSwitchPrepare', async () => {
+    try { return { success: true, ...deadSwitch.prepareDeadSwitch() }; }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+
+  ipcMain.handle('vault:deadSwitchExecute', async (_, payload = {}) => {
+    try {
+      const userDataPath = app.getPath('userData');
+      const result = await deadSwitch.executeDeadSwitch({
+        code: payload?.code,
+        userDataPath,
+        deps: {
+          getDb: () => db,
+          saveDatabase,
+          store,
+        },
+      });
+      return result;
+    } catch (err) {
+      return { success: false, error: err.message };
+    }
+  });
+
+  ipcMain.handle('vault:deadSwitchCancel', async () => deadSwitch.cancelPending());
+
+  // ─── Vault Profile (Abyssal Devourer overrides) ──────────────────────────
+  // Reads the JSON profile at scripts/openvino-model.json and exposes its
+  // inference_overrides + corruption hints to the renderer. These only take
+  // effect when the workspace is 'nsfw'.
+  ipcMain.handle('vault:getProfile', async () => {
+    try { return { success: true, ...vaultProfile.readProfile() }; }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+
+  ipcMain.handle('vault:setProfile', async (_, patch) => {
+    try {
+      const res = vaultProfile.writeProfile(patch || {});
+      if (res.success) {
+        try {
+          const npu = getService('npu-bridge');
+          if (npu && typeof npu.invalidateStatusCache === 'function') npu.invalidateStatusCache();
+        } catch (_) { /* non-blocking */ }
+      }
+      return res;
+    } catch (err) { return { success: false, error: err.message }; }
+  });
+
+  // ─── Vault Lore (Worldbuilding) ──────────────────────────────────────────
+  // Opaque JSON entries — renderer encrypts/decrypts the content blob using
+  // the unlocked vault password via the existing crypto:encrypt IPC. Same
+  // trust model as vault conversations.
+  const _loreDeps = () => ({ getDb: () => db, saveDatabase });
+
+  ipcMain.handle('vault:loreList', async (_, payload = {}) => {
+    try { return { success: true, entries: vaultLore.listEntries({ ..._loreDeps(), kind: payload?.kind || null, limit: payload?.limit || 500 }) }; }
+    catch (err) { return { success: false, error: err.message, entries: [] }; }
+  });
+
+  ipcMain.handle('vault:loreSave', async (_, entry) => {
+    try { return vaultLore.upsertEntry({ ..._loreDeps(), entry }); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+
+  ipcMain.handle('vault:loreDelete', async (_, id) => {
+    try { return vaultLore.deleteEntry({ ..._loreDeps(), id }); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+
+  ipcMain.handle('vault:loreLinks', async () => {
+    try { return { success: true, links: vaultLore.listLinks(_loreDeps()) }; }
+    catch (err) { return { success: false, error: err.message, links: [] }; }
+  });
+
+  ipcMain.handle('vault:loreLinkSave', async (_, link) => {
+    try { return vaultLore.upsertLink({ ..._loreDeps(), link }); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+
+  ipcMain.handle('vault:loreLinkDelete', async (_, id) => {
+    try { return vaultLore.deleteLink({ ..._loreDeps(), id }); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+
+  // ─── Audio Layer (local TTS + ambience) ──────────────────────────────────
+  ipcMain.handle('audio:getConfig', async () => audioLayer.getConfig());
+  ipcMain.handle('audio:setConfig', async (_, patch) => audioLayer.setConfig(patch || {}));
+  ipcMain.handle('audio:synthesize', async (_, payload) => {
+    try { return await audioLayer.synthesize(payload || {}); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+  ipcMain.handle('audio:ambience', async (_, payload) => {
+    try { return await audioLayer.ambience(payload || {}); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+  ipcMain.handle('audio:stop', async () => audioLayer.stop());
+  ipcMain.handle('audio:cleanup', async () => audioLayer.cleanupOldFiles());
+
+  // ─── Haptic Bridge (opt-in) ──────────────────────────────────────────────
+  ipcMain.handle('haptic:getConfig', async () => hapticBridge.getConfig());
+  ipcMain.handle('haptic:setConfig', async (_, patch) => hapticBridge.setConfig(patch || {}));
+  ipcMain.handle('haptic:status', async () => hapticBridge.status());
+  ipcMain.handle('haptic:connect', async () => {
+    try { return await hapticBridge.connect(); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+  ipcMain.handle('haptic:disconnect', async () => {
+    try { return await hapticBridge.disconnect(); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+  ipcMain.handle('haptic:scan', async (_, payload) => {
+    try { return await hapticBridge.scan(payload || {}); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+  ipcMain.handle('haptic:list', async () => {
+    try { return await hapticBridge.listDevices(); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+  ipcMain.handle('haptic:vibrate', async (_, payload) => {
+    try { return await hapticBridge.vibrate(payload || {}); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+  ipcMain.handle('haptic:stop', async () => {
+    try { return await hapticBridge.stop(); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+
+  // ─── Character Evolution (opt-in, reversible) ────────────────────────────
+  const _evoDeps = () => ({ getDb: () => db, saveDatabase });
+
+  ipcMain.handle('charEvolution:getState', async (_, characterId) => {
+    try { return characterEvolution.getState({ ..._evoDeps(), characterId }); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+  ipcMain.handle('charEvolution:setEnabled', async (_, payload = {}) => {
+    try { return characterEvolution.setEnabled({ ..._evoDeps(), characterId: payload.characterId, enabled: payload.enabled }); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+  ipcMain.handle('charEvolution:listHistory', async (_, payload = {}) => {
+    try { return characterEvolution.listHistory({ ..._evoDeps(), characterId: payload.characterId, limit: payload.limit }); }
+    catch (err) { return { success: false, error: err.message, history: [] }; }
+  });
+  ipcMain.handle('charEvolution:snapshot', async (_, payload = {}) => {
+    try { return characterEvolution.snapshot({ ..._evoDeps(), ...payload }); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+  ipcMain.handle('charEvolution:revertTo', async (_, payload = {}) => {
+    try { return characterEvolution.revertTo({ ..._evoDeps(), characterId: payload.characterId, version: payload.version }); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+  ipcMain.handle('charEvolution:currentTraits', async (_, characterId) => {
+    try { return characterEvolution.getCurrentTraitState({ ..._evoDeps(), characterId }); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+  ipcMain.handle('charEvolution:exportJsonl', async (_, characterId) => {
+    try { return characterEvolution.exportJsonl({ ..._evoDeps(), characterId }); }
+    catch (err) { return { success: false, error: err.message }; }
+  });
+
   // Encryption
   ipcMain.handle('crypto:encrypt', (_, data, password) => {
     if (!password) {
       throw new Error('Password required for encryption');
     }
-    
+
     const algorithm = 'aes-256-gcm';
     const salt = crypto.randomBytes(16);
     const key = crypto.scryptSync(password, salt, 32);
     const iv = crypto.randomBytes(16);
     const cipher = crypto.createCipheriv(algorithm, key, iv);
-    
+
     let encrypted = cipher.update(data, 'utf8', 'hex');
     encrypted += cipher.final('hex');
     const authTag = cipher.getAuthTag();
-    
+
     return {
       encrypted,
       iv: iv.toString('hex'),
@@ -3654,29 +4716,44 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       authTag: authTag.toString('hex')
     };
   });
-  
+
   ipcMain.handle('crypto:decrypt', (_, data, password) => {
     if (!password) {
       throw new Error('Password required for decryption');
     }
-    
+
     const algorithm = 'aes-256-gcm';
     const salt = Buffer.from(data.salt, 'hex');
     const key = crypto.scryptSync(password, salt, 32);
     const iv = Buffer.from(data.iv, 'hex');
     const decipher = crypto.createDecipheriv(algorithm, key, iv);
     decipher.setAuthTag(Buffer.from(data.authTag, 'hex'));
-    
+
     let decrypted = decipher.update(data.encrypted, 'hex', 'utf8');
     decrypted += decipher.final('utf8');
-    
+
     return decrypted;
   });
-  
+
   // App Info
   ipcMain.handle('app:getPath', () => userDataPath);
   ipcMain.handle('app:getVersion', () => app.getVersion());
-  
+  ipcMain.handle('app:isPackaged', () => app.isPackaged);
+  ipcMain.handle('ipc:getDeprecationStats', () => Object.fromEntries(deprecatedIpcCounters.entries()));
+  ipcMain.handle('perf:getSnapshot', () => getPerfSnapshot());
+  ipcMain.handle('perf:subscribe', (event) => {
+    perfSubscribers.add(event.sender.id);
+    return { success: true, snapshot: getPerfSnapshot() };
+  });
+  ipcMain.handle('perf:unsubscribe', (event) => {
+    perfSubscribers.delete(event.sender.id);
+    return { success: true };
+  });
+  ipcMain.handle('perf:updateRenderer', (_, payload = {}) => {
+    updateRendererPerfSnapshot(payload);
+    return { success: true };
+  });
+
   // Shell
   ipcMain.handle('shell:openExternal', async (_, url) => {
     try {
@@ -3705,7 +4782,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // GPU Info (legacy - kept for compatibility)
   ipcMain.handle('system:gpuInfo', async () => {
     try {
@@ -3719,7 +4796,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ============================================
   // Hardware Detection & Monitoring
   // ============================================
-  
+
   // Full hardware detection (GPUs, NPU, CPU, RAM)
   ipcMain.handle('hardware:detect', async () => {
     if (!hardwareDetection) {
@@ -3824,70 +4901,129 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     }
   });
 
-  // Create Ollama model from local GGUF file
-  ipcMain.handle('ollama:createFromFile', async (_, { name, path: modelPath }) => {
-    const { spawn } = require('child_process');
-    const os = require('os');
-    
+  // Register a local GGUF file for direct in-process loading via llamanode.
+  // Does NOT copy the file into Ollama's blob store — the GGUF stays where
+  // the user put it (LM Studio's folder, HF cache, Downloads, etc.) and
+  // the orchestrator routes `gguf:<absolute-path>` model IDs to the
+  // LlamaNodeBackend. Persists the entry into `localGgufCatalog` so the
+  // Model Hub can list it after restart.
+  ipcMain.handle('model:loadLocalGguf', async (_, { path: modelPath, displayName = null } = {}) => {
     try {
-      // Create a temporary Modelfile
-      const modelfilePath = path.join(os.tmpdir(), `Modelfile-${Date.now()}`);
-      const modelfileContent = `FROM "${modelPath.replace(/\\/g, '/')}"`;
-      
-      await fsPromises.writeFile(modelfilePath, modelfileContent, 'utf-8');
-      console.log(`[Ollama] Created Modelfile at ${modelfilePath}`);
-      console.log(`[Ollama] Creating model "${name}" from ${modelPath}`);
-      
-      return new Promise((resolve) => {
-        const proc = spawn('ollama', ['create', name, '-f', modelfilePath], {
-          shell: true,
-          env: { ...process.env }
-        });
-        
-        let stdout = '';
-        let stderr = '';
-        
-        proc.stdout.on('data', (data) => {
-          stdout += data.toString();
-          console.log('[Ollama create]', data.toString().trim());
-        });
-        
-        proc.stderr.on('data', (data) => {
-          stderr += data.toString();
-          console.log('[Ollama create stderr]', data.toString().trim());
-        });
-        
-        proc.on('close', async (code) => {
-          // Clean up Modelfile
-          try {
-            await fsPromises.unlink(modelfilePath);
-          } catch (e) {
-            // Ignore cleanup errors
-          }
-          
-          if (code === 0) {
-            resolve({ 
-              success: true, 
-              name,
-              message: `Model "${name}" created successfully from ${path.basename(modelPath)}`
-            });
-          } else {
-            resolve({ 
-              success: false, 
-              error: stderr || `ollama create failed with code ${code}`,
-              stdout,
-              stderr
-            });
-          }
-        });
-        
-        proc.on('error', (error) => {
-          resolve({ 
-            success: false, 
-            error: `Failed to run ollama: ${error.message}. Make sure Ollama is installed and in your PATH.`
-          });
-        });
-      });
+      if (!modelPath || typeof modelPath !== 'string') {
+        return { success: false, error: 'path is required' };
+      }
+      const resolvedPath = path.resolve(modelPath);
+      if (!fs.existsSync(resolvedPath)) {
+        return { success: false, error: `GGUF not found: ${resolvedPath}` };
+      }
+      if (!resolvedPath.toLowerCase().endsWith('.gguf')) {
+        return { success: false, error: 'File must have .gguf extension' };
+      }
+
+      const stat = await fsPromises.stat(resolvedPath);
+      const name = displayName && typeof displayName === 'string' && displayName.trim()
+        ? displayName.trim()
+        : path.basename(resolvedPath, '.gguf');
+
+      const catalog = store.get('localGgufCatalog') || [];
+      const existingIndex = catalog.findIndex(
+        (entry) => entry && typeof entry === 'object' && entry.path
+          && path.resolve(entry.path).toLowerCase() === resolvedPath.toLowerCase(),
+      );
+      const entry = {
+        id: `gguf:${resolvedPath}`,
+        path: resolvedPath,
+        name,
+        sizeBytes: stat.size,
+        registeredAt: existingIndex >= 0 ? catalog[existingIndex].registeredAt : new Date().toISOString(),
+        lastUsedAt: new Date().toISOString(),
+      };
+      if (existingIndex >= 0) {
+        catalog[existingIndex] = { ...catalog[existingIndex], ...entry };
+      } else {
+        catalog.push(entry);
+      }
+      store.set('localGgufCatalog', catalog);
+
+      console.log(`[model:loadLocalGguf] Registered ${name} -> ${resolvedPath} (${stat.size} bytes)`);
+      return { success: true, id: entry.id, name, path: resolvedPath, sizeBytes: stat.size };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  // Deprecation shim for the old Ollama-copy path. Logs a warning and
+  // forwards to the new registration flow. Remove after one release.
+  ipcMain.handle('ollama:createFromFile', async (_, { name, path: modelPath } = {}) => {
+    console.warn('[ollama:createFromFile] Deprecated IPC — forwarding to model:loadLocalGguf (no file copy)');
+    try {
+      if (!modelPath) return { success: false, error: 'path is required' };
+      const resolvedPath = path.resolve(modelPath);
+      if (!fs.existsSync(resolvedPath)) {
+        return { success: false, error: `GGUF not found: ${resolvedPath}` };
+      }
+      const stat = await fsPromises.stat(resolvedPath);
+      const displayName = name || path.basename(resolvedPath, '.gguf');
+      const catalog = store.get('localGgufCatalog') || [];
+      const existingIndex = catalog.findIndex(
+        (entry) => entry && typeof entry === 'object' && entry.path
+          && path.resolve(entry.path).toLowerCase() === resolvedPath.toLowerCase(),
+      );
+      const entry = {
+        id: `gguf:${resolvedPath}`,
+        path: resolvedPath,
+        name: displayName,
+        sizeBytes: stat.size,
+        registeredAt: existingIndex >= 0 ? catalog[existingIndex].registeredAt : new Date().toISOString(),
+        lastUsedAt: new Date().toISOString(),
+      };
+      if (existingIndex >= 0) {
+        catalog[existingIndex] = { ...catalog[existingIndex], ...entry };
+      } else {
+        catalog.push(entry);
+      }
+      store.set('localGgufCatalog', catalog);
+      return {
+        success: true,
+        name: displayName,
+        id: entry.id,
+        message: `Registered "${displayName}" directly (no file copy — deprecated API)`,
+        deprecated: true,
+      };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('model:listLocalGgufs', async () => {
+    try {
+      const catalog = store.get('localGgufCatalog') || [];
+      const alive = [];
+      let changed = false;
+      for (const entry of catalog) {
+        if (!entry || !entry.path) { changed = true; continue; }
+        if (fs.existsSync(entry.path)) {
+          alive.push(entry);
+        } else {
+          changed = true;
+        }
+      }
+      if (changed) {
+        store.set('localGgufCatalog', alive);
+      }
+      return { success: true, models: alive };
+    } catch (error) {
+      return { success: false, error: error.message, models: [] };
+    }
+  });
+
+  ipcMain.handle('model:unregisterLocalGguf', async (_, { id } = {}) => {
+    try {
+      if (!id) return { success: false, error: 'id is required' };
+      const catalog = store.get('localGgufCatalog') || [];
+      const next = catalog.filter((entry) => entry && entry.id !== id);
+      store.set('localGgufCatalog', next);
+      return { success: true, removed: catalog.length - next.length };
     } catch (error) {
       return { success: false, error: error.message };
     }
@@ -3932,6 +5068,29 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // NPU / OpenVINO Helper
   // ============================================
 
+  const pinDetectedOpenVinoEnv = (context = {}) => {
+    const envCandidates = [
+      context?.cwd ? path.join(context.cwd, 'openvino-env') : null,
+      appPath ? path.join(appPath, 'openvino-env') : null,
+      appPath && String(appPath).includes('app.asar')
+        ? path.join(String(appPath).replace('app.asar', 'app.asar.unpacked'), 'openvino-env')
+        : null,
+      path.join(process.cwd(), 'openvino-env'),
+    ].filter(Boolean);
+
+    const detectedEnvPath = envCandidates.find((candidate) => {
+      const pythonPath = path.join(candidate, 'Scripts', 'python.exe');
+      const openvinoPkg = path.join(candidate, 'Lib', 'site-packages', 'openvino');
+      return fs.existsSync(pythonPath) && fs.existsSync(openvinoPkg);
+    });
+
+    if (detectedEnvPath) {
+      process.env.OPENVINO_ENV_DIR = detectedEnvPath;
+      process.env.OPENVINO_PYTHON = path.join(detectedEnvPath, 'Scripts', 'python.exe');
+    }
+    return detectedEnvPath || null;
+  };
+
   ipcMain.handle('npu:getStatus', async (_, options = {}) => {
     try {
       const npuBridge = getNpuBridge();
@@ -3945,13 +5104,46 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     }
   });
 
+  ipcMain.handle('npu:getServerStatus', async () => {
+    try {
+      const npuBridge = getNpuBridge();
+      if (!npuBridge?.getServerStatus) return null;
+      return await npuBridge.getServerStatus();
+    } catch {
+      return null;
+    }
+  });
+
   ipcMain.handle('npu:startServer', async (_, options = {}) => {
     try {
       const npuBridge = getNpuBridge();
       if (!npuBridge?.startServer) {
         return { success: false, error: 'NPU bridge unavailable', setupRequired: true };
       }
-      const result = await npuBridge.startServer(options || {});
+      let result = await npuBridge.startServer(options || {});
+
+      // Recover automatically when setup is missing/stale.
+      const setupLooksRequired =
+        !result?.success &&
+        (result?.setupRequired || /openvino|setup/i.test(String(result?.error || '')));
+      const allowAutoSetup = options?.autoSetup !== false;
+
+      if (setupLooksRequired && allowAutoSetup) {
+        const setupResult = await runOpenVinoSetupWithFallback();
+        if (setupResult?.success) {
+          pinDetectedOpenVinoEnv(setupResult);
+          npuBridge.clearAllCaches?.();
+          await npuBridge.checkOpenVinoInstallation?.({ force: true });
+          result = await npuBridge.startServer(options || {});
+        } else {
+          result = {
+            ...result,
+            setupAttempted: true,
+            setupResult,
+          };
+        }
+      }
+
       if (result?.success) {
         npuBridge.clearAllCaches?.();
         hardwareDetection.clearCache?.();
@@ -3979,16 +5171,30 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     }
   });
 
+  ipcMain.handle('npu:unloadModel', async () => {
+    try {
+      const npuBridge = getNpuBridge();
+      if (!npuBridge?.unloadModel) {
+        return { success: false, error: 'NPU bridge unavailable' };
+      }
+      return await npuBridge.unloadModel();
+    } catch (error) {
+      console.error('Failed to unload NPU model:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
   ipcMain.handle('npu:setup', async () => {
     try {
-      if (typeof npuSetupService.runOpenVinoSetup !== 'function') {
-        return { success: false, error: 'NPU setup helper unavailable' };
-      }
-
-      const result = await npuSetupService.runOpenVinoSetup(appPath);
+      const result = await runOpenVinoSetupWithFallback();
       if (result?.success) {
+        // Pin discovered environment for this app session so detection works
+        // immediately even when running from packaged/unpacked paths.
+        pinDetectedOpenVinoEnv(result);
+
         const npuBridge = getNpuBridge();
         npuBridge?.clearAllCaches?.();
+        await npuBridge?.checkOpenVinoInstallation?.({ force: true });
         hardwareDetection.clearCache?.();
       }
       return result;
@@ -4011,6 +5217,50 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     }
   });
 
+  ipcMain.handle('npu:configureModel', async (_, payload = {}) => {
+    try {
+      const npuBridge = getNpuBridge();
+      if (!npuBridge?.configureModel) {
+        return { configured: false, error: 'NPU bridge unavailable' };
+      }
+      const modelPath = String(payload?.modelPath || '').trim();
+      if (!modelPath) {
+        return { configured: false, error: 'modelPath is required' };
+      }
+      const result = await npuBridge.configureModel(modelPath, {
+        tokenizer: payload?.tokenizer || modelPath,
+        device: payload?.device || 'NPU',
+        precision: payload?.precision || 'fp16',
+        enableAutoStart: payload?.enableAutoStart,
+      });
+      return {
+        configured: Boolean(result?.success),
+        ...result,
+      };
+    } catch (error) {
+      console.error('Failed to configure NPU model:', error);
+      return { configured: false, error: error.message };
+    }
+  });
+
+  // Load a model onto the already-running NPU server (hot-swap, no restart needed)
+  ipcMain.handle('npu:loadModel', async (_, payload = {}) => {
+    try {
+      const npuBridge = getNpuBridge();
+      if (!npuBridge?.loadModel) return { success: false, error: 'NPU bridge unavailable' };
+      const modelPath = String(payload?.modelPath || payload?.model || '').trim();
+      if (!modelPath) return { success: false, error: 'modelPath is required' };
+      const result = await npuBridge.loadModel(modelPath, {
+        device: payload?.device || 'NPU',
+        tokenizer: payload?.tokenizer || modelPath,
+        precision: payload?.precision || 'fp16',
+      });
+      return result;
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+
   ipcMain.handle('npu:clearCache', async () => {
     try {
       const npuBridge = getNpuBridge();
@@ -4024,9 +5274,82 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   });
 
   // ============================================
+  // Unified Brain (Hybrid GPU+NPU)
+  // ============================================
+
+  ipcMain.handle('npu:getHybridCapabilities', async () => {
+    try {
+      const npuBridge = getNpuBridge();
+      return await npuBridge.getHybridCapabilities();
+    } catch (error) {
+      console.error('Failed to get hybrid capabilities:', error);
+      return { available: false, modes: [], error: error.message };
+    }
+  });
+
+  ipcMain.handle('npu:getHybridStatus', async () => {
+    try {
+      const npuBridge = getNpuBridge();
+      return npuBridge.getHybridStatus();
+    } catch (error) {
+      console.error('Failed to get hybrid status:', error);
+      return { enabled: false, mode: null, device: 'NPU' };
+    }
+  });
+
+  ipcMain.handle('npu:enableHybridMode', async (_, modeId) => {
+    try {
+      const npuBridge = getNpuBridge();
+      let result = await npuBridge.enableHybridMode(modeId);
+
+      // If enableHybridMode's own setup attempt failed, try the full fallback
+      if (result?.setupRequired && !result.success) {
+        console.log('[IPC] enableHybridMode needs setup â€” running full fallback...');
+        const setupResult = await runOpenVinoSetupWithFallback();
+        if (setupResult?.success) {
+          pinDetectedOpenVinoEnv(setupResult);
+          npuBridge.clearAllCaches?.();
+          await npuBridge.checkOpenVinoInstallation?.({ force: true });
+          result = await npuBridge.enableHybridMode(modeId);
+        }
+      }
+
+      if (result.success) {
+        const orch = getOrchestrator?.();
+        if (orch) {
+          orch.initialized = false;
+          await orch.initialize();
+        }
+      }
+      return result;
+    } catch (error) {
+      console.error('Failed to enable hybrid mode:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('npu:disableHybridMode', async () => {
+    try {
+      const npuBridge = getNpuBridge();
+      const result = await npuBridge.disableHybridMode();
+      if (result.success) {
+        const orch = getOrchestrator?.();
+        if (orch) {
+          orch.initialized = false;
+          await orch.initialize();
+        }
+      }
+      return result;
+    } catch (error) {
+      console.error('Failed to disable hybrid mode:', error);
+      return { success: false, error: error.message };
+    }
+  });
+
+  // ============================================
   // Power Mode
   // ============================================
-  
+
   const powerMode = getPowerMode();
 
   ipcMain.handle('powerMode:enable', async () => {
@@ -4062,16 +5385,67 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ============================================
   // Backend Management (Orchestrator)
   // ============================================
-  
+
   let orchestrator = null;
   if (getOrchestrator) {
     orchestrator = getOrchestrator(store);
-    
+
     // Initialize orchestrator
     orchestrator.initialize().catch(error => {
       console.error('Failed to initialize orchestrator:', error);
     });
   }
+
+  // ─── Ensemble Cast / Parallel Stream ─────────────────────────────────────
+  // Fan out multiple persona-scoped streams through the orchestrator.
+  // Each member uses its own model, system prompt, and options; chunks are
+  // multiplexed back on a single channel tagged with castId.
+  ipcMain.handle('llm:parallelStream', async (event, payload = {}) => {
+    const members = Array.isArray(payload?.cast) ? payload.cast.filter(Boolean) : [];
+    if (members.length === 0) {
+      return { success: false, error: 'No cast members provided' };
+    }
+    if (!orchestrator || typeof orchestrator.parallelStream !== 'function') {
+      return { success: false, error: 'Parallel stream unsupported in this environment' };
+    }
+    const streamChannel = typeof payload?.channel === 'string' && payload.channel.trim()
+      ? payload.channel.trim()
+      : `llm:parallel:${typeof crypto?.randomUUID === 'function' ? crypto.randomUUID() : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`}`;
+
+    const safeSend = (payload) => {
+      try {
+        if (!event.sender.isDestroyed()) event.sender.send(streamChannel, payload);
+      } catch (_) { /* noop */ }
+    };
+
+    const cast = members.slice(0, 6).map((m, idx) => ({
+      id: String(m.id || `cast-${idx}`),
+      label: String(m.label || m.id || `Cast ${idx + 1}`),
+      model: m.model,
+      mode: 'stream',
+      payload: {
+        model: m.model,
+        messages: m.messages || [{ role: 'user', content: String(m.prompt || '') }],
+        options: m.options || {},
+        stream: true,
+      },
+    }));
+
+    try {
+      const result = await orchestrator.parallelStream({
+        cast,
+        maxParallel: Math.max(1, Math.min(4, Number(payload.maxParallel) || 3)),
+        onChunk: (castId, chunk) => {
+          safeSend({ castId, ...chunk });
+        },
+      });
+      safeSend({ done: true, summary: result });
+      return { started: true, channel: streamChannel, count: cast.length };
+    } catch (error) {
+      safeSend({ error: error?.message || 'parallel stream failed' });
+      return { started: false, channel: streamChannel, error: error?.message || String(error) };
+    }
+  });
 
   ipcMain.handle('llm:getBackends', async () => {
     if (!orchestrator) {
@@ -4109,6 +5483,43 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return 'balanced';
     }
     return orchestrator.getProfile();
+  });
+
+  // Phase 1: per-device activity for the HardwareMonitor UI. Pulls from
+  // the orchestrator's recentDecisions log aggregated into NPU / GPU /
+  // iGPU / CPU buckets plus the warmloop status.
+  ipcMain.handle('orchestrator:getDeviceUtilization', (_, windowMs) => {
+    if (!orchestrator || typeof orchestrator.getDeviceUtilization !== 'function') {
+      return {
+        available: false,
+        devices: [],
+        warmloop: { active: false, available: false },
+        streams: {
+          firstTokenMs: null,
+          last: null,
+          aborts: {},
+          warmloopTransitions: [],
+        },
+      };
+    }
+    try {
+      const report = orchestrator.getDeviceUtilization(Number(windowMs) > 0 ? Number(windowMs) : 60000);
+      return { available: true, ...report };
+    } catch (err) {
+      return { available: false, error: err.message, devices: [] };
+    }
+  });
+
+  ipcMain.handle('orchestrator:recordStreamEvent', (_, payload = {}) => {
+    if (!orchestrator || typeof orchestrator.recordStreamEvent !== 'function') {
+      return { success: false, error: 'Orchestrator not available' };
+    }
+    try {
+      orchestrator.recordStreamEvent(payload || {});
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
   });
 
   ipcMain.handle('llm:setProfile', (_, profile) => {
@@ -4209,6 +5620,11 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         queue: { queued: 0, active: 0, lanes: {}, activeJobs: [], metrics: {} },
         fallbackCounters: {},
         recentDecisions: [],
+        lastExecutionMode: null,
+        requestedModel: null,
+        effectiveModel: null,
+        effectiveOptions: {},
+        modeReasons: [],
         offloadEvidence: [],
         hardware: { gpuCount: 0, hasNpu: false, cpu: null },
         deviceUtilization: await buildDeviceSnapshot(),
@@ -4378,18 +5794,36 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   ipcMain.handle('presets:save', (_, preset) => {
     if (!db) return { success: false, error: 'Database not initialized' };
     try {
+      const modelName = String(preset?.model_name || '').trim().slice(0, 256);
+      if (!modelName) {
+        return { success: false, error: 'Model name is required' };
+      }
+
       const id =
         preset.id ||
         (crypto.randomUUID ? crypto.randomUUID() : crypto.randomBytes(16).toString('hex'));
+      const safeTemperature = clampNumber(preset?.temperature ?? 0.7, 0, 2, 0.7);
+      const safeTopP = clampNumber(preset?.top_p ?? 0.9, 0, 1, 0.9);
+      const safeTopK = clampInteger(preset?.top_k ?? 40, 1, 2000, 40);
+      const safeContextLength = preset?.context_length == null || preset?.context_length === ''
+        ? null
+        : clampInteger(preset.context_length, 256, 262144, 4096);
+      const safeSystemPrompt = typeof preset?.system_prompt === 'string'
+        ? preset.system_prompt.slice(0, 8000)
+        : null;
+      const safeWorkspace = typeof preset?.workspace === 'string'
+        ? preset.workspace.trim().slice(0, 64) || null
+        : null;
+
       const values = [
         id,
-        preset.model_name,
-        preset.temperature ?? 0.7,
-        preset.top_p ?? 0.9,
-        preset.top_k ?? 40,
-        preset.context_length || null,
-        preset.system_prompt || null,
-        preset.workspace || null,
+        modelName,
+        safeTemperature,
+        safeTopP,
+        safeTopK,
+        safeContextLength,
+        safeSystemPrompt,
+        safeWorkspace,
         preset.is_default ? 1 : 0,
       ];
 
@@ -4563,7 +5997,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ============================================
   // Model Manager
   // ============================================
-  
+
   const modelManager = getModelManager({
     modelsDirectory: store.get('modelsDirectory'),
   });
@@ -4579,9 +6013,22 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     return dir;
   };
 
+  const ensureModelManagerScanned = async () => {
+    const dir = resolveModelsDirectory();
+    if (!dir) return;
+
+    if (modelManager.modelsDirectory !== dir) {
+      modelManager.setModelsDirectory(dir);
+    }
+
+    if (!modelManager.lastScan) {
+      await modelManager.scanDirectory(dir);
+    }
+  };
+
   const ollamaHelperFactory = getOllamaHelperFactory();
   const ollamaHelper = ollamaHelperFactory ? ollamaHelperFactory({ store, shell, makeRequest }) : null;
-  
+
   const imageBackendHelperFactory = getImageBackendHelperFactory();
   const imageBackendHelper = imageBackendHelperFactory ? imageBackendHelperFactory({ shell, makeRequest, store }) : null;
 
@@ -4593,19 +6040,23 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     return await modelManager.scanDirectory(scanDirectory);
   });
 
-  ipcMain.handle('models:getAll', () => {
+  ipcMain.handle('models:getAll', async () => {
+    await ensureModelManagerScanned();
     return modelManager.getModels();
   });
 
-  ipcMain.handle('models:getByFormat', (_, format) => {
+  ipcMain.handle('models:getByFormat', async (_, format) => {
+    await ensureModelManagerScanned();
     return modelManager.getModelsByFormat(format);
   });
 
-  ipcMain.handle('models:getForBackend', (_, backendId) => {
+  ipcMain.handle('models:getForBackend', async (_, backendId) => {
+    await ensureModelManagerScanned();
     return modelManager.getModelsForBackend(backendId);
   });
 
-  ipcMain.handle('models:getStats', () => {
+  ipcMain.handle('models:getStats', async () => {
+    await ensureModelManagerScanned();
     return modelManager.getStatistics();
   });
 
@@ -4637,6 +6088,22 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // System-wide model scanning
   ipcMain.handle('models:scanSystem', async (_, options) => {
     return await modelManager.scanSystem(options);
+  });
+
+  ipcMain.handle('scanFolderForModels', async (_, directory) => {
+    const folderPath = typeof directory === 'string' ? directory.trim() : '';
+    if (!folderPath) {
+      return { models: [], error: 'No directory provided' };
+    }
+
+    try {
+      const { ModelManager } = require('./services/model-manager');
+      const tempManager = new ModelManager({ modelsDirectory: folderPath });
+      return await tempManager.scanDirectory(folderPath);
+    } catch (error) {
+      console.error('Failed to scan folder for models:', error);
+      return { models: [], error: error.message };
+    }
   });
 
   ipcMain.handle('models:getCommonLocations', () => {
@@ -4672,15 +6139,15 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       properties: ['openDirectory'],
       title: 'Select Models Directory'
     });
-    
+
     if (result.canceled || !result.filePaths[0]) {
       return { canceled: true };
     }
-    
+
     const directory = result.filePaths[0];
     modelManager.setModelsDirectory(directory);
     store.set('modelsDirectory', directory);
-    
+
     return { success: true, directory };
   });
 
@@ -4696,11 +6163,11 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         { name: 'All Files', extensions: ['*'] }
       ]
     });
-    
+
     if (result.canceled || !result.filePaths.length) {
       return { canceled: true };
     }
-    
+
     return { success: true, files: result.filePaths };
   });
 
@@ -4711,6 +6178,151 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     } catch (error) {
       return { success: false, error: error.message };
     }
+  });
+
+  // Detect Ollama models that were previously imported from LM Studio GGUFs
+  // via the legacy `ollama:createFromFile` path. Those imports COPY the GGUF
+  // into Ollama's blob store, doubling disk use. This handler finds the
+  // duplicates and estimates reclaimable space; `lmstudio:reclaim` removes
+  // them from Ollama and registers the originals into localGgufCatalog so
+  // they load directly via llamanode.
+  ipcMain.handle('lmstudio:scanImportedDuplicates', async () => {
+    const os = require('os');
+    const homeDir = os.homedir();
+
+    try {
+      // Build LM Studio path index keyed by basename for fast match.
+      const lmStudioPaths = [
+        path.join(homeDir, '.lmstudio', 'models'),
+        path.join(homeDir, '.cache', 'lm-studio', 'models'),
+        path.join(process.env.LOCALAPPDATA || '', 'LM-Studio', 'models'),
+      ];
+
+      const lmStudioByBasename = new Map();
+      for (const basePath of lmStudioPaths) {
+        if (!fs.existsSync(basePath)) continue;
+        const walk = (dir, depth = 0) => {
+          if (depth > 5) return;
+          try {
+            const entries = fs.readdirSync(dir, { withFileTypes: true });
+            for (const entry of entries) {
+              const fullPath = path.join(dir, entry.name);
+              if (entry.isDirectory()) {
+                walk(fullPath, depth + 1);
+              } else if (entry.isFile() && entry.name.endsWith('.gguf')) {
+                const key = entry.name.toLowerCase();
+                if (!lmStudioByBasename.has(key)) {
+                  lmStudioByBasename.set(key, fullPath);
+                }
+              }
+            }
+          } catch {
+            // Skip inaccessible dirs.
+          }
+        };
+        walk(basePath);
+      }
+
+      // Fetch Ollama tag list to find candidates.
+      const endpoint = store.get('llmEndpoint') || 'http://127.0.0.1:11434';
+      let ollamaTags = [];
+      try {
+        const res = await makeRequest(`${endpoint}/api/tags`, { timeout: 4000 });
+        ollamaTags = Array.isArray(res?.data?.models) ? res.data.models : [];
+      } catch (err) {
+        return {
+          success: false,
+          error: `Could not reach Ollama at ${endpoint}: ${err.message}`,
+          duplicates: [],
+        };
+      }
+
+      // Heuristic: Ollama model names created by the legacy import path used
+      // patterns like `lmstudio-import-*` or contained sanitized GGUF base
+      // names. Match on the leading `lmstudio` marker, and additionally try
+      // to find LM Studio GGUFs whose basename appears in the tag name.
+      const duplicates = [];
+      for (const tag of ollamaTags) {
+        const tagName = String(tag?.name || '').trim();
+        if (!tagName) continue;
+        const nameLower = tagName.toLowerCase();
+
+        let matchedPath = null;
+        let matchReason = null;
+
+        if (nameLower.includes('lmstudio')) {
+          matchReason = 'name-prefix';
+        }
+
+        if (!matchedPath) {
+          for (const [basename, fullPath] of lmStudioByBasename.entries()) {
+            const stem = basename.replace(/\.gguf$/i, '');
+            if (stem && nameLower.includes(stem)) {
+              matchedPath = fullPath;
+              matchReason = matchReason || 'name-overlap';
+              break;
+            }
+          }
+        }
+
+        if (!matchReason) continue;
+
+        duplicates.push({
+          ollamaTag: tagName,
+          sizeBytes: Number(tag?.size) || 0,
+          sizeFormatted: formatFileSize(Number(tag?.size) || 0),
+          matchedLmStudioPath: matchedPath,
+          matchReason,
+        });
+      }
+
+      const reclaimableBytes = duplicates.reduce((sum, d) => sum + (d.sizeBytes || 0), 0);
+
+      return {
+        success: true,
+        duplicates,
+        reclaimableBytes,
+        reclaimableFormatted: formatFileSize(reclaimableBytes),
+        lmStudioPathsScanned: lmStudioPaths.filter((p) => fs.existsSync(p)),
+      };
+    } catch (error) {
+      return { success: false, error: error.message, duplicates: [] };
+    }
+  });
+
+  ipcMain.handle('lmstudio:reclaim', async (_, { ollamaTags = [] } = {}) => {
+    if (!Array.isArray(ollamaTags) || ollamaTags.length === 0) {
+      return { success: false, error: 'No ollamaTags provided', removed: [] };
+    }
+
+    const endpoint = store.get('llmEndpoint') || 'http://127.0.0.1:11434';
+    const removed = [];
+    const failed = [];
+
+    for (const tag of ollamaTags) {
+      try {
+        const res = await makeRequest(`${endpoint}/api/delete`, {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: { name: tag },
+          timeout: 15000,
+        });
+        if (res.status === 200 || res.status === 204) {
+          removed.push(tag);
+        } else {
+          failed.push({ tag, error: `HTTP ${res.status}` });
+        }
+      } catch (err) {
+        failed.push({ tag, error: err.message });
+      }
+    }
+
+    return {
+      success: failed.length === 0,
+      removed,
+      failed,
+      message: `Removed ${removed.length} duplicate Ollama models. LM Studio originals remain on disk and can be loaded directly via "Load local GGUF".`,
+    };
   });
 
   // Scan LM Studio models folder
@@ -4731,7 +6343,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       try {
         if (!fs.existsSync(basePath)) continue;
         scannedPaths.push(basePath);
-        
+
         // Recursively find all .gguf files
         const findGgufFiles = (dir, depth = 0) => {
           if (depth > 5) return; // Limit recursion
@@ -4757,7 +6369,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
             // Skip inaccessible directories
           }
         };
-        
+
         findGgufFiles(basePath);
       } catch (error) {
         console.error(`Failed to scan LM Studio path ${basePath}:`, error);
@@ -4772,22 +6384,22 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return true;
     });
 
-    return { 
-      models: uniqueModels, 
+    return {
+      models: uniqueModels,
       scannedPaths,
-      count: uniqueModels.length 
+      count: uniqueModels.length
     };
   });
 
   // ============================================
   // MODEL PROVIDERS - Unified Multi-Provider API
   // ============================================
-  
+
   const { getModelProviders } = require('./services/model-providers');
   const { getHuggingFaceBrowser } = require('./services/huggingface-browser');
   const modelProviders = getModelProviders();
   const hfBrowser = getHuggingFaceBrowser();
-  
+
   // Forward HF download progress events to renderer
   hfBrowser.on('download:progress', (progress) => {
     mainWindow.webContents.send('hf:downloadProgress', progress);
@@ -4798,9 +6410,9 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   hfBrowser.on('download:error', (progress) => {
     mainWindow.webContents.send('hf:downloadProgress', { ...progress, status: 'error' });
   });
-  
+
   // --- Provider Search & Browse ---
-  
+
   ipcMain.handle('providers:searchAll', async (_, query, options) => {
     try {
       return await modelProviders.searchAll(query, options);
@@ -4809,16 +6421,16 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { ollama: [], huggingface: [], civitai: [], error: error.message };
     }
   });
-  
-  ipcMain.handle('providers:getOllamaModels', async (_, category) => {
+
+  ipcMain.handle('providers:getOllamaModels', async (_, category, options = {}) => {
     try {
-      return await modelProviders.getOllamaModels(category);
+      return await modelProviders.getOllamaModels(category, options);
     } catch (error) {
       console.error('Failed to get Ollama models:', error);
       return [];
     }
   });
-  
+
   ipcMain.handle('providers:getImageModels', async (_, category) => {
     try {
       return await modelProviders.getImageModels(category);
@@ -4827,7 +6439,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return [];
     }
   });
-  
+
   ipcMain.handle('providers:getVisionModels', async () => {
     try {
       return await modelProviders.getVisionModels();
@@ -4836,25 +6448,53 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return [];
     }
   });
-  
+
   ipcMain.handle('providers:getAudioModels', async () => {
     // Placeholder for future audio model support
     return [];
   });
-  
+
   ipcMain.handle('providers:getVideoModels', async () => {
     // Placeholder for future video model support
     return [];
   });
-  
+
   ipcMain.handle('providers:getEmbeddingModels', async () => {
     // Placeholder for future embedding model support
     return [];
   });
-  
-  ipcMain.handle('providers:getNSFWModels', async (_, type) => {
+
+  const EMPTY_PRIVATE_VAULT_MODELS = { text: [], vision: [], image: [], audio: [], multimodal: [] };
+
+  const hasVerifiedVaultPassword = (password) => {
+    const candidate = typeof password === 'string' ? password.trim() : '';
+    if (!candidate) return false;
+
     try {
-      // This returns NSFW models - only accessible from Private workspace
+      const result = db.exec("SELECT password_hash, salt FROM nsfw_auth WHERE id = 'nsfw'");
+      if (!result.length || !result[0].values.length) {
+        return false;
+      }
+
+      const [storedHash, salt] = result[0].values[0];
+      const hash = crypto.scryptSync(candidate, salt, 64).toString('hex');
+
+      return crypto.timingSafeEqual(
+        Buffer.from(hash),
+        Buffer.from(storedHash)
+      );
+    } catch (error) {
+      console.error('Failed to verify vault password for model provider access:', error);
+      return false;
+    }
+  };
+
+  ipcMain.handle('providers:getNSFWModels', async (_, type, password) => {
+    if (!hasVerifiedVaultPassword(password)) {
+      return type && type !== 'all' ? [] : EMPTY_PRIVATE_VAULT_MODELS;
+    }
+
+    try {
       const vaultModels = await modelProviders.getPrivateVaultModels();
       if (type && type !== 'all') {
         return vaultModels[type] || [];
@@ -4862,10 +6502,10 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return vaultModels;
     } catch (error) {
       console.error('Failed to get NSFW models:', error);
-      return {};
+      return EMPTY_PRIVATE_VAULT_MODELS;
     }
   });
-  
+
   ipcMain.handle('providers:getAllCategories', async () => {
     try {
       return modelProviders.getAllCategories();
@@ -4874,7 +6514,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return {};
     }
   });
-  
+
   ipcMain.handle('providers:getFeatured', async () => {
     try {
       return await modelProviders.getFeaturedModels();
@@ -4883,7 +6523,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { llm: { ollama: [], huggingface: [] }, vision: [], image: [] };
     }
   });
-  
+
   ipcMain.handle('providers:getRecommendations', async (_, vramGB, ramGB) => {
     try {
       return modelProviders.getHardwareRecommendations(vramGB, ramGB);
@@ -4892,18 +6532,22 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { llm: [], vision: [], image: [] };
     }
   });
-  
-  ipcMain.handle('providers:getPrivateVaultModels', async () => {
+
+  ipcMain.handle('providers:getPrivateVaultModels', async (_, password) => {
+    if (!hasVerifiedVaultPassword(password)) {
+      return EMPTY_PRIVATE_VAULT_MODELS;
+    }
+
     try {
       return await modelProviders.getPrivateVaultModels();
     } catch (error) {
       console.error('Failed to get Private Vault models:', error);
-      return { text: [], vision: [], image: [], audio: [], multimodal: [] };
+      return EMPTY_PRIVATE_VAULT_MODELS;
     }
   });
-  
+
   // --- Provider Downloads ---
-  
+
   ipcMain.handle('providers:pullOllamaModel', async (_, modelName) => {
     try {
       const normalizedModelName =
@@ -4913,7 +6557,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       }
 
       const endpoint = store.get('llmEndpoint') || 'http://localhost:11434';
-      
+
       // Generate a V2-compatible job ID
       const jobId = `ollama-${normalizedModelName.replace(/[^a-zA-Z0-9]/g, '-')}-${Date.now()}`;
       let jobCreated = false;
@@ -4939,7 +6583,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         statusMessage: download?.statusMessage ? String(download.statusMessage) : null,
         digest: download?.digest ? String(download.digest) : null,
       });
-      
+
       // Callback for progress updates
       const onProgress = (download) => {
         const safeDownload = toSafePullProgress(download);
@@ -4951,7 +6595,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
           url: `ollama://pull/${normalizedModelName}`,
           destinationDir: 'ollama',
           filename: normalizedModelName,
-          status: safeDownload.status === 'downloading' ? 'downloading' : 
+          status: safeDownload.status === 'downloading' ? 'downloading' :
                   safeDownload.status === 'completed' ? 'completed' :
                   safeDownload.status === 'error' ? 'error' :
                   safeDownload.status === 'cancelled' ? 'cancelled' : 'queued',
@@ -4972,18 +6616,18 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
             digest: safeDownload.digest,
           },
         };
-        
+
         // Emit V2-style events for DownloadCenter
         if (!jobCreated) {
           emitRendererEvent('downloads:jobCreated', job, 'Provider Downloads');
           emitRendererEvent('downloads:jobStarted', job, 'Provider Downloads');
           jobCreated = true;
         }
-        
+
         // Send progress update
         emitRendererEvent('downloads:jobProgress', job, 'Provider Downloads');
         emitRendererEvent('providers:pullProgress', safeDownload, 'Provider Downloads');
-        
+
         // Send completion/error events
         if (safeDownload.status === 'completed') {
           emitRendererEvent('downloads:jobCompleted', job, 'Provider Downloads');
@@ -4993,7 +6637,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
           emitRendererEvent('downloads:jobCancelled', job, 'Provider Downloads');
         }
       };
-      
+
       const startOllamaDownload = modelDownloader.startOllamaDownload;
       if (typeof startOllamaDownload !== 'function') {
         return {
@@ -5003,21 +6647,21 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       }
 
       const downloadId = startOllamaDownload(normalizedModelName, endpoint, onProgress);
-      
+
       return { success: true, downloadId, jobId };
     } catch (error) {
       console.error('Failed to pull Ollama model:', error);
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('providers:downloadModel', async (_, modelData) => {
     try {
       const targetDir = resolveModelsDirectory();
       await fsPromises.mkdir(targetDir, { recursive: true });
-      
+
       let downloadId;
-      
+
       if (modelData.source === 'huggingface' || modelData.downloadUrl?.includes('huggingface.co')) {
         const startHuggingFaceDownload = modelDownloader.startHuggingFaceDownload;
         if (typeof startHuggingFaceDownload !== 'function') {
@@ -5061,7 +6705,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
           checksumAlgorithm: modelData.checksumAlgorithm || 'sha256',
         });
       }
-      
+
       // Send progress updates
       const progressInterval = setInterval(() => {
         const downloads = modelDownloader.getDownloads();
@@ -5073,22 +6717,26 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
           }
         }
       }, 500);
-      
+
       return { success: true, downloadId };
     } catch (error) {
       console.error('Failed to download model:', error);
       return { success: false, error: error.message };
     }
   });
-  
-  ipcMain.handle('providers:downloadNsfwModel', async (_, modelData) => {
-    // Same as downloadModel but for NSFW content - could add additional logging/tracking
+
+  ipcMain.handle('providers:downloadNsfwModel', async (_, modelData, password) => {
+    if (!hasVerifiedVaultPassword(password)) {
+      return { success: false, error: 'Vault is locked' };
+    }
+
+    // Same as downloadModel but for protected catalog content.
     try {
       const targetDir = path.join(resolveModelsDirectory(), 'nsfw');
       await fsPromises.mkdir(targetDir, { recursive: true });
-      
+
       let downloadId;
-      
+
       if (modelData.source === 'huggingface' || modelData.downloadUrl?.includes('huggingface.co')) {
         downloadId = modelDownloader.startHuggingFaceDownload({
           repo: modelData.repo || modelData.modelId,
@@ -5105,7 +6753,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
           checksumAlgorithm: modelData.checksumAlgorithm || 'sha256',
         });
       }
-      
+
       // Send progress updates
       const progressInterval = setInterval(() => {
         const downloads = modelDownloader.getDownloads();
@@ -5117,18 +6765,18 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
           }
         }
       }, 500);
-      
+
       return { success: true, downloadId };
     } catch (error) {
       console.error('Failed to download NSFW model:', error);
       return { success: false, error: error.message };
     }
   });
-  
+
   // ============================================
   // HUGGINGFACE BROWSER - Dedicated HF API
   // ============================================
-  
+
   ipcMain.handle('hf:search', async (_, query, options) => {
     try {
       return await hfBrowser.searchModels(query, options);
@@ -5151,7 +6799,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       };
     }
   });
-  
+
   ipcMain.handle('hf:getModelDetails', async (_, modelId) => {
     try {
       return await hfBrowser.getModelDetails(modelId);
@@ -5160,7 +6808,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return null;
     }
   });
-  
+
   ipcMain.handle('hf:getModelFiles', async (_, modelId, options = {}) => {
     try {
       return await hfBrowser.getModelFiles(modelId, options || {});
@@ -5171,7 +6819,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         : [];
     }
   });
-  
+
   ipcMain.handle('hf:getCollections', async () => {
     try {
       return hfBrowser.getCollections();
@@ -5180,7 +6828,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return {};
     }
   });
-  
+
   ipcMain.handle('hf:getCollectionModels', async (_, collectionId) => {
     try {
       return await hfBrowser.getCollectionModels(collectionId);
@@ -5189,7 +6837,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { models: [] };
     }
   });
-  
+
   ipcMain.handle('hf:getQuantizationGuide', async () => {
     try {
       return hfBrowser.getQuantizationGuide();
@@ -5198,7 +6846,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return {};
     }
   });
-  
+
   ipcMain.handle('hf:getTrending', async (_, limit) => {
     try {
       return await hfBrowser.getTrendingModels(limit);
@@ -5207,7 +6855,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return [];
     }
   });
-  
+
   ipcMain.handle('hf:getRecent', async (_, limit) => {
     try {
       return await hfBrowser.getRecentModels(limit);
@@ -5216,7 +6864,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return [];
     }
   });
-  
+
   ipcMain.handle('hf:compareModels', async (_, modelIds) => {
     try {
       return await hfBrowser.compareModels(modelIds);
@@ -5225,7 +6873,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { models: [], comparison: {} };
     }
   });
-  
+
   ipcMain.handle('hf:recommendForHardware', async (_, vramGB, ramGB) => {
     try {
       return await hfBrowser.recommendForHardware(vramGB, ramGB);
@@ -5234,23 +6882,23 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { models: [] };
     }
   });
-  
+
   ipcMain.handle('hf:downloadModel', async (_, fileInfo, destDir) => {
     try {
       const targetDir = destDir || resolveModelsDirectory();
       await fsPromises.mkdir(targetDir, { recursive: true });
-      
+
       const download = await hfBrowser.downloadModel(fileInfo, targetDir, (progress) => {
         mainWindow.webContents.send('hf:downloadProgress', progress);
       });
-      
+
       return { success: true, download };
     } catch (error) {
       console.error('HF download failed:', error);
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('hf:cancelDownload', async (_, downloadId) => {
     try {
       const cancelled = hfBrowser.cancelDownload(downloadId);
@@ -5260,7 +6908,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('hf:getDownloads', async () => {
     try {
       return hfBrowser.getDownloads();
@@ -5269,7 +6917,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return [];
     }
   });
-  
+
   ipcMain.handle('hf:clearCache', async () => {
     try {
       hfBrowser.clearCache();
@@ -5279,65 +6927,65 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('hf:importToOllama', async (_, filePath, modelName) => {
     try {
       // Use the existing ollama:createFromFile handler logic
       const { spawn } = require('child_process');
       const os = require('os');
-      
+
       const modelfilePath = path.join(os.tmpdir(), `Modelfile-${Date.now()}`);
       const modelfileContent = `FROM "${filePath.replace(/\\/g, '/')}"`;
-      
+
       await fsPromises.writeFile(modelfilePath, modelfileContent, 'utf-8');
       console.log(`[HF Import] Created Modelfile at ${modelfilePath}`);
       console.log(`[HF Import] Creating model "${modelName}" from ${filePath}`);
-      
+
       return new Promise((resolve) => {
         const proc = spawn('ollama', ['create', modelName, '-f', modelfilePath], {
           shell: true,
           env: { ...process.env }
         });
-        
+
         let stdout = '';
         let stderr = '';
-        
+
         proc.stdout.on('data', (data) => {
           stdout += data.toString();
           console.log('[HF Import]', data.toString().trim());
         });
-        
+
         proc.stderr.on('data', (data) => {
           stderr += data.toString();
           console.log('[HF Import stderr]', data.toString().trim());
         });
-        
+
         proc.on('close', async (code) => {
           try {
             await fsPromises.unlink(modelfilePath);
           } catch (e) {
             // Ignore cleanup errors
           }
-          
+
           if (code === 0) {
-            resolve({ 
-              success: true, 
+            resolve({
+              success: true,
               name: modelName,
               message: `Model "${modelName}" imported successfully from ${path.basename(filePath)}`
             });
           } else {
-            resolve({ 
-              success: false, 
+            resolve({
+              success: false,
               error: stderr || `ollama create failed with code ${code}`,
               stdout,
               stderr
             });
           }
         });
-        
+
         proc.on('error', (error) => {
-          resolve({ 
-            success: false, 
+          resolve({
+            success: false,
             error: `Failed to run ollama: ${error.message}. Make sure Ollama is installed and in your PATH.`
           });
         });
@@ -5347,7 +6995,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('hf:getDefaultDownloadDir', async () => {
     try {
       return resolveModelsDirectory();
@@ -5356,29 +7004,29 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return null;
     }
   });
-  
+
   ipcMain.handle('hf:selectDownloadDir', async () => {
     try {
       const result = await dialog.showOpenDialog({
         properties: ['openDirectory'],
         title: 'Select Download Directory'
       });
-      
+
       if (result.canceled || !result.filePaths[0]) {
         return { canceled: true };
       }
-      
+
       return { success: true, directory: result.filePaths[0] };
     } catch (error) {
       console.error('HF selectDownloadDir failed:', error);
       return { success: false, error: error.message };
     }
   });
-  
+
   // ============================================
   // DOWNLOADS QUEUE - Unified Download Management
   // ============================================
-  
+
   ipcMain.handle('downloads:getAll', async () => {
     try {
       // Combine downloads from all sources
@@ -5390,7 +7038,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return [];
     }
   });
-  
+
   ipcMain.handle('downloads:cancel', async (_, downloadId) => {
     try {
       // Try both download managers
@@ -5404,18 +7052,95 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // ============================================
   // DOWNLOAD MANAGER V2 - Persistent + Resumable
   // ============================================
-  
+
   const { getDownloadManagerV2 } = require('./services/download-manager-v2');
   const downloadManagerV2 = getDownloadManagerV2();
-  
+
+  const tryAutoImportDownloadedGguf = async (job) => {
+    try {
+      const filename = String(job?.filename || '').trim();
+      const destinationDir = String(job?.destinationDir || '').trim();
+      if (!filename || !destinationDir || !/\.gguf$/i.test(filename)) return;
+
+      const modelPath = path.join(destinationDir, filename);
+      if (!fs.existsSync(modelPath)) return;
+
+      const baseName = filename
+        .replace(/\.[a-z0-9]+$/i, '')
+        .toLowerCase()
+        .replace(/[^a-z0-9_.-]+/g, '-')
+        .replace(/^-+|-+$/g, '')
+        .slice(0, 96);
+      const modelName = (baseName.startsWith('local-') ? baseName : `local-${baseName}`) || `local-model-${Date.now()}`;
+
+      const endpoint = store.get('llmEndpoint') || 'http://127.0.0.1:11434';
+      try {
+        const tags = await makeRequest(`${endpoint}/api/tags`, { timeout: 10000 });
+        const existingNames = (tags?.data?.models || [])
+          .map((entry) => String(entry?.name || '').toLowerCase());
+        if (existingNames.includes(modelName.toLowerCase()) || existingNames.includes(`${modelName}:latest`.toLowerCase())) {
+          return;
+        }
+      } catch (tagsError) {
+        console.warn('[DownloadManagerV2] Could not check existing Ollama tags before auto-import:', tagsError?.message || tagsError);
+      }
+
+      const os = require('os');
+      const modelfilePath = path.join(os.tmpdir(), `Modelfile-auto-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`);
+      const modelfileContent = `FROM "${modelPath.replace(/\\/g, '/')}"`;
+      await fsPromises.writeFile(modelfilePath, modelfileContent, 'utf-8');
+
+      const createResult = await new Promise((resolve) => {
+        const proc = spawn('ollama', ['create', modelName, '-f', modelfilePath], {
+          shell: true,
+          env: { ...process.env },
+        });
+
+        let stderr = '';
+        proc.stderr.on('data', (data) => { stderr += data.toString(); });
+
+        proc.on('close', (code) => {
+          resolve({ code, stderr });
+        });
+
+        proc.on('error', (error) => {
+          resolve({ code: 1, stderr: error.message || String(error) });
+        });
+      });
+
+      try {
+        await fsPromises.unlink(modelfilePath);
+      } catch (_cleanupError) {}
+
+      if (createResult.code !== 0) {
+        const alreadyExists = /already exists|exists/i.test(String(createResult.stderr || ''));
+        if (!alreadyExists) {
+          console.warn('[DownloadManagerV2] Auto-import GGUF failed:', createResult.stderr || `exit ${createResult.code}`);
+          return;
+        }
+      }
+
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('downloads:modelAutoImported', {
+          jobId: job.id,
+          modelName,
+          sourcePath: modelPath,
+          success: true,
+        });
+      }
+    } catch (error) {
+      console.warn('[DownloadManagerV2] Auto-import GGUF error:', error?.message || error);
+    }
+  };
+
   // Initialize DownloadManagerV2 after database is ready
-  downloadManagerV2.initialize(userDataPath).then(() => {
+  downloadManagerV2.initialize(userDataPath).then(async () => {
     console.log('[IPC] DownloadManagerV2 initialized');
-    
+
     // Forward events to renderer
     downloadManagerV2.on('job:created', (job) => {
       mainWindow.webContents.send('downloads:jobCreated', job);
@@ -5428,6 +7153,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     });
     downloadManagerV2.on('job:completed', (job) => {
       mainWindow.webContents.send('downloads:jobCompleted', job);
+      tryAutoImportDownloadedGguf(job);
     });
     downloadManagerV2.on('job:error', (job) => {
       mainWindow.webContents.send('downloads:jobError', job);
@@ -5438,10 +7164,25 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     downloadManagerV2.on('job:cancelled', (job) => {
       mainWindow.webContents.send('downloads:jobCancelled', job);
     });
+
+    // Backfill: auto-import completed GGUF jobs from previous sessions
+    // so downloaded models reliably appear in the selector after restart.
+    try {
+      const existingJobs = Array.isArray(downloadManagerV2.getAll?.()) ? downloadManagerV2.getAll() : [];
+      const completedGgufJobs = existingJobs.filter((job) =>
+        String(job?.status || '').toLowerCase() === 'completed' &&
+        /\.gguf$/i.test(String(job?.filename || ''))
+      );
+      for (const job of completedGgufJobs) {
+        await tryAutoImportDownloadedGguf(job);
+      }
+    } catch (error) {
+      console.warn('[DownloadManagerV2] GGUF auto-import backfill failed:', error?.message || error);
+    }
   }).catch((error) => {
     console.error('[IPC] Failed to initialize DownloadManagerV2:', error);
   });
-  
+
   // Create a new download job via V2
   ipcMain.handle('downloads:create', async (_, options) => {
     try {
@@ -5452,7 +7193,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // Get all V2 jobs
   ipcMain.handle('downloads:getAllV2', async () => {
     try {
@@ -5462,7 +7203,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return [];
     }
   });
-  
+
   // Get a specific V2 job
   ipcMain.handle('downloads:getV2', async (_, id) => {
     try {
@@ -5472,7 +7213,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return null;
     }
   });
-  
+
   ipcMain.handle('downloads:pause', async (_, downloadId) => {
     try {
       return downloadManagerV2.pause(downloadId);
@@ -5481,7 +7222,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('downloads:resume', async (_, downloadId) => {
     try {
       return downloadManagerV2.resume(downloadId);
@@ -5490,7 +7231,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('downloads:retry', async (_, downloadId) => {
     try {
       return downloadManagerV2.retry(downloadId);
@@ -5499,7 +7240,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('downloads:setPriority', async (_, downloadId, priority) => {
     try {
       return downloadManagerV2.setPriority(downloadId, priority);
@@ -5508,7 +7249,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('downloads:schedule', async (_, downloadId, scheduleTime) => {
     try {
       return downloadManagerV2.schedule(downloadId, scheduleTime);
@@ -5517,7 +7258,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('downloads:delete', async (_, downloadId, deleteFiles) => {
     try {
       return await downloadManagerV2.delete(downloadId, deleteFiles);
@@ -5526,7 +7267,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   ipcMain.handle('downloads:clearCompleted', async () => {
     try {
       return await downloadManagerV2.clearCompleted();
@@ -5539,10 +7280,10 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ============================================
   // INSTALLER REGISTRY - Model Installation
   // ============================================
-  
+
   const { getInstallerRegistry } = require('./services/installer-registry');
   const installerRegistry = getInstallerRegistry();
-  
+
   // Initialize installer registry
   installerRegistry.initialize({
     ollamaEndpoint: store.get('llmEndpoint') || 'http://localhost:11434',
@@ -5551,7 +7292,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     llamacppPath: store.get('llamacppPath'),
   }).then(() => {
     console.log('[IPC] InstallerRegistry initialized');
-    
+
     // Forward events to renderer
     installerRegistry.on('install:started', (data) => {
       mainWindow.webContents.send('installer:started', data);
@@ -5574,22 +7315,22 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   }).catch((error) => {
     console.error('[IPC] Failed to initialize InstallerRegistry:', error);
   });
-  
+
   // Get available engines
   ipcMain.handle('installer:getEngines', async () => {
     return installerRegistry.getEnginesInfo();
   });
-  
+
   // Get engines compatible with a model type
   ipcMain.handle('installer:getEnginesForType', async (_, modelType) => {
     return installerRegistry.getEnginesForModelType(modelType);
   });
-  
+
   // Get recommended engine for a model
   ipcMain.handle('installer:getRecommendedEngine', async (_, modelInfo) => {
     return installerRegistry.getRecommendedEngine(modelInfo);
   });
-  
+
   // Install a model
   ipcMain.handle('installer:install', async (_, { filePath, modelInfo, options }) => {
     try {
@@ -5600,17 +7341,17 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // Validate an installed model
   ipcMain.handle('installer:validate', async (_, { modelInfo, engineId }) => {
     return installerRegistry.validate(modelInfo, engineId);
   });
-  
+
   // Run readiness check
   ipcMain.handle('installer:readinessCheck', async (_, { modelInfo, engineId }) => {
     return installerRegistry.readinessCheck(modelInfo, engineId);
   });
-  
+
   // Uninstall a model
   ipcMain.handle('installer:uninstall', async (_, { modelInfo, engineId }) => {
     try {
@@ -5621,7 +7362,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // Set engine path
   ipcMain.handle('installer:setEnginePath', async (_, { engineId, path: enginePath }) => {
     store.set(`${engineId}Path`, enginePath);
@@ -5638,10 +7379,10 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ============================================
   // LOCAL MODEL SCANNER
   // ============================================
-  
+
   const { getLocalModelScanner } = require('./services/local-model-scanner');
   const localModelScanner = getLocalModelScanner();
-  
+
   // Forward scanner events to renderer
   localModelScanner.on('scan:started', () => {
     mainWindow.webContents.send('scanner:started');
@@ -5658,60 +7399,60 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   localModelScanner.on('model:changed', (data) => {
     mainWindow.webContents.send('scanner:modelChanged', data);
   });
-  
+
   // Get all configured sources
   ipcMain.handle('scanner:getSources', async () => {
     return localModelScanner.getSources();
   });
-  
+
   // Scan all sources
   ipcMain.handle('scanner:scanAll', async (_, options) => {
     return localModelScanner.scanAll(options);
   });
-  
+
   // Get all discovered models
   ipcMain.handle('scanner:getAllModels', async () => {
     return localModelScanner.getAllModels();
   });
-  
+
   // Get models by source
   ipcMain.handle('scanner:getBySource', async (_, sourceId) => {
     return localModelScanner.getModelsBySource(sourceId);
   });
-  
+
   // Get models by type
   ipcMain.handle('scanner:getByType', async (_, modelType) => {
     return localModelScanner.getModelsByType(modelType);
   });
-  
+
   // Get specific model
   ipcMain.handle('scanner:getModel', async (_, modelPath) => {
     return localModelScanner.getModel(modelPath);
   });
-  
+
   // Add custom scan path
   ipcMain.handle('scanner:addCustomPath', async (_, { path: scanPath, options }) => {
     localModelScanner.addCustomPath(scanPath, options);
-    
+
     // Save to settings
     const customPaths = store.get('scannerCustomPaths') || [];
     customPaths.push({ path: scanPath, ...options });
     store.set('scannerCustomPaths', customPaths);
-    
+
     return { success: true };
   });
-  
+
   // Remove custom scan path
   ipcMain.handle('scanner:removeCustomPath', async (_, scanPath) => {
     localModelScanner.removeCustomPath(scanPath);
-    
+
     // Remove from settings
     const customPaths = store.get('scannerCustomPaths') || [];
     store.set('scannerCustomPaths', customPaths.filter(p => p.path !== scanPath));
-    
+
     return { success: true };
   });
-  
+
   // Import model (copy)
   ipcMain.handle('scanner:importModel', async (_, { modelPath, targetDir }) => {
     try {
@@ -5727,7 +7468,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // Link model (symlink)
   ipcMain.handle('scanner:linkModel', async (_, { modelPath, targetDir }) => {
     try {
@@ -5739,7 +7480,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // Move model
   ipcMain.handle('scanner:moveModel', async (_, { modelPath, targetDir }) => {
     try {
@@ -5755,25 +7496,25 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // Start watching for changes
   ipcMain.handle('scanner:startWatching', async (_, sourceId) => {
     localModelScanner.startWatching(sourceId);
     return { success: true };
   });
-  
+
   // Stop watching
   ipcMain.handle('scanner:stopWatching', async (_, sourceId) => {
     localModelScanner.stopWatching(sourceId);
     return { success: true };
   });
-  
+
   // Clear discovered models
   ipcMain.handle('scanner:clear', async () => {
     localModelScanner.clear();
     return { success: true };
   });
-  
+
   // Load custom paths from settings on startup
   const savedCustomPaths = store.get('scannerCustomPaths') || [];
   for (const customPath of savedCustomPaths) {
@@ -5783,13 +7524,13 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ============================================
   // STORAGE SERVICE
   // ============================================
-  
+
   const { getStorageService } = require('./services/storage-service');
   const storageService = getStorageService();
-  
+
   // Set model directories
   storageService.setModelDirectories([resolveModelsDirectory()]);
-  
+
   // Forward storage events
   storageService.on('model:moved', (data) => {
     mainWindow.webContents.send('storage:modelMoved', data);
@@ -5797,32 +7538,32 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   storageService.on('file:deleted', (data) => {
     mainWindow.webContents.send('storage:fileDeleted', data);
   });
-  
+
   // Get available drives
   ipcMain.handle('storage:getDrives', async () => {
     return storageService.getDrives();
   });
-  
+
   // Get model storage usage
   ipcMain.handle('storage:getUsage', async () => {
     return storageService.getModelStorageUsage();
   });
-  
+
   // Get directory breakdown
   ipcMain.handle('storage:getBreakdown', async (_, dirPath) => {
     return storageService.getDirectoryBreakdown(dirPath);
   });
-  
+
   // Find orphaned files
   ipcMain.handle('storage:findOrphaned', async (_, libraryModels) => {
     return storageService.findOrphanedFiles(libraryModels);
   });
-  
+
   // Find duplicates
   ipcMain.handle('storage:findDuplicates', async () => {
     return storageService.findDuplicates();
   });
-  
+
   // Move model
   ipcMain.handle('storage:moveModel', async (_, { sourcePath, targetDir }) => {
     try {
@@ -5837,17 +7578,17 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: error.message };
     }
   });
-  
+
   // Delete files
   ipcMain.handle('storage:deleteFiles', async (_, filePaths) => {
     return storageService.deleteFiles(filePaths);
   });
-  
+
   // Get recommendations
   ipcMain.handle('storage:getRecommendations', async () => {
     return storageService.getRecommendations();
   });
-  
+
   // Clear cache
   ipcMain.handle('storage:clearCache', async () => {
     storageService.clearCache();
@@ -5857,31 +7598,31 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ============================================
   // HARDWARE CHECKER
   // ============================================
-  
+
   const { getHardwareChecker } = require('./services/hardware-checker');
   const hardwareChecker = getHardwareChecker();
-  
+
   // Get comprehensive hardware info
   ipcMain.handle('hardwareChecker:getInfo', async (_, forceRefresh) => {
     return hardwareChecker.getHardwareInfo(forceRefresh);
   });
-  
+
   // Check if model can run
   ipcMain.handle('hardwareChecker:canRunModel', async (_, modelInfo) => {
     return hardwareChecker.canRunModel(modelInfo);
   });
-  
+
   // Get model recommendations
   ipcMain.handle('hardwareChecker:getRecommendations', async (_, targetSizeB) => {
     const hw = await hardwareChecker.getHardwareInfo();
     return hardwareChecker.getModelRecommendations(hw, targetSizeB);
   });
-  
+
   // Precheck before download
   ipcMain.handle('hardwareChecker:precheck', async (_, modelInfo) => {
     return hardwareChecker.precheck(modelInfo);
   });
-  
+
   // Estimate VRAM needed
   ipcMain.handle('hardwareChecker:estimateVram', async (_, { sizeB, quant }) => {
     return hardwareChecker.estimateVramNeeded(sizeB, quant);
@@ -5890,15 +7631,15 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ============================================
   // CATALOG SERVICE
   // ============================================
-  
+
   const { getCatalogService } = require('./services/catalog-service');
   const catalogService = getCatalogService();
-  
+
   // Register providers with catalog service
   try {
     const { getModelProviders } = require('./services/model-providers');
     const providers = getModelProviders();
-    
+
     // Create adapter for Ollama provider
     if (providers.ollama) {
       catalogService.registerProvider('ollama', {
@@ -5913,7 +7654,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         ],
       });
     }
-    
+
     // Create adapter for HuggingFace provider
     if (providers.huggingface) {
       catalogService.registerProvider('huggingface', {
@@ -5925,7 +7666,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         getCategories: async () => providers.huggingface?.getCategories?.() || [],
       });
     }
-    
+
     // Create adapter for CivitAI provider
     if (providers.civitai) {
       catalogService.registerProvider('civitai', {
@@ -5940,12 +7681,12 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         ],
       });
     }
-    
+
     console.log('[IPC] CatalogService providers registered');
   } catch (error) {
     console.warn('[IPC] Could not register catalog providers:', error.message);
   }
-  
+
   // Forward catalog events
   catalogService.on('subscription:added', (sub) => {
     mainWindow.webContents.send('catalog:subscriptionAdded', sub);
@@ -5956,68 +7697,68 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   catalogService.on('subscription:update-available', (data) => {
     mainWindow.webContents.send('catalog:updateAvailable', data);
   });
-  
+
   // Search models
   ipcMain.handle('catalog:search', async (_, query, options) => {
     return catalogService.search(query, options);
   });
-  
+
   // Get trending
   ipcMain.handle('catalog:getTrending', async (_, options) => {
     return catalogService.getTrending(options);
   });
-  
+
   // Get recent
   ipcMain.handle('catalog:getRecent', async (_, options) => {
     return catalogService.getRecent(options);
   });
-  
+
   // Get model details
   ipcMain.handle('catalog:getModelDetails', async (_, provider, modelId) => {
     return catalogService.getModelDetails(provider, modelId);
   });
-  
+
   // Get model files
   ipcMain.handle('catalog:getModelFiles', async (_, provider, modelId) => {
     return catalogService.getModelFiles(provider, modelId);
   });
-  
+
   // Subscribe to updates
   ipcMain.handle('catalog:subscribe', async (_, modelId, provider, installedVersion, options) => {
     return catalogService.subscribe(modelId, provider, installedVersion, options);
   });
-  
+
   // Unsubscribe
   ipcMain.handle('catalog:unsubscribe', async (_, subscriptionId) => {
     return catalogService.unsubscribe(subscriptionId);
   });
-  
+
   // Get subscriptions
   ipcMain.handle('catalog:getSubscriptions', async () => {
     return catalogService.getSubscriptions();
   });
-  
+
   // Check for updates
   ipcMain.handle('catalog:checkUpdates', async () => {
     return catalogService.checkUpdates();
   });
-  
+
   // Get discovery feed
   ipcMain.handle('catalog:getDiscoveryFeed', async (_, options) => {
     return catalogService.getDiscoveryFeed(options);
   });
-  
+
   // Get categories
   ipcMain.handle('catalog:getCategories', async () => {
     return catalogService.getCategories();
   });
-  
+
   // Clear cache
   ipcMain.handle('catalog:clearCache', async (_, pattern) => {
     catalogService.clearCache(pattern);
     return { success: true };
   });
-  
+
   // Get cache stats
   ipcMain.handle('catalog:getCacheStats', async () => {
     return catalogService.getCacheStats();
@@ -6026,17 +7767,17 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ============================================
   // LIBRARY SERVICE
   // ============================================
-  
+
   const { getLibraryService } = require('./services/library-service');
   const libraryService = getLibraryService();
-  
+
   // Initialize library
   libraryService.initialize(userDataPath).then(() => {
     console.log('[IPC] LibraryService initialized');
   }).catch(error => {
     console.error('[IPC] Failed to initialize LibraryService:', error);
   });
-  
+
   // Forward library events
   libraryService.on('model:added', (model) => {
     mainWindow.webContents.send('library:modelAdded', model);
@@ -6056,95 +7797,95 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   libraryService.on('collection:deleted', (data) => {
     mainWindow.webContents.send('library:collectionDeleted', data);
   });
-  
+
   // Model operations
   ipcMain.handle('library:addModel', async (_, modelData) => {
     return libraryService.addModel(modelData);
   });
-  
+
   ipcMain.handle('library:updateModel', async (_, id, updates) => {
     return libraryService.updateModel(id, updates);
   });
-  
+
   ipcMain.handle('library:deleteModel', async (_, id) => {
     return libraryService.deleteModel(id);
   });
-  
+
   ipcMain.handle('library:getModel', async (_, id) => {
     return libraryService.getModel(id);
   });
-  
+
   ipcMain.handle('library:getModelByPath', async (_, modelPath) => {
     return libraryService.getModelByPath(modelPath);
   });
-  
+
   ipcMain.handle('library:getAllModels', async (_, options) => {
     return libraryService.getAllModels(options);
   });
-  
+
   ipcMain.handle('library:recordUsage', async (_, id, tokens, responseTime) => {
     return libraryService.recordUsage(id, tokens, responseTime);
   });
-  
+
   // Tag operations
   ipcMain.handle('library:getAllTags', async () => {
     return libraryService.getAllTags();
   });
-  
+
   ipcMain.handle('library:addTagToModel', async (_, modelId, tagName) => {
     return libraryService.addTagToModel(modelId, tagName);
   });
-  
+
   ipcMain.handle('library:removeTagFromModel', async (_, modelId, tagName) => {
     return libraryService.removeTagFromModel(modelId, tagName);
   });
-  
+
   // Collection operations
   ipcMain.handle('library:createCollection', async (_, data) => {
     return libraryService.createCollection(data);
   });
-  
+
   ipcMain.handle('library:updateCollection', async (_, id, updates) => {
     return libraryService.updateCollection(id, updates);
   });
-  
+
   ipcMain.handle('library:deleteCollection', async (_, id) => {
     return libraryService.deleteCollection(id);
   });
-  
+
   ipcMain.handle('library:getCollection', async (_, id) => {
     return libraryService.getCollection(id);
   });
-  
+
   ipcMain.handle('library:getAllCollections', async () => {
     return libraryService.getAllCollections();
   });
-  
+
   ipcMain.handle('library:addToCollection', async (_, collectionId, modelId) => {
     return libraryService.addToCollection(collectionId, modelId);
   });
-  
+
   ipcMain.handle('library:removeFromCollection', async (_, collectionId, modelId) => {
     return libraryService.removeFromCollection(collectionId, modelId);
   });
-  
+
   ipcMain.handle('library:getCollectionModels', async (_, collectionId) => {
     return libraryService.getCollectionModels(collectionId);
   });
-  
+
   // Bulk operations
   ipcMain.handle('library:bulkUpdate', async (_, modelIds, updates) => {
     return libraryService.bulkUpdate(modelIds, updates);
   });
-  
+
   ipcMain.handle('library:bulkDelete', async (_, modelIds) => {
     return libraryService.bulkDelete(modelIds);
   });
-  
+
   ipcMain.handle('library:bulkAddToCollection', async (_, collectionId, modelIds) => {
     return libraryService.bulkAddToCollection(collectionId, modelIds);
   });
-  
+
   // Statistics
   ipcMain.handle('library:getStats', async () => {
     return libraryService.getStats();
@@ -6155,12 +7896,12 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ===========================
   const { getFormatConverter } = require('./services/format-converter');
   const formatConverter = getFormatConverter();
-  
+
   // Initialize converter
   formatConverter.initialize().catch(err => {
     console.error('[FormatConverter] Initialization error:', err);
   });
-  
+
   // Forward converter events
   formatConverter.on('job:created', (job) => {
     mainWindow.webContents.send('converter:jobCreated', job);
@@ -6180,7 +7921,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   formatConverter.on('job:cancelled', (job) => {
     mainWindow.webContents.send('converter:jobCancelled', job);
   });
-  
+
   // Get supported conversions for a file
   ipcMain.handle('converter:getSupportedConversions', async (_, filePath) => {
     try {
@@ -6189,7 +7930,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Create a conversion job
   ipcMain.handle('converter:createJob', async (_, type, sourcePath, options) => {
     try {
@@ -6198,7 +7939,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get all jobs
   ipcMain.handle('converter:getAllJobs', async () => {
     try {
@@ -6207,7 +7948,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get a specific job
   ipcMain.handle('converter:getJob', async (_, jobId) => {
     try {
@@ -6216,7 +7957,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Cancel a job
   ipcMain.handle('converter:cancelJob', async (_, jobId) => {
     try {
@@ -6225,7 +7966,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Clear completed jobs
   ipcMain.handle('converter:clearCompleted', async () => {
     try {
@@ -6234,7 +7975,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get available quantization types
   ipcMain.handle('converter:getQuantTypes', async () => {
     try {
@@ -6243,7 +7984,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Estimate conversion time
   ipcMain.handle('converter:estimateTime', async (_, sourcePath, type, options) => {
     try {
@@ -6258,12 +7999,12 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ===========================
   const { getCollectionsService } = require('./services/collections-service');
   const collectionsService = getCollectionsService();
-  
+
   // Initialize collections service
   collectionsService.initialize(db, userDataPath).catch(err => {
     console.error('[CollectionsService] Initialization error:', err);
   });
-  
+
   // Forward collection events
   collectionsService.on('collection:created', (collection) => {
     mainWindow.webContents.send('collections:created', collection);
@@ -6280,7 +8021,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   collectionsService.on('collection:installProgress', (data) => {
     mainWindow.webContents.send('collections:installProgress', data);
   });
-  
+
   // Get all collections
   ipcMain.handle('collections:getAll', async (_, options) => {
     try {
@@ -6289,7 +8030,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get starter packs
   ipcMain.handle('collections:getStarterPacks', async () => {
     try {
@@ -6298,7 +8039,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get user collections
   ipcMain.handle('collections:getUserCollections', async () => {
     try {
@@ -6307,7 +8048,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get collection by ID
   ipcMain.handle('collections:getById', async (_, collectionId) => {
     try {
@@ -6316,7 +8057,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Create collection
   ipcMain.handle('collections:create', async (_, data) => {
     try {
@@ -6325,7 +8066,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Update collection
   ipcMain.handle('collections:update', async (_, collectionId, updates) => {
     try {
@@ -6334,7 +8075,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Delete collection
   ipcMain.handle('collections:delete', async (_, collectionId) => {
     try {
@@ -6343,7 +8084,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Add model to collection
   ipcMain.handle('collections:addModel', async (_, collectionId, modelData) => {
     try {
@@ -6352,7 +8093,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Remove model from collection
   ipcMain.handle('collections:removeModel', async (_, collectionId, provider, modelId) => {
     try {
@@ -6361,7 +8102,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Export manifest
   ipcMain.handle('collections:exportManifest', async (_, collectionId) => {
     try {
@@ -6370,7 +8111,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Import manifest
   ipcMain.handle('collections:importManifest', async (_, manifest) => {
     try {
@@ -6379,7 +8120,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Generate share code
   ipcMain.handle('collections:generateShareCode', async (_, collectionId) => {
     try {
@@ -6388,7 +8129,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get collection by share code
   ipcMain.handle('collections:getByShareCode', async (_, shareCode) => {
     try {
@@ -6397,7 +8138,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get installation status
   ipcMain.handle('collections:getInstallStatus', async (_, collectionId) => {
     try {
@@ -6406,7 +8147,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Track installation
   ipcMain.handle('collections:trackInstall', async (_, collectionId, modelsInstalled, modelsTotal) => {
     try {
@@ -6416,7 +8157,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get categories
   ipcMain.handle('collections:getCategories', async () => {
     try {
@@ -6431,12 +8172,12 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ===========================
   const { getModelTestingService } = require('./services/model-testing-service');
   const modelTestingService = getModelTestingService();
-  
+
   // Initialize testing service
   modelTestingService.initialize(db).catch(err => {
     console.error('[ModelTestingService] Initialization error:', err);
   });
-  
+
   // Forward testing events
   modelTestingService.on('test:started', (data) => {
     mainWindow.webContents.send('testing:started', data);
@@ -6462,7 +8203,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   modelTestingService.on('readiness:checked', (data) => {
     mainWindow.webContents.send('testing:readinessChecked', data);
   });
-  
+
   // Get test prompts
   ipcMain.handle('testing:getPrompts', async (_, modelType) => {
     try {
@@ -6471,7 +8212,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Run quick test
   ipcMain.handle('testing:runQuickTest', async (_, modelId, provider, prompt, options) => {
     try {
@@ -6480,7 +8221,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Run benchmark
   ipcMain.handle('testing:runBenchmark', async (_, modelId, provider, options) => {
     try {
@@ -6489,7 +8230,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Check readiness
   ipcMain.handle('testing:checkReadiness', async (_, modelId, provider) => {
     try {
@@ -6498,7 +8239,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get community benchmarks
   ipcMain.handle('testing:getCommunityBenchmarks', async (_, modelId) => {
     try {
@@ -6507,7 +8248,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get local benchmarks
   ipcMain.handle('testing:getLocalBenchmarks', async (_, modelId) => {
     try {
@@ -6516,7 +8257,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get test history
   ipcMain.handle('testing:getHistory', async (_, modelId, limit) => {
     try {
@@ -6525,7 +8266,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Cancel test
   ipcMain.handle('testing:cancelTest', async (_, testId) => {
     try {
@@ -6534,7 +8275,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get active tests
   ipcMain.handle('testing:getActiveTests', async () => {
     try {
@@ -6549,12 +8290,12 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ===========================
   const { getExportBackupService } = require('./services/export-backup-service');
   const exportBackupService = getExportBackupService();
-  
+
   // Initialize export/backup service
   exportBackupService.initialize(db, store, userDataPath).catch(err => {
     console.error('[ExportBackupService] Initialization error:', err);
   });
-  
+
   // Forward events
   exportBackupService.on('export:completed', (data) => {
     mainWindow.webContents.send('backup:exportCompleted', data);
@@ -6565,7 +8306,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   exportBackupService.on('backup:created', (data) => {
     mainWindow.webContents.send('backup:created', data);
   });
-  
+
   // Export manifest
   ipcMain.handle('backup:exportManifest', async (_, options) => {
     try {
@@ -6574,7 +8315,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Export to file
   ipcMain.handle('backup:exportToFile', async (_, filePath, options) => {
     try {
@@ -6583,7 +8324,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Import manifest
   ipcMain.handle('backup:importManifest', async (_, manifest, options) => {
     try {
@@ -6592,7 +8333,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Import from file
   ipcMain.handle('backup:importFromFile', async (_, filePath, options) => {
     try {
@@ -6601,7 +8342,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Create backup (using exportBackupService - note: backup:create already registered above)
   // Use a different channel name to avoid conflict
   ipcMain.handle('backup:createV2', async (_, name) => {
@@ -6611,7 +8352,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // List backups (V2 - uses exportBackupService, original at line ~953 uses backupService)
   ipcMain.handle('backup:listV2', async () => {
     try {
@@ -6620,7 +8361,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Restore from backup (V2 - uses exportBackupService, original at line ~929 uses backupService)
   ipcMain.handle('backup:restoreV2', async (_, backupPath, options) => {
     try {
@@ -6629,7 +8370,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Delete backup
   ipcMain.handle('backup:delete', async (_, backupPath) => {
     try {
@@ -6638,7 +8379,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get export preview
   ipcMain.handle('backup:getPreview', async () => {
     try {
@@ -6653,12 +8394,12 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ===========================
   const { getSecretsStore } = require('./services/secrets-store');
   const secretsStore = getSecretsStore();
-  
+
   // Initialize secrets store
   secretsStore.initialize(userDataPath).catch(err => {
     console.error('[SecretsStore] Initialization error:', err);
   });
-  
+
   // Forward events
   secretsStore.on('token:set', (data) => {
     mainWindow.webContents.send('secrets:tokenSet', data);
@@ -6669,7 +8410,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   secretsStore.on('rateLimit:hit', (data) => {
     mainWindow.webContents.send('secrets:rateLimitHit', data);
   });
-  
+
   // Set token
   ipcMain.handle('secrets:setToken', async (_, provider, token) => {
     try {
@@ -6678,7 +8419,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get token (returns redacted)
   ipcMain.handle('secrets:getTokenStatus', async (_, provider) => {
     try {
@@ -6687,7 +8428,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Delete token
   ipcMain.handle('secrets:deleteToken', async (_, provider) => {
     try {
@@ -6696,7 +8437,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Validate token
   ipcMain.handle('secrets:validateToken', async (_, provider, token) => {
     try {
@@ -6705,7 +8446,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get all provider statuses
   ipcMain.handle('secrets:getAllStatuses', async () => {
     try {
@@ -6714,7 +8455,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get configured providers
   ipcMain.handle('secrets:getConfiguredProviders', async () => {
     try {
@@ -6729,12 +8470,12 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // ===========================
   const { getLicensingService } = require('./services/licensing-service');
   const licensingService = getLicensingService();
-  
+
   // Initialize licensing service
   licensingService.initialize(db, store).catch(err => {
     console.error('[LicensingService] Initialization error:', err);
   });
-  
+
   // Forward events
   licensingService.on('license:accepted', (data) => {
     mainWindow.webContents.send('licensing:accepted', data);
@@ -6745,7 +8486,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   licensingService.on('age:verified', (data) => {
     mainWindow.webContents.send('licensing:ageVerified', data);
   });
-  
+
   // Check if license acceptance is required
   ipcMain.handle('licensing:requiresAcceptance', async (_, modelId, provider, licenseId) => {
     try {
@@ -6754,7 +8495,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Accept license
   ipcMain.handle('licensing:acceptLicense', async (_, modelId, provider, licenseId, licenseName) => {
     try {
@@ -6763,7 +8504,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get license status
   ipcMain.handle('licensing:getLicenseStatus', async (_, modelId, provider) => {
     try {
@@ -6772,7 +8513,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Accept ToS
   ipcMain.handle('licensing:acceptToS', async (_, provider, version) => {
     try {
@@ -6781,7 +8522,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get ToS status
   ipcMain.handle('licensing:getToSStatus', async (_, provider) => {
     try {
@@ -6790,7 +8531,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Verify age
   ipcMain.handle('licensing:verifyAge', async (_, dateOfBirth) => {
     try {
@@ -6799,7 +8540,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Check age verification
   ipcMain.handle('licensing:isAgeVerified', async () => {
     try {
@@ -6808,7 +8549,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get Private Vault access
   ipcMain.handle('licensing:getVaultAccess', async () => {
     try {
@@ -6817,7 +8558,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Set vault password
   ipcMain.handle('licensing:setVaultPassword', async (_, password) => {
     try {
@@ -6826,7 +8567,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Verify vault password
   ipcMain.handle('licensing:verifyVaultPassword', async (_, password) => {
     try {
@@ -6835,7 +8576,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Check vault password
   ipcMain.handle('licensing:hasVaultPassword', async () => {
     try {
@@ -6844,7 +8585,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Parse license
   ipcMain.handle('licensing:parseLicense', async (_, licenseString) => {
     try {
@@ -6853,7 +8594,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get license summary
   ipcMain.handle('licensing:getLicenseSummary', async (_, license) => {
     try {
@@ -6862,7 +8603,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Get all acceptances
   ipcMain.handle('licensing:getAllAcceptances', async () => {
     try {
@@ -6871,7 +8612,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { error: error.message };
     }
   });
-  
+
   // Revoke acceptance
   ipcMain.handle('licensing:revokeAcceptance', async (_, modelId, provider, licenseId) => {
     try {
@@ -6884,81 +8625,151 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // Convert GGUF to OpenVINO format for NPU
   ipcMain.handle('models:convertToNPU', async (_, { inputPath, outputDir, precision = 'fp16' }) => {
     const { spawn } = require('child_process');
-    
+
     // Get Python path from openvino-env
     const projectRoot = path.resolve(__dirname, '..');
     const openvinoEnv = path.join(projectRoot, 'openvino-env');
-    const pythonPath = process.platform === 'win32' 
+    const pythonPath = process.platform === 'win32'
       ? path.join(openvinoEnv, 'Scripts', 'python.exe')
       : path.join(openvinoEnv, 'bin', 'python');
-    
+
     const convertScript = path.join(projectRoot, 'scripts', 'convert-to-openvino.py');
-    
+
     if (!fs.existsSync(pythonPath)) {
-      return { 
-        success: false, 
+      return {
+        success: false,
         error: 'OpenVINO environment not set up. Run scripts/setup-openvino.ps1 first.',
         needsSetup: true
       };
     }
-    
+
     if (!fs.existsSync(convertScript)) {
-      return { 
-        success: false, 
-        error: 'Conversion script not found.' 
+      return {
+        success: false,
+        error: 'Conversion script not found.'
       };
     }
 
+    // Resolve Ollama model names to HuggingFace repo IDs
+    let resolvedInput = String(inputPath || '').trim();
+
+
+    // Strip Ollama tag suffix (:latest, :7b, :q4_0, etc.)
+    resolvedInput = resolvedInput.replace(/:[^/]+$/, '');
+
+    // Common Ollama name â†’ HuggingFace repo mappings
+    const OLLAMA_TO_HF = {
+      'llama3': 'meta-llama/Meta-Llama-3-8B-Instruct',
+      'llama3.1': 'meta-llama/Llama-3.1-8B-Instruct',
+      'llama3.2': 'meta-llama/Llama-3.2-3B-Instruct',
+      'llama2': 'meta-llama/Llama-2-7b-chat-hf',
+      'mistral': 'mistralai/Mistral-7B-Instruct-v0.3',
+      'mixtral': 'mistralai/Mixtral-8x7B-Instruct-v0.1',
+      'phi': 'microsoft/phi-2',
+      'phi3': 'microsoft/Phi-3-mini-4k-instruct',
+      'phi3.5': 'microsoft/Phi-3.5-mini-instruct',
+      'gemma': 'google/gemma-2b-it',
+      'gemma2': 'google/gemma-2-2b-it',
+      'qwen': 'Qwen/Qwen2.5-1.5B-Instruct',
+      'qwen2': 'Qwen/Qwen2.5-1.5B-Instruct',
+      'qwen2.5': 'Qwen/Qwen2.5-1.5B-Instruct',
+      'deepseek-coder': 'deepseek-ai/deepseek-coder-1.3b-instruct',
+      'codellama': 'codellama/CodeLlama-7b-Instruct-hf',
+      'tinyllama': 'TinyLlama/TinyLlama-1.1B-Chat-v1.0',
+      'stablelm2': 'stabilityai/stablelm-2-zephyr-1_6b',
+      'dolphin-mistral': 'cognitivecomputations/dolphin-2.6-mistral-7b',
+      'dolphin-llama3': 'cognitivecomputations/dolphin-2.9-llama3-8b',
+      'dolphin-mixtral': 'cognitivecomputations/dolphin-2.6-mixtral-8x7b',
+      'neural-chat': 'Intel/neural-chat-7b-v3-3',
+      'openchat': 'openchat/openchat-3.5-0106',
+      'starling-lm': 'Nexusflow/Starling-LM-7B-beta',
+      'zephyr': 'HuggingFaceH4/zephyr-7b-beta',
+      'orca-mini': 'pankajmathur/orca_mini_3b',
+      'nous-hermes2': 'NousResearch/Nous-Hermes-2-Mistral-7B-DPO',
+      'vicuna': 'lmsys/vicuna-7b-v1.5',
+    };
+
+    const lowerInput = resolvedInput.toLowerCase();
+
+    // Direct mapping lookup (exact match first, then prefix match)
+    if (OLLAMA_TO_HF[lowerInput]) {
+      console.log(`[NPU Convert] Mapped Ollama name "${resolvedInput}" â†’ "${OLLAMA_TO_HF[lowerInput]}"`);
+      resolvedInput = OLLAMA_TO_HF[lowerInput];
+    } else {
+      // Try prefix match (e.g., "dolphin-llama3" matches "dolphin-llama3:8b")
+      const prefixMatch = Object.keys(OLLAMA_TO_HF).find(k => lowerInput.startsWith(k));
+      if (prefixMatch) {
+        console.log(`[NPU Convert] Prefix-mapped "${resolvedInput}" â†’ "${OLLAMA_TO_HF[prefixMatch]}"`);
+        resolvedInput = OLLAMA_TO_HF[prefixMatch];
+      } else if (resolvedInput.includes('/') && !resolvedInput.includes(' ')) {
+        // Looks like a repo path already (org/model) â€” use as-is
+        console.log(`[NPU Convert] Using as HuggingFace repo: ${resolvedInput}`);
+      } else {
+        // Not a known Ollama name and doesn't look like a HuggingFace ID
+        return {
+          success: false,
+          error: `Cannot convert Ollama model "${inputPath}" directly.\n\n` +
+            `Ollama models (GGUF) can't be converted to OpenVINO â€” you need the original HuggingFace model.\n\n` +
+            `Use the NPU Model Converter in Settings > Hardware to pick a compatible model, ` +
+            `or enter a HuggingFace model ID like "microsoft/phi-2" or "Qwen/Qwen2.5-1.5B-Instruct".`,
+        };
+      }
+    }
+
     // Ensure output directory exists
-    const outputPath = outputDir || path.join(projectRoot, 'npu-models');
+    const safeName = resolvedInput.replace(/[/\\:]/g, '-');
+    const outputPath = outputDir || path.join(projectRoot, 'npu-models', safeName);
     await fsPromises.mkdir(outputPath, { recursive: true });
 
     return new Promise((resolve) => {
       const args = [
         convertScript,
-        '--input', inputPath,
+        '--input', resolvedInput,
         '--output-dir', outputPath,
         '--precision', precision
       ];
-      
+
       console.log(`[NPU Convert] Running: ${pythonPath} ${args.join(' ')}`);
-      
-      const proc = spawn(pythonPath, args, { cwd: projectRoot });
+
+      const proc = spawn(pythonPath, args, {
+        cwd: projectRoot,
+        env: { ...process.env, HF_HUB_DISABLE_SYMLINKS_WARNING: '1' },
+      });
       let stdout = '';
       let stderr = '';
-      
+
       proc.stdout.on('data', (data) => {
         stdout += data.toString();
         console.log('[NPU Convert]', data.toString().trim());
       });
-      
+
       proc.stderr.on('data', (data) => {
         stderr += data.toString();
         console.error('[NPU Convert Error]', data.toString().trim());
       });
-      
+
       proc.on('close', (code) => {
         if (code === 0) {
-          resolve({ 
-            success: true, 
+          resolve({
+            success: true,
             outputPath,
             message: 'Model converted successfully for NPU',
             stdout
           });
         } else {
-          resolve({ 
-            success: false, 
+          resolve({
+            success: false,
             error: stderr || `Conversion failed with code ${code}`,
             stdout,
             stderr
           });
         }
       });
-      
+
       proc.on('error', (error) => {
-        resolve({ 
-          success: false, 
-          error: error.message 
+        resolve({
+          success: false,
+          error: error.message
         });
       });
     });
@@ -7311,7 +9122,7 @@ async function setupLedgerHandlers(ipcMain, userDataPath) {
       try {
         // Check both backends
         const ollamaStatus = ollamaAdapters ? await ollamaAdapters.getAdapterStatus() : { available: false };
-        
+
         return {
           llamaAvailable: llamaBridge.isAvailable(),
           ollamaAvailable: ollamaStatus.available,
@@ -7428,7 +9239,7 @@ async function setupLedgerHandlers(ipcMain, userDataPath) {
           // Get friction signals to extract insights
           const signals = ledgerService ? ledgerService.getFrictionSignals({ limit: 100 }) : [];
           const insights = ollamaAdapters.extractInsightsFromFriction(signals);
-          
+
           return await ollamaAdapters.createPersonalizedModel({
             ...config,
             frictionInsights: insights,
@@ -7466,4 +9277,11 @@ async function setupLedgerHandlers(ipcMain, userDataPath) {
 }
 
 // Export saveDatabase for cleanup
-module.exports = { setupIpcHandlers, saveDatabase, setupLedgerHandlers };
+module.exports = {
+  setupIpcHandlers,
+  saveDatabase,
+  flushDbSaves,
+  shutdownDbWriter,
+  setupLedgerHandlers,
+  cancelAllActiveStreams,
+};

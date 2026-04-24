@@ -5,6 +5,7 @@ import { useCharacterStore } from '../../stores/characterStore';
 import { CharacterChat } from './CharacterChat';
 import { LorebookEditor } from './LorebookEditor';
 import { CharacterCreator } from './CharacterCreator';
+import { CharacterEvolutionPanel } from './CharacterEvolutionPanel';
 
 function CharacterForm({ initial, onSave, onCancel, saving }) {
   const [form, setForm] = useState(
@@ -197,7 +198,7 @@ export function CharacterStudio({ isOpen, onClose }) {
               <div>
                 <h2 className="text-sm font-semibold text-text-primary">Character Studio</h2>
                 <p className="text-xs text-text-muted">
-                  Create and manage companions for the Private workspace. Fully local and encrypted.
+                  Create and manage companions kept in the vault. Fully local and encrypted.
                 </p>
               </div>
             </div>
@@ -237,7 +238,7 @@ export function CharacterStudio({ isOpen, onClose }) {
                       No characters yet
                     </p>
                     <p className="text-[11px] text-text-muted">
-                      Click “New” to create your first character for the Private workspace.
+                      Click “New” to create your first vault character.
                     </p>
                   </div>
                 ) : (
@@ -312,7 +313,7 @@ export function CharacterStudio({ isOpen, onClose }) {
                         {selected.display_name || selected.name}
                       </h3>
                       <p className="text-[11px] text-text-muted">
-                        {selected.species || 'Character'} • Private workspace
+                        {selected.species || 'Character'} • Vault
                       </p>
                     </div>
                     <button
@@ -348,11 +349,12 @@ export function CharacterStudio({ isOpen, onClose }) {
                     </div>
                   )}
                   <p className="text-[11px] text-text-muted">
-                    This character lives in the encrypted Private workspace. Lore and memories
+                    This character lives in the encrypted vault. Lore and memories
                     are stored locally and used automatically when chatting.
                   </p>
 
                   <LorebookEditor character={selected} />
+                  <CharacterEvolutionPanel character={selected} />
                   <div className="pt-2 flex justify-end">
                     <button
                       type="button"
@@ -392,5 +394,3 @@ export function CharacterStudio({ isOpen, onClose }) {
 }
 
 export default CharacterStudio;
-
-

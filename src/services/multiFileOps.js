@@ -128,7 +128,7 @@ export async function replaceInFiles(searchTerm, replaceTerm, filePaths = null, 
   for (const file of targetFiles) {
     try {
       // Read full file content (not truncated)
-      const fullContent = await api.readFile(file.path);
+      const fullContent = await api.readFileScoped(file.path);
       if (!fullContent) continue;
 
       const matches = fullContent.match(pattern);
@@ -136,7 +136,7 @@ export async function replaceInFiles(searchTerm, replaceTerm, filePaths = null, 
 
       const newContent = fullContent.replace(pattern, replaceTerm);
       
-      await api.writeFile(file.path, newContent);
+      await api.writeFileScoped(file.path, newContent);
       results.modifiedFiles++;
       results.totalReplacements += matches.length;
     } catch (error) {

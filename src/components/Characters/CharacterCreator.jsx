@@ -113,7 +113,7 @@ export function CharacterCreator({ isOpen, onClose }) {
               </h3>
               <p className="text-[11px] text-text-muted">
                 Who is this character? This sets their core identity in the
-                Private workspace.
+                vault.
               </p>
             </div>
             <div className="grid grid-cols-2 gap-3">
@@ -320,10 +320,10 @@ export function CharacterCreator({ isOpen, onClose }) {
           <div className="space-y-4">
             <div>
               <h3 className="text-sm font-medium text-text-primary mb-1">
-                Private / NSFW
+                Vault Tags
               </h3>
               <p className="text-[11px] text-text-muted">
-                This lives only in the encrypted Private workspace. Tags help
+                This stays inside the encrypted vault. Tags help
                 you search and organize characters.
               </p>
             </div>
@@ -392,7 +392,7 @@ export function CharacterCreator({ isOpen, onClose }) {
                   New Character
                 </h2>
                 <p className="text-[11px] text-text-muted">
-                  Guided setup for a Private workspace companion.
+                  Guided setup for a vault companion.
                 </p>
               </div>
             </div>
@@ -421,7 +421,7 @@ export function CharacterCreator({ isOpen, onClose }) {
                   : step === 'background'
                   ? 'Background'
                   : step === 'nsfw'
-                  ? 'Private / NSFW'
+                  ? 'Vault Tags'
                   : 'Advanced'}
               </span>
             </div>

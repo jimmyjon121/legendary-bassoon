@@ -222,8 +222,8 @@ function WorkspaceUsage({ data }) {
     casual: 'Casual',
     work: 'Work',
     code: 'Code',
-    nsfw: 'Private',
-    private: 'Private'
+    nsfw: 'Vault',
+    private: 'Vault'
   };
 
   if (data.length === 0) {

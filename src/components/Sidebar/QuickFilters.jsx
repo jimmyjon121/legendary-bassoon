@@ -28,7 +28,7 @@ const FilterPill = memo(function FilterPill({ filter, isActive, count, onClick }
       whileTap={{ scale: 0.98 }}
       onClick={() => onClick(filter.id)}
       className={`
-        relative flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium
+        relative inline-flex min-h-[38px] items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium
         transition-colors whitespace-nowrap
         ${isActive 
           ? 'bg-accent-primary/20 text-accent-primary border border-accent-primary/30' 
@@ -81,7 +81,7 @@ export function QuickFilters({ className = '' }) {
   };
 
   return (
-    <div className={`flex items-center gap-1 overflow-x-auto scrollbar-none py-1 ${className}`}>
+    <div className={`flex flex-wrap items-center gap-1.5 py-1 ${className}`}>
       {FILTERS.map((filter) => (
         <FilterPill
           key={filter.id}
@@ -134,5 +134,4 @@ export function QuickFiltersCompact({ className = '' }) {
 }
 
 export default QuickFilters;
-
 

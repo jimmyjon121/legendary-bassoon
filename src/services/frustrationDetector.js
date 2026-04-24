@@ -5,6 +5,8 @@
  * and proactively offer assistance.
  */
 
+import { pollingCoordinator } from './pollingCoordinator';
+
 // Frustration signal thresholds
 const FRUSTRATION_SIGNALS = {
   rapidUndoRedo: { 
@@ -110,19 +112,20 @@ class FrustrationDetector {
    * Start monitoring for frustration signals
    */
   start() {
-    if (this.checkInterval) return;
-    
-    this.checkInterval = setInterval(() => {
-      if (this.isEnabled) {
-        this.analyzeSignals();
-      }
-    }, 10000); // Check every 10 seconds
+    if (this._unsubscribe) return;
+
+    this._unsubscribe = pollingCoordinator.subscribe('frustrationDetector', {
+      run: () => { if (this.isEnabled) this.analyzeSignals(); },
+      intervalMs: 10000,
+      runWhenHidden: false,
+    });
   }
 
-  /**
-   * Stop monitoring
-   */
   stop() {
+    if (this._unsubscribe) {
+      this._unsubscribe();
+      this._unsubscribe = null;
+    }
     if (this.checkInterval) {
       clearInterval(this.checkInterval);
       this.checkInterval = null;

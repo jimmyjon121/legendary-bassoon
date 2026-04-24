@@ -1,7 +1,12 @@
-const { spawn, execSync } = require('child_process');
+const { spawn, execSync, spawnSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const healthMonitor = require('./health-monitor');
+
+// Maximum time we will block boot while npm finishes restoring dependencies.
+// Set large enough for a cold install on a slow connection but bounded so a
+// hung network request doesn't pin the app forever.
+const NPM_INSTALL_TIMEOUT_MS = 10 * 60 * 1000;
 
 // Startup step definitions for progress tracking
 const STARTUP_STEPS = {
@@ -16,7 +21,7 @@ const STARTUP_STEPS = {
 };
 
 const STARTUP_TIMEOUTS_MS = {
-  ollama: 15000,
+  ollama: 30000,
   npu: 45000,
   imageBackend: 6000,
 };
@@ -146,12 +151,7 @@ class StartupManager {
     // Quick check: if node_modules doesn't exist at all, run full install
     if (!fs.existsSync(nodeModulesPath)) {
       this.addLog('node_modules missing - running npm install...');
-      try {
-        execSync('npm install', { cwd: projectRoot, stdio: 'inherit' });
-        this.addLog('[OK] npm install complete');
-      } catch (err) {
-        this.addLog(`[WARN] npm install failed: ${err.message}`);
-      }
+      this._runNpmInstall(projectRoot);
       return;
     }
 
@@ -188,12 +188,48 @@ class StartupManager {
 
     this.addLog(`Missing ${missing.length} dependencies: ${missing.join(', ')}`);
     this.addLog('Running npm install to restore missing packages...');
+    this._runNpmInstall(projectRoot);
+  }
 
+  /**
+   * Run `npm install` with a hard timeout so a hung network request cannot
+   * block the entire boot sequence indefinitely.
+   */
+  _runNpmInstall(projectRoot) {
     try {
-      execSync('npm install', { cwd: projectRoot, stdio: 'inherit' });
+      const npmCmd = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+      const result = spawnSync(npmCmd, ['install', '--no-audit', '--no-fund'], {
+        cwd: projectRoot,
+        stdio: 'inherit',
+        timeout: NPM_INSTALL_TIMEOUT_MS,
+        windowsHide: true,
+      });
+      if (result.error) {
+        if (result.error.code === 'ETIMEDOUT') {
+          this.addLog(`[WARN] npm install timed out after ${Math.round(NPM_INSTALL_TIMEOUT_MS / 60000)}m`);
+        } else {
+          this.addLog(`[WARN] npm install error: ${result.error.message}`);
+        }
+        return;
+      }
+      if (typeof result.status === 'number' && result.status !== 0) {
+        this.addLog(`[WARN] npm install exited with code ${result.status}`);
+        return;
+      }
       this.addLog('[OK] npm install complete');
     } catch (err) {
-      this.addLog(`[WARN] npm install failed: ${err.message}`);
+      // Keep the legacy execSync path as a last-resort fallback: if spawnSync
+      // isn't available in some exotic runtime we would rather try than fail.
+      try {
+        execSync('npm install --no-audit --no-fund', {
+          cwd: projectRoot,
+          stdio: 'inherit',
+          timeout: NPM_INSTALL_TIMEOUT_MS,
+        });
+        this.addLog('[OK] npm install complete (fallback)');
+      } catch (innerErr) {
+        this.addLog(`[WARN] npm install failed: ${innerErr.message || err.message}`);
+      }
     }
   }
 
@@ -326,23 +362,45 @@ class StartupManager {
   }
 
   async ensureOllamaRunning() {
+    let alreadyRunning = false;
+
     try {
-      // Check if already running
       const response = await this.fetchWithTimeout(
         'http://127.0.0.1:11434/api/tags',
         2000,
         { method: 'GET' }
       );
-
-      if (response.ok) {
-        this.addLog('[OK] Ollama already running');
-        return { running: true, started: false };
-      }
-    } catch (error) {
-      // Not running, try to start
+      alreadyRunning = response.ok;
+    } catch {
+      // Not running
     }
 
-    // Find and start Ollama
+    if (alreadyRunning) {
+      // Ollama is running but it may have been started externally (system tray)
+      // without our GPU env vars. Check if our vars are active by probing the
+      // server config through the log file.
+      const needsRestart = await this._ollamaMissingGpuEnv();
+      if (needsRestart) {
+        this.addLog('[INFO] Ollama running without GPU env vars — restarting with correct config');
+        try {
+          const { exec } = require('child_process');
+          const { promisify } = require('util');
+          const execAsync = promisify(exec);
+          await execAsync('taskkill /F /IM ollama.exe').catch(() => {});
+          await new Promise(r => setTimeout(r, 2000));
+          // Fall through to start fresh below
+          alreadyRunning = false;
+        } catch {
+          this.addLog('[WARN] Could not restart Ollama — continuing with existing instance');
+          return { running: true, started: false, gpuEnvMissing: true };
+        }
+      } else {
+        this.addLog('[OK] Ollama already running with GPU config');
+        return { running: true, started: false };
+      }
+    }
+
+    // Find and start Ollama with our GPU env vars
     try {
       const ollamaModule = require('./ollama-helper');
       const ollamaHelper = typeof ollamaModule.getOllamaHelper === 'function'
@@ -358,11 +416,11 @@ class StartupManager {
         return { running: false, installed: false };
       }
 
-      this.addLog('Starting Ollama...');
+      this.addLog('Starting Ollama with GPU acceleration...');
       const result = await ollamaHelper.start();
       
       if (result.success) {
-        this.addLog('[OK] Ollama started');
+        this.addLog('[OK] Ollama started with GPU config');
         return { running: true, started: true };
       } else {
         this.addLog(`[WARN] Failed to start Ollama: ${result.error}`);
@@ -374,52 +432,148 @@ class StartupManager {
     }
   }
 
+  /**
+   * Check whether the currently running Ollama process was started with our
+   * GPU environment variables.  We look at the tail of the server log for the
+   * "server config" line that Ollama prints on startup — it contains the full
+   * env dump.  If OLLAMA_FLASH_ATTENTION is "false" or CUDA_VISIBLE_DEVICES
+   * is empty, we know it was started externally.
+   */
+  async _ollamaMissingGpuEnv() {
+    try {
+      const os = require('os');
+      const logPath = path.join(os.homedir(), 'AppData', 'Local', 'Ollama', 'server.log');
+      if (!fs.existsSync(logPath)) return false;
+
+      const stat = fs.statSync(logPath);
+      const readBytes = Math.min(stat.size, 8192);
+      const fd = fs.openSync(logPath, 'r');
+      const buf = Buffer.alloc(readBytes);
+      fs.readSync(fd, buf, 0, readBytes, Math.max(0, stat.size - readBytes));
+      fs.closeSync(fd);
+      const tail = buf.toString('utf-8');
+
+      // Find the last "server config" line
+      const configMatch = tail.match(/OLLAMA_FLASH_ATTENTION:(true|false).*?OLLAMA_MAX_LOADED_MODELS:(\d+)/);
+      if (!configMatch) return false;
+
+      const flashAttn = configMatch[1];
+      const maxModels = configMatch[2];
+
+      // If flash attention is off or max models isn't capped, env vars are missing
+      if (flashAttn === 'false' || maxModels === '0') {
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    }
+  }
+
   async startNPUServerIfConfigured() {
     try {
       const npuBridge = require('./npu-bridge').getNpuBridge();
-      const status = await npuBridge.getStatus();
-      
+
+      // Pin the venv early so detection picks it up on fresh launches.
+      this._pinOpenVinoEnvEarly();
+
+      const status = await npuBridge.getStatus({ force: true });
+
       if (status.serverRunning) {
         this.addLog('[OK] NPU server already running');
         return { running: true };
       }
 
-      // Check if OpenVINO is set up
       if (!status.openvinoInstalled) {
-        this.addLog('[INFO] NPU not configured (optional)');
+        this.addLog('[INFO] OpenVINO not detected — NPU acceleration unavailable');
         return { running: false, configured: false };
       }
 
-      // Check if user has enabled NPU auto-start
-      const configPath = path.join(__dirname, '../../scripts/openvino-model.json');
+      // Resolve openvino-model.json from the most likely packaging locations
+      // so both dev runs and packaged builds (including app.asar.unpacked)
+      // find the file without special-casing each.
+      const resPath = process.resourcesPath;
+      const configCandidates = [
+        path.join(__dirname, '../../scripts/openvino-model.json'),
+      ];
+      if (resPath) {
+        configCandidates.push(path.join(resPath, 'scripts', 'openvino-model.json'));
+        configCandidates.push(path.join(resPath, 'app.asar.unpacked', 'scripts', 'openvino-model.json'));
+      }
+      const configPath = configCandidates.find((p) => {
+        try { return fs.existsSync(p); } catch { return false; }
+      }) || null;
+
       let autoStart = false;
+      let hybridDevice = null;
       try {
-        if (fs.existsSync(configPath)) {
+        if (configPath) {
           const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
           autoStart = config.auto_start === true && (config.model_path || config.model_id);
+          if (config.hybrid_enabled && config.device) {
+            hybridDevice = config.device;
+          }
         }
       } catch (e) {
         // Config doesn't exist or is invalid
       }
 
       if (autoStart) {
-        this.addLog('Starting NPU server (auto-start enabled)...');
+        const modeLabel = hybridDevice ? `Unified Brain (${hybridDevice})` : 'NPU';
+        this.addLog(`Starting ${modeLabel} server (auto-start enabled)...`);
         const result = await npuBridge.startServer();
         if (result.success) {
-          this.addLog('[OK] NPU server started');
-          return { running: true, configured: true, started: true };
+          this.addLog(`[OK] ${modeLabel} server started`);
+          return { running: true, configured: true, started: true, hybrid: !!hybridDevice, device: hybridDevice };
         } else {
-          this.addLog(`[WARN] NPU server failed to start: ${result.error}`);
+          this.addLog(`[WARN] ${modeLabel} server failed to start: ${result.error}`);
           return { running: false, configured: true, error: result.error };
         }
       }
 
-      this.addLog('[INFO] NPU configured but not started (start manually in settings)');
+      this.addLog('[INFO] OpenVINO installed; NPU auto-start not enabled');
       return { running: false, configured: true };
     } catch (error) {
       this.addLog(`[INFO] NPU check skipped: ${error.message}`);
       return { running: false, error: error.message };
     }
+  }
+
+  _pinOpenVinoEnvEarly() {
+    try {
+      if (process.env.OPENVINO_ENV_DIR && fs.existsSync(process.env.OPENVINO_ENV_DIR)) return;
+
+      const candidates = [
+        path.join(__dirname, '../../openvino-env'),
+        path.join(process.cwd(), 'openvino-env'),
+      ];
+
+      const appPath = require('electron')?.app?.getAppPath?.();
+      if (appPath) {
+        candidates.unshift(path.join(appPath, 'openvino-env'));
+        if (String(appPath).includes('app.asar')) {
+          candidates.unshift(
+            path.join(String(appPath).replace('app.asar', 'app.asar.unpacked'), 'openvino-env')
+          );
+        }
+      }
+      const resourcesPath = process.resourcesPath;
+      if (resourcesPath) {
+        candidates.unshift(path.join(resourcesPath, 'app.asar.unpacked', 'openvino-env'));
+        candidates.unshift(path.join(resourcesPath, 'openvino-env'));
+      }
+
+      for (const dir of candidates) {
+        const py = path.join(dir, 'Scripts', 'python.exe');
+        const pkg = path.join(dir, 'Lib', 'site-packages', 'openvino');
+        if (fs.existsSync(py) && fs.existsSync(pkg)) {
+          process.env.OPENVINO_ENV_DIR = dir;
+          process.env.OPENVINO_PYTHON = py;
+          this.addLog(`[INFO] Pinned openvino-env at ${dir}`);
+          return;
+        }
+      }
+    } catch { /* noop */ }
   }
 
   async checkImageBackend() {

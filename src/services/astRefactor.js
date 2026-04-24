@@ -169,7 +169,7 @@ export async function renameSymbolInProject(projectRoot, oldName, newName, files
   
   for (const filePath of files) {
     try {
-      const content = await api.readFile(filePath);
+      const content = await api.readFileScoped(filePath);
       if (!content) continue;
       
       // Check if file contains the symbol
@@ -331,7 +331,7 @@ export async function moveToFile(sourceContent, symbolName, targetPath, options 
   // Build target content
   let targetContent = '';
   try {
-    targetContent = await api.readFile(targetPath) || '';
+    targetContent = await api.readFileScoped(targetPath) || '';
   } catch {
     if (!createIfMissing) {
       throw new Error(`Target file does not exist: ${targetPath}`);

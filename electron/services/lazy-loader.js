@@ -20,6 +20,7 @@ const PROTECTED_SERVICES = new Set([
   'model-manager',
   'power-mode',
   'hardware-detection',
+  'inference-orchestrator',
 ]);
 
 /**

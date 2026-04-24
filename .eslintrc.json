@@ -15,6 +15,7 @@
     "sourceType": "module"
   },
   "plugins": [
+    "react",
     "react-hooks"
   ],
   "ignorePatterns": [
@@ -22,13 +23,21 @@
     "src/generated/**"
   ],
   "rules": {
+    "react/jsx-uses-vars": "error",
+    "react/jsx-uses-react": "off",
+    "react/react-in-jsx-scope": "off",
     "react-hooks/rules-of-hooks": "error",
     "react-hooks/exhaustive-deps": "warn",
-    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_" }],
+    "no-unused-vars": ["warn", { "argsIgnorePattern": "^_", "varsIgnorePattern": "^_|^React$" }],
     "no-undef": "error",
     "no-empty": ["error", { "allowEmptyCatch": true }]
   },
   "globals": {
     "React": "readonly"
+  },
+  "settings": {
+    "react": {
+      "version": "detect"
+    }
   }
 }

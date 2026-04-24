@@ -23,6 +23,7 @@ import {
   Sparkles,
 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore';
+import { shallow } from 'zustand/shallow';
 
 // Empty folder prompt with quick actions
 function EmptyFolderPrompt({ error }) {
@@ -372,7 +373,7 @@ export function ProjectExplorer() {
       scanProject: state.scanProject,
       openFile: state.openFile,
       activeFilePath: state.activeFilePath,
-    }));
+    }), shallow);
 
   const [query, setQuery] = useState('');
 

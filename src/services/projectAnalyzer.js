@@ -29,6 +29,8 @@ function detectStacks(pkgJson) {
 export async function analyzeProjectStructure(rootPath) {
   if (!rootPath) return null;
 
+  await api.grantFsRoot(rootPath, 'project-analyzer-root');
+
   if (api.analyzeProject) {
     const remote = await api.analyzeProject(rootPath);
     if (remote && !remote.error) {
@@ -43,7 +45,7 @@ export async function analyzeProjectStructure(rootPath) {
 
   let pkgJson = null;
   try {
-    const pkgContent = await api.readFile(`${rootPath}/package.json`);
+    const pkgContent = await api.readFileScoped(`${rootPath}/package.json`, rootPath);
     pkgJson = JSON.parse(pkgContent || '{}');
   } catch (error) {
     // ignore
@@ -69,4 +71,3 @@ export async function analyzeProjectStructure(rootPath) {
 export default {
   analyzeProjectStructure,
 };
-

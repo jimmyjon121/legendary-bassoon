@@ -148,18 +148,19 @@ async function autoTuneModel(modelPath) {
   // Batch size
   result.batchSize = recommendBatchSize(estimatedVramBytes, gpuVramMb);
 
-  // GPU layers heuristic: if we don't know layer count, approximate by VRAM ratio
+  // GPU layers heuristic: normalize to numeric Ollama-compatible values so the
+  // renderer and main process do not need to maintain separate mappings.
   if (gpuVramMb && estimatedVramBytes) {
     const gpuBytes = gpuVramMb * 1024 * 1024;
     const ratio = gpuBytes / estimatedVramBytes;
     if (ratio >= 1.0) {
-      result.gpuLayers = 'all';
+      result.gpuLayers = -1;
       notes.push('Estimated VRAM is sufficient for full GPU offload.');
     } else if (ratio >= 0.5) {
-      result.gpuLayers = 'most';
+      result.gpuLayers = 33;
       notes.push('Recommended to offload most layers to GPU; some will remain on CPU.');
     } else {
-      result.gpuLayers = 'partial';
+      result.gpuLayers = 15;
       notes.push('Limited VRAM; recommend partial offload or CPU-heavy configuration.');
     }
   }

@@ -26,13 +26,6 @@ const DEFAULT_SHORTCUTS = {
     description: 'Open the model selection menu',
     defaultCombo: 'Ctrl+M',
   },
-  'global-search': {
-    id: 'global-search',
-    label: 'Global search',
-    category: 'Navigation',
-    description: 'Search all conversations and messages',
-    defaultCombo: 'Ctrl+K',
-  },
   'open-settings': {
     id: 'open-settings',
     label: 'Open settings',
@@ -51,7 +44,7 @@ const DEFAULT_SHORTCUTS = {
     id: 'panic-mode',
     label: 'Panic mode',
     category: 'System',
-    description: 'Instantly hide DevForge and lock Private workspace',
+    description: 'Instantly hide DevForge and lock the vault',
     defaultCombo: 'Ctrl+Shift+X',
   },
   'workspace-casual': {
@@ -75,11 +68,11 @@ const DEFAULT_SHORTCUTS = {
     description: 'Switch to the Code workspace',
     defaultCombo: 'Ctrl+3',
   },
-  'workspace-private': {
-    id: 'workspace-private',
-    label: 'Switch to Private workspace',
+  'workspace-research': {
+    id: 'workspace-research',
+    label: 'Switch to Research workspace',
     category: 'Navigation',
-    description: 'Switch to the Private workspace',
+    description: 'Switch to the Research workspace',
     defaultCombo: 'Ctrl+4',
   },
   'cancel-or-close': {
@@ -88,27 +81,6 @@ const DEFAULT_SHORTCUTS = {
     category: 'System',
     description: 'Stop generation or close the active dialog',
     defaultCombo: 'Escape',
-  },
-  'command-palette': {
-    id: 'command-palette',
-    label: 'Open command palette',
-    category: 'Navigation',
-    description: 'Search and run any DevForge action',
-    defaultCombo: 'Ctrl+Shift+P',
-  },
-  'animation-demo': {
-    id: 'animation-demo',
-    label: 'Animation showcase',
-    category: 'System',
-    description: 'Open the GSAP animation demo/showcase',
-    defaultCombo: 'Ctrl+Shift+A',
-  },
-  'forge-console': {
-    id: 'forge-console',
-    label: 'Open Forge Console',
-    category: 'Navigation',
-    description: 'Open the Forge Console (Replay, Runs, Mindprint, Insights)',
-    defaultCombo: 'Ctrl+Shift+F',
   },
 };
 
@@ -235,5 +207,3 @@ export function getNormalizedShortcuts() {
   });
   return map;
 }
-
-

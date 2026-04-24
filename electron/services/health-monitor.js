@@ -37,21 +37,28 @@ class HealthMonitor extends EventEmitter {
   }
 
   /**
-   * Start health monitoring
+   * Start health monitoring. The scheduler ticks on a short fixed cadence
+   * (15s); individual services decide whether to actually run a check based
+   * on their own `checkIntervalMs` plus an exponential-backoff speedup when
+   * they are in a failing state. The legacy `intervalMs` argument is kept for
+   * compatibility but only used to back-off the tick if callers explicitly
+   * opt in to a slower cadence.
    */
-  start(intervalMs = 120000) { // Reduced from 30s to 120s for lighter resource usage
+  start(intervalMs = 15000) {
     if (this.isRunning) return;
-    
+
     this.isRunning = true;
-    console.log('[HealthMonitor] Starting health monitoring (lite mode, 120s interval)...');
-    
-    // Initial check after a delay to not slow startup
+    // Scheduler tick: cap at 30s to keep recovery responsive, floor at 5s so
+    // a misconfigured caller can't hammer CPUs.
+    const tick = Math.min(30000, Math.max(5000, Number(intervalMs) || 15000));
+    console.log(`[HealthMonitor] Starting health monitoring (tick=${tick}ms, per-service throttled)`);
+
+    // Initial check after a short delay to not slow startup
     setTimeout(() => this.checkAllServices(), 5000);
-    
-    // Periodic checks - much less frequent for lightweight operation
+
     this.checkInterval = setInterval(() => {
       this.checkAllServices();
-    }, intervalMs);
+    }, tick);
   }
 
   /**
@@ -67,14 +74,32 @@ class HealthMonitor extends EventEmitter {
   }
 
   /**
-   * Check all registered services
+   * Check all registered services. Each service respects its own
+   * `checkIntervalMs` so critical services (e.g. Ollama) can poll more
+   * frequently than optional backends without us forcing a single global
+   * cadence. When a service is failing we use an exponential backoff window
+   * shrinking toward its configured interval so we notice recovery quickly.
    */
   async checkAllServices() {
     const results = {};
-    
+    const now = Date.now();
+
     for (const [serviceId, service] of this.services) {
       if (!service.enabled) continue;
-      
+
+      const interval = Math.max(5000, Number(service.checkIntervalMs) || 120000);
+      // If this service recently failed, aim to retry much sooner. Cap at the
+      // configured interval so we don't thrash, and ramp back to full interval
+      // once it's been healthy for a few cycles.
+      const failingFactor = service.consecutiveFailures > 0
+        ? Math.min(1, Math.pow(0.5, Math.min(service.consecutiveFailures, 4)))
+        : 1;
+      const effectiveInterval = Math.max(5000, Math.floor(interval * failingFactor));
+
+      if (service.lastCheck && (now - service.lastCheck) < effectiveInterval) {
+        continue;
+      }
+
       try {
         const status = await this.checkService(serviceId);
         results[serviceId] = status;
@@ -85,18 +110,20 @@ class HealthMonitor extends EventEmitter {
         };
       }
     }
-    
+
     // Record in history
-    this.healthHistory.push({
-      timestamp: Date.now(),
-      results,
-    });
-    
+    if (Object.keys(results).length > 0) {
+      this.healthHistory.push({
+        timestamp: now,
+        results,
+      });
+    }
+
     // Trim history
     if (this.healthHistory.length > this.maxHistorySize) {
       this.healthHistory.shift();
     }
-    
+
     return results;
   }
 
@@ -258,11 +285,14 @@ class HealthMonitor extends EventEmitter {
 // Create singleton instance with default service registrations
 const healthMonitor = new HealthMonitor();
 
-// Register Ollama service - check much less frequently for lite mode
+// Register Ollama service - check moderately often since it's the critical
+// backbone. Per-service throttling means a healthy Ollama only touches the
+// socket every 45s; a failing Ollama is rechecked much sooner thanks to the
+// exponential speedup in checkAllServices().
 healthMonitor.registerService('ollama', {
   name: 'Ollama LLM',
   critical: true,
-  interval: 120000, // Reduced from 30s to 120s
+  interval: 45000,
   check: async () => {
     try {
       const response = await fetch('http://localhost:11434/api/tags', {

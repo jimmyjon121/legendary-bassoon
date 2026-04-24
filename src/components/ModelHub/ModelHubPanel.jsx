@@ -110,6 +110,12 @@ const HF_FORMAT_FILTERS = [
   { id: 'gguf', label: 'GGUF only' },
 ];
 
+const HF_QUALITY_MODES = [
+  { id: 'strict', label: 'Trusted only', minScore: 72, hideLowSignal: true, minCreatorTrust: 3 },
+  { id: 'balanced', label: 'Balanced feed', minScore: 48, hideLowSignal: true, minCreatorTrust: 0 },
+  { id: 'raw', label: 'Raw feed', minScore: 0, hideLowSignal: false, minCreatorTrust: 0 },
+];
+
 const HF_PAGE_SIZE = 96;
 const HF_AUTO_REFRESH_MS = 120000;
 const HF_CREATOR_TRUST_HINTS = [
@@ -970,9 +976,9 @@ function getAgenticModelScore(model = {}) {
   const id = String(model?.id || model?.modelId || '').toLowerCase();
   const name = String(model?.name || model?.displayName || '').toLowerCase();
   const family = String(model?.family || '').toLowerCase();
-  const capability = String(model?.capability || '').toLowerCase();
+  const capability = getNormalizedCapability(model);
   const description = String(model?.description || '').toLowerCase();
-  const tags = Array.isArray(model?.tags) ? model.tags.map((tag) => String(tag).toLowerCase()) : [];
+  const tags = getLowercaseTags(model);
   const combined = `${id} ${name} ${family} ${capability} ${description} ${tags.join(' ')}`;
 
   let score = 0;
@@ -998,6 +1004,63 @@ function getAgenticModelScore(model = {}) {
   if (tags.includes('multilingual')) score += 1;
 
   return score;
+}
+
+function getLowercaseTags(model = {}) {
+  return Array.isArray(model?.tags) ? model.tags.map((tag) => String(tag).toLowerCase()) : [];
+}
+
+function getNormalizedCapability(model = {}) {
+  const raw = String(model?.capability || model?.pipeline_tag || model?.enriched?.capability || '').toLowerCase();
+  const tags = getLowercaseTags(model);
+  const description = String(model?.description || '').toLowerCase();
+  const combined = `${raw} ${description} ${tags.join(' ')}`;
+
+  if (raw === 'coding') return 'code';
+  if (raw === 'multimodal') return 'vision';
+  if (raw === 'roleplay' || raw === 'erotica' || raw === 'storytelling') return 'creative';
+  if ((!raw || raw === 'general') && (tags.includes('vision') || tags.includes('multimodal') || combined.includes('image') || combined.includes('vision'))) {
+    return 'vision';
+  }
+  if ((!raw || raw === 'general') && (tags.includes('code') || tags.includes('coding') || tags.includes('programming') || combined.includes('coder'))) {
+    return 'code';
+  }
+  return raw || 'chat';
+}
+
+function getModelFeatureBadges(model = {}) {
+  const tags = getLowercaseTags(model);
+  const description = String(model?.description || '').toLowerCase();
+  const capability = getNormalizedCapability(model);
+  const combined = `${capability} ${description} ${tags.join(' ')}`;
+  const badges = [];
+
+  if ((tags.includes('vision') || tags.includes('multimodal')) && capability !== 'vision') {
+    badges.push({ label: 'Vision', tone: 'purple' });
+  }
+  if ((tags.includes('code') || tags.includes('coding') || tags.includes('programming')) && capability !== 'code') {
+    badges.push({ label: 'Code', tone: 'blue' });
+  }
+  if (tags.includes('tools') || tags.includes('tool-use') || tags.includes('function-calling') || combined.includes('tool calling') || combined.includes('function calling')) {
+    badges.push({ label: 'Tools', tone: 'blue' });
+  }
+  if (tags.includes('thinking') || tags.includes('reasoning') || combined.includes('reasoning')) {
+    badges.push({ label: 'Thinking', tone: 'purple' });
+  }
+  if ((tags.includes('creative') || tags.includes('storytelling') || tags.includes('roleplay')) && capability !== 'creative') {
+    badges.push({ label: 'Creative', tone: 'purple' });
+  }
+  if (tags.includes('uncensored') || tags.includes('no-refusals') || tags.includes('abliterated') || tags.includes('derestricted')) {
+    badges.push({ label: 'Uncensored', tone: 'rose' });
+  }
+
+  const seen = new Set();
+  return badges.filter((badge) => {
+    const key = String(badge?.label || '').toLowerCase();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).slice(0, 3);
 }
 
 function parseParamBillions(value) {
@@ -1071,8 +1134,8 @@ function matchesDiscoverIntentFilter(model = {}, intent = 'all') {
 
   const name = String(model?.name || model?.displayName || model?.id || model?.modelId || '').toLowerCase();
   const description = String(model?.description || '').toLowerCase();
-  const capability = String(model?.capability || model?.pipeline_tag || model?.enriched?.capability || '').toLowerCase();
-  const tags = Array.isArray(model?.tags) ? model.tags.map((tag) => String(tag).toLowerCase()) : [];
+  const capability = getNormalizedCapability(model);
+  const tags = getLowercaseTags(model);
   const combined = `${name} ${description} ${capability} ${tags.join(' ')}`;
   const params = parseParamBillions(model?.params || model?.enriched?.params);
   const estimatedNeed = estimateHfVramNeedGB(model, model?.recommendedQuant);
@@ -1200,8 +1263,9 @@ function getRecommendationChipClass(tone = 'neutral') {
 
 function buildModelRecommendationChips(model = {}, hardwareMeta = {}) {
   const chips = [];
-  const capability = String(model?.capability || model?.pipeline_tag || model?.enriched?.capability || '').toLowerCase();
-  const tags = Array.isArray(model?.tags) ? model.tags.map((tag) => String(tag).toLowerCase()) : [];
+  const capability = getNormalizedCapability(model);
+  const tags = getLowercaseTags(model);
+  const featureBadges = getModelFeatureBadges(model);
   const contextLength = Number(model?.contextLength || model?.enriched?.contextLength || 0);
   const params = parseParamBillions(model?.params || model?.enriched?.params);
 
@@ -1214,6 +1278,8 @@ function buildModelRecommendationChips(model = {}, hardwareMeta = {}) {
 
   if (capability.includes('code') || tags.includes('code') || tags.includes('programming')) chips.push({ label: 'Code-first', tone: 'blue' });
   if (capability.includes('vision') || tags.includes('vision') || tags.includes('multimodal')) chips.push({ label: 'Vision ready', tone: 'purple' });
+  if (featureBadges.some((badge) => badge.label === 'Tools')) chips.push({ label: 'Tool calling', tone: 'blue' });
+  if (featureBadges.some((badge) => badge.label === 'Thinking')) chips.push({ label: 'Reasoning mode', tone: 'purple' });
   if (getAgenticModelScore(model) >= 5) chips.push({ label: 'Research capable', tone: 'blue' });
   if (contextLength >= 65536) chips.push({ label: 'Long context', tone: 'green' });
   if (Number.isFinite(params) && params <= 7) chips.push({ label: 'Fast on-device', tone: 'green' });
@@ -1305,7 +1371,7 @@ function OllamaProfileModal({ model, profile, hardware, pullingModels, installed
   const familyLower = family.toLowerCase();
   const description = model.description || '';
   const author = model.author || '';
-  const capability = model.capability || 'chat';
+  const capability = getNormalizedCapability(model);
   const capabilityKey = capability.toLowerCase();
   const capabilityGuide = CAPABILITY_GUIDANCE[capabilityKey] || CAPABILITY_GUIDANCE.default;
   const accent = CAPABILITY_ACCENTS[capabilityKey] || CAPABILITY_ACCENTS.default;
@@ -1420,7 +1486,7 @@ function OllamaProfileModal({ model, profile, hardware, pullingModels, installed
       onClick={onClose}
     >
       <motion.div
-        className="bg-neutral-950 border border-neutral-800 rounded-xl w-full max-w-4xl max-h-[92vh] overflow-hidden flex flex-col shadow-2xl"
+        className="bg-neutral-950 border border-neutral-800 rounded-xl w-full max-w-4xl max-h-[92vh] overflow-hidden flex flex-col shadow-[0_24px_80px_-48px_rgba(0,0,0,0.95)]"
         initial={{ scale: 0.95, y: 20 }}
         animate={{ scale: 1, y: 0 }}
         exit={{ scale: 0.95, y: 20 }}
@@ -1861,7 +1927,8 @@ function OllamaModelCard({
   const familyLower = family?.toLowerCase();
   const description = model.description || model.details?.family || '';
   const author = model.author || '';
-  const capability = model.capability || '';
+  const capability = getNormalizedCapability(model);
+  const featureBadges = getModelFeatureBadges(model);
   const variants = model.variants || [];
   const tags = model.tags || [];
   const pulls = model.pulls || 0;
@@ -1892,7 +1959,7 @@ function OllamaModelCard({
     : null;
 
   return (
-    <div className={`bg-neutral-900/80 border border-neutral-800 hover:border-blue-500/30 rounded-lg overflow-hidden transition-all hover:shadow-lg hover:shadow-blue-500/5 group h-full flex flex-col ${className}`}>
+    <div className={`bg-neutral-900/80 border border-neutral-800 hover:border-blue-500/30 rounded-lg overflow-hidden transition-all group h-full flex flex-col ${className}`}>
       <div className="p-3 cursor-pointer flex-1" onClick={() => onSelect?.(model)}>
         <div className="flex items-start justify-between gap-2">
         <div className="flex-1 min-w-0">
@@ -1906,6 +1973,7 @@ function OllamaModelCard({
               {capability && (
                 <TagBadge color={
                   capability === 'code' ? 'bg-green-500/15 text-green-400' :
+                  capability === 'creative' ? 'bg-purple-500/15 text-purple-400' :
                   capability === 'vision' ? 'bg-purple-500/15 text-purple-400' :
                   capability === 'embedding' ? 'bg-amber-500/15 text-amber-400' :
                   'bg-blue-500/15 text-blue-400'
@@ -1913,6 +1981,11 @@ function OllamaModelCard({
                   {capability}
                 </TagBadge>
               )}
+              {featureBadges.map((badge) => (
+                <TagBadge key={badge.label} color={getRecommendationChipClass(badge.tone)}>
+                  {badge.label}
+                </TagBadge>
+              ))}
               {isInstalled && (
                 <TagBadge color="bg-green-500/20 text-green-400">Installed</TagBadge>
               )}
@@ -2031,7 +2104,8 @@ function HfModelCard({ model, onSelect, hardwareMeta = null, recommendationChips
   const family = model.family || model.enriched?.family || '';
   const familyLower = family.toLowerCase();
   const params = model.params || model.enriched?.params || '';
-  const capability = model.capability || model.enriched?.capability || model.pipeline_tag || '';
+  const capability = getNormalizedCapability(model);
+  const featureBadges = getModelFeatureBadges(model);
   const downloads = model.downloads || model.downloadCount || model.enriched?.downloadCount || 0;
   const description = model.description || '';
   const fileStats = model.fileStats || model.enriched?.fileStats || {};
@@ -2044,7 +2118,7 @@ function HfModelCard({ model, onSelect, hardwareMeta = null, recommendationChips
 
   return (
     <div
-      className="bg-neutral-900/80 border border-neutral-800 hover:border-blue-500/30 rounded-xl overflow-hidden cursor-pointer transition-all hover:shadow-lg hover:shadow-blue-500/5 group h-full flex flex-col"
+      className="bg-neutral-900/80 border border-neutral-800 hover:border-blue-500/30 rounded-xl overflow-hidden cursor-pointer transition-all group h-full flex flex-col"
       onClick={() => onSelect?.(model)}
     >
       <div className="p-4 flex-1">
@@ -2094,11 +2168,17 @@ function HfModelCard({ model, onSelect, hardwareMeta = null, recommendationChips
             <span className={`text-[10px] px-2 py-0.5 rounded font-medium ${
               capability === 'code' ? 'bg-green-500/15 text-green-400' :
               capability === 'creative' ? 'bg-purple-500/15 text-purple-400' :
+              capability === 'vision' ? 'bg-purple-500/15 text-purple-400' :
               'bg-blue-500/15 text-blue-400'
             }`}>
               {capability}
             </span>
           )}
+          {featureBadges.map((badge) => (
+            <span key={badge.label} className={`text-[10px] px-2 py-0.5 rounded font-medium ${getRecommendationChipClass(badge.tone)}`}>
+              {badge.label}
+            </span>
+          ))}
           {hasMixedFormats && (
             <span className="text-[10px] px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 font-medium">
               multi-format
@@ -2228,7 +2308,7 @@ function NsfwModelCard({
       : `${downloadCount}`;
 
   return (
-    <div className="bg-neutral-900/80 border border-neutral-800 hover:border-rose-500/30 rounded-lg overflow-hidden transition-all hover:shadow-lg hover:shadow-rose-500/5 group">
+    <div className="bg-neutral-900/80 border border-neutral-800 hover:border-rose-500/30 rounded-lg overflow-hidden transition-all group">
       <div className="p-3 cursor-pointer" onClick={openProfile}>
         <div className="flex items-start justify-between gap-2">
           <div className="flex-1 min-w-0">
@@ -2813,6 +2893,14 @@ export function ModelHubPanel({ isOpen, onClose }) {
       return 'all';
     }
   });
+  const [hfQualityMode, setHfQualityMode] = useState(() => {
+    try {
+      const saved = localStorage.getItem('devforge-hf-quality-mode');
+      return HF_QUALITY_MODES.some((entry) => entry.id === saved) ? saved : 'balanced';
+    } catch {
+      return 'balanced';
+    }
+  });
   const [hfAutoRefresh, setHfAutoRefresh] = useState(() => {
     try {
       const saved = localStorage.getItem('devforge-hf-auto-refresh');
@@ -2897,15 +2985,30 @@ export function ModelHubPanel({ isOpen, onClose }) {
   const currentModel = useAppStore(s => s.currentModel);
   const setModel = useAppStore(s => s.setModel);
   const currentWorkspace = useAppStore(s => s.currentWorkspace);
+  const isVaultLocked = useAppStore(s => s.isLocked);
+  const nsfwPassword = useAppStore(s => s.nsfwPassword);
+  const canAccessPrivateCatalog = currentWorkspace === 'nsfw' && !isVaultLocked;
   const isResearchWorkspace = currentWorkspace === 'research';
   const searchTimeout = useRef(null);
   const openedRef = useRef(false);
+  const hfRequestSeqRef = useRef(0);
+
+  useEffect(() => {
+    if (!canAccessPrivateCatalog && discoverSource === 'nsfw') {
+      setDiscoverSource('ollama');
+      setShowDiscoverSourceMenu(false);
+    }
+  }, [canAccessPrivateCatalog, discoverSource]);
 
   const compareSet = useMemo(() => new Set(compareModels.map(m => m.name || m.modelId || m.id)), [compareModels]);
   const detectedVramGB = useMemo(() => getHardwareVramGB(hardware), [hardware]);
   const compatibilityThreshold = useMemo(
     () => getCompatibilityThresholdForFilter(compatibilityFilter),
     [compatibilityFilter],
+  );
+  const hfQualityConfig = useMemo(
+    () => HF_QUALITY_MODES.find((entry) => entry.id === hfQualityMode) || HF_QUALITY_MODES[1],
+    [hfQualityMode],
   );
 
   const ollamaRecommendationSet = useMemo(() => {
@@ -3028,6 +3131,10 @@ export function ModelHubPanel({ isOpen, onClose }) {
   useEffect(() => {
     try { localStorage.setItem('devforge-hf-format-filter', hfFormatFilter); } catch {}
   }, [hfFormatFilter]);
+
+  useEffect(() => {
+    try { localStorage.setItem('devforge-hf-quality-mode', hfQualityMode); } catch {}
+  }, [hfQualityMode]);
 
   useEffect(() => {
     try { localStorage.setItem('devforge-hf-auto-refresh', hfAutoRefresh ? 'true' : 'false'); } catch {}
@@ -3371,6 +3478,7 @@ export function ModelHubPanel({ isOpen, onClose }) {
   };
 
   const loadHfCollection = async (collectionId, options = {}) => {
+    const requestSeq = ++hfRequestSeqRef.current;
     const refresh = options?.refresh === true;
     setHfActiveCollection(collectionId);
     setHfLoading(true);
@@ -3387,6 +3495,7 @@ export function ModelHubPanel({ isOpen, onClose }) {
 
     try {
       const result = await safeCall('hfGetCollectionModels', [collectionId], null);
+      if (requestSeq !== hfRequestSeqRef.current) return;
       if (result?.models && Array.isArray(result.models) && result.models.length > 0) {
         setHfModels(result.models);
         setHfSearchResults(result.models);
@@ -3396,12 +3505,14 @@ export function ModelHubPanel({ isOpen, onClose }) {
       }
       setHfLastUpdatedAt(new Date().toISOString());
     } catch (err) {
+      if (requestSeq !== hfRequestSeqRef.current) return;
       console.error('[ModelHub] HF collection models error:', err);
     }
     setHfLoading(false);
   };
 
   const loadHfCatalogPage = async ({ reset = false, refresh = false, forceMode = null, forceQuery = null } = {}) => {
+    const requestSeq = ++hfRequestSeqRef.current;
     const mode = forceMode || hfActiveCollection || '__all';
     if (forceMode) {
       setHfActiveCollection(forceMode);
@@ -3435,6 +3546,7 @@ export function ModelHubPanel({ isOpen, onClose }) {
         full: true,
         refresh,
       }], { models: [], nextCursor: null, hasMore: false, fetchedAt: null });
+      if (requestSeq !== hfRequestSeqRef.current) return;
 
       const models = Array.isArray(page?.models) ? page.models : [];
       setHfModels((prev) => (reset ? models : mergeModelsByKey(prev, models)));
@@ -3443,6 +3555,7 @@ export function ModelHubPanel({ isOpen, onClose }) {
       setHfHasMore(Boolean(page?.hasMore));
       setHfLastUpdatedAt(page?.fetchedAt || new Date().toISOString());
     } catch (err) {
+      if (requestSeq !== hfRequestSeqRef.current) return;
       console.error('[ModelHub] HF catalog page error:', err);
       if (reset) {
         setHfModels([]);
@@ -3468,12 +3581,18 @@ export function ModelHubPanel({ isOpen, onClose }) {
 
   const loadNsfwModels = async () => {
     setNsfwLoading(true);
+    if (!canAccessPrivateCatalog || !nsfwPassword) {
+      setNsfwModels([]);
+      setNsfwLoading(false);
+      return;
+    }
+
     try {
-      const vault = await safeCall('providersGetPrivateVaultModels', [], {});
+      const vault = await safeCall('providersGetPrivateVaultModels', [nsfwPassword], {});
       let combined = normalizeNsfwModels(vault);
 
       if (combined.length === 0) {
-        const fallback = await safeCall('providersGetNSFWModels', ['all'], {});
+        const fallback = await safeCall('providersGetNSFWModels', ['all', nsfwPassword], {});
         if (Array.isArray(fallback)) {
           combined = fallback;
         } else if (fallback && typeof fallback === 'object') {
@@ -3720,7 +3839,7 @@ export function ModelHubPanel({ isOpen, onClose }) {
   }, []);
 
   const handleQueueNsfwDownload = useCallback(async (model) => {
-    if (!model) return;
+    if (!model || !canAccessPrivateCatalog || !nsfwPassword) return;
     const payload = {
       source: model.source,
       name: model.name,
@@ -3732,14 +3851,14 @@ export function ModelHubPanel({ isOpen, onClose }) {
       revision: model.revision || 'main',
     };
 
-    const result = await safeCall('providersDownloadNsfwModel', [payload], { success: false });
+    const result = await safeCall('providersDownloadNsfwModel', [payload, nsfwPassword], { success: false });
     if (!result?.success) {
       const fallbackUrl = model.externalUrl || model.downloadUrl || model.civitaiUrl;
       if (fallbackUrl) handleOpenExternalModelPage(fallbackUrl);
     } else {
       loadDownloads();
     }
-  }, [handleOpenExternalModelPage, loadDownloads]);
+  }, [canAccessPrivateCatalog, handleOpenExternalModelPage, loadDownloads, nsfwPassword]);
 
   const handleCompareToggle = useCallback((model) => {
     const id = model.name || model.modelId || model.id;
@@ -3819,7 +3938,7 @@ export function ModelHubPanel({ isOpen, onClose }) {
     // Category
     if (ollamaCategory !== 'all') {
       list = list.filter(m => {
-        const cap = m.capability?.toLowerCase() || '';
+        const cap = getNormalizedCapability(m);
         const tags = (m.tags || []).map(t => t.toLowerCase());
         const name = (m.name || m.id || '').toLowerCase();
         switch (ollamaCategory) {
@@ -4000,7 +4119,15 @@ export function ModelHubPanel({ isOpen, onClose }) {
       list = list.filter((model) => getHfHardwareMeta(model).compatibilityScore >= compatibilityThreshold);
     }
 
-    if (hfHideNoisyModels) {
+    if (hfQualityConfig.minScore > 0) {
+      list = list.filter((model) => Number(model?.qualityScore || 0) >= hfQualityConfig.minScore);
+    }
+
+    if (hfQualityConfig.minCreatorTrust > 0) {
+      list = list.filter((model) => getCreatorTrustScore(getHfCreatorName(model)) >= hfQualityConfig.minCreatorTrust);
+    }
+
+    if (hfQualityConfig.hideLowSignal || hfHideNoisyModels) {
       list = list.filter((model) => !isLowSignalHfModel(model));
     }
 
@@ -4066,6 +4193,7 @@ export function ModelHubPanel({ isOpen, onClose }) {
     getHfHardwareMeta,
     hfCreatorFilter,
     hfCreatorMode,
+    hfQualityConfig,
     hfHideNoisyModels,
     hardwareFitOnly,
     hfModels,
@@ -4382,7 +4510,7 @@ export function ModelHubPanel({ isOpen, onClose }) {
         initial={{ scale: 0.95, opacity: 0 }}
         animate={{ scale: 1, opacity: 1 }}
         exit={{ scale: 0.95, opacity: 0 }}
-        className="relative w-[96vw] max-w-[1700px] h-[92vh] bg-neutral-950 rounded-2xl shadow-2xl border border-neutral-800 overflow-hidden flex flex-col"
+        className="relative w-[96vw] max-w-[1500px] h-[92vh] bg-neutral-950 rounded-xl shadow-[0_24px_90px_-52px_rgba(0,0,0,0.95)] border border-neutral-800 overflow-hidden flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* ── HEADER ── */}
@@ -4487,45 +4615,47 @@ export function ModelHubPanel({ isOpen, onClose }) {
                     )})}
                   </div>
 
-                  <div className="relative">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setShowDiscoverSourceMenu((prev) => !prev);
-                      }}
-                      className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs border transition-colors ${
-                        discoverSource === 'nsfw'
-                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
-                          : 'bg-neutral-900 text-text-muted border-neutral-800 hover:text-text-secondary'
-                      }`}
-                      title="More model sources"
-                    >
-                      <Shield size={11} />
-                      {discoverSource === 'nsfw' ? 'Private' : 'More'}
-                      <ChevronDown size={12} />
-                    </button>
-
-                    {showDiscoverSourceMenu && (
-                      <div
-                        className="absolute left-0 top-full mt-1 w-44 bg-neutral-900 border border-neutral-800 rounded-lg shadow-xl z-40 p-1"
-                        onClick={(e) => e.stopPropagation()}
+                  {canAccessPrivateCatalog && (
+                    <div className="relative">
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setShowDiscoverSourceMenu((prev) => !prev);
+                        }}
+                        className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs border transition-colors ${
+                          discoverSource === 'nsfw'
+                            ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                            : 'bg-neutral-900 text-text-muted border-neutral-800 hover:text-text-secondary'
+                        }`}
+                        title="More model sources"
                       >
-                        <button
-                          onClick={() => {
-                            setDiscoverSource('nsfw');
-                            setShowDiscoverSourceMenu(false);
-                          }}
-                          className={`w-full text-left px-2.5 py-1.5 rounded text-xs transition-colors ${
-                            discoverSource === 'nsfw'
-                              ? 'bg-rose-500/20 text-rose-300'
-                              : 'text-text-muted hover:text-text-secondary hover:bg-neutral-800'
-                          }`}
+                        <Shield size={11} />
+                        {discoverSource === 'nsfw' ? 'Vault' : 'More'}
+                        <ChevronDown size={12} />
+                      </button>
+
+                      {showDiscoverSourceMenu && (
+                        <div
+                          className="absolute left-0 top-full mt-1 w-44 bg-neutral-900 border border-neutral-800 rounded-lg shadow-[0_18px_44px_-28px_rgba(0,0,0,0.9)] z-40 p-1"
+                          onClick={(e) => e.stopPropagation()}
                         >
-                          Private Catalog (NSFW)
-                        </button>
-                      </div>
-                    )}
-                  </div>
+                          <button
+                            onClick={() => {
+                              setDiscoverSource('nsfw');
+                              setShowDiscoverSourceMenu(false);
+                            }}
+                            className={`w-full text-left px-2.5 py-1.5 rounded text-xs transition-colors ${
+                              discoverSource === 'nsfw'
+                                ? 'bg-rose-500/20 text-rose-300'
+                                : 'text-text-muted hover:text-text-secondary hover:bg-neutral-800'
+                            }`}
+                          >
+                            Vault Catalog
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
@@ -4707,6 +4837,17 @@ export function ModelHubPanel({ isOpen, onClose }) {
                         title="Choose HuggingFace formats to include in catalog"
                       >
                         {HF_FORMAT_FILTERS.map((entry) => (
+                          <option key={entry.id} value={entry.id}>{entry.label}</option>
+                        ))}
+                      </select>
+
+                      <select
+                        value={hfQualityMode}
+                        onChange={(e) => setHfQualityMode(e.target.value)}
+                        className="bg-neutral-900 border border-neutral-800 rounded px-2 py-1 text-[10px] text-text-muted"
+                        title="Choose how aggressively to filter noisy or low-trust HuggingFace repos"
+                      >
+                        {HF_QUALITY_MODES.map((entry) => (
                           <option key={entry.id} value={entry.id}>{entry.label}</option>
                         ))}
                       </select>
@@ -5544,7 +5685,7 @@ export function ModelHubPanel({ isOpen, onClose }) {
                       <Download size={11} /> Import
                     </button>
                     {showImportMenu && (
-                      <div className="absolute right-0 top-full mt-1 w-52 bg-neutral-900 border border-neutral-700 rounded-lg shadow-xl z-20 overflow-hidden">
+                      <div className="absolute right-0 top-full mt-1 w-52 bg-neutral-900 border border-neutral-700 rounded-lg shadow-[0_18px_44px_-28px_rgba(0,0,0,0.9)] z-20 overflow-hidden">
                         <button onClick={() => { setShowImportMenu(false); handleScanSystem(); }}
                           className="w-full flex items-center gap-2 px-3 py-2 text-xs text-text-secondary hover:bg-neutral-800 transition-colors text-left">
                           <Search size={13} className="text-blue-400" />
@@ -5574,7 +5715,7 @@ export function ModelHubPanel({ isOpen, onClose }) {
                       <Settings size={14} />
                     </button>
                     {showLibrarySettings && (
-                      <div className="absolute right-0 top-full mt-1 w-56 bg-neutral-900 border border-neutral-700 rounded-lg shadow-xl z-20 overflow-hidden">
+                      <div className="absolute right-0 top-full mt-1 w-56 bg-neutral-900 border border-neutral-700 rounded-lg shadow-[0_18px_44px_-28px_rgba(0,0,0,0.9)] z-20 overflow-hidden">
                         <div className="px-3 py-2 border-b border-neutral-800">
                           <p className="text-[10px] text-text-muted">Models Directory</p>
                           <p className="text-[9px] text-neutral-500 truncate mt-0.5">{modelsDirectory || 'Default location'}</p>
@@ -5890,7 +6031,7 @@ function HfProfileModal({ model, hardware, onClose }) {
         initial={{ scale: 0.95, y: 20 }}
         animate={{ scale: 1, y: 0 }}
         exit={{ scale: 0.95, y: 20 }}
-        className="w-[92vw] max-w-5xl max-h-[92vh] bg-neutral-950 rounded-xl shadow-2xl border border-neutral-800 overflow-hidden flex flex-col"
+        className="w-[92vw] max-w-5xl max-h-[92vh] bg-neutral-950 rounded-xl shadow-[0_24px_80px_-48px_rgba(0,0,0,0.95)] border border-neutral-800 overflow-hidden flex flex-col"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

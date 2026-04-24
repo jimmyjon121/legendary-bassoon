@@ -1,11 +1,22 @@
-/**
- * WhatIfPanel Component
- * 
- * Panel for creating and viewing code change simulations.
- */
+import React, { useCallback, useEffect, useState } from 'react';
+import { getWhatIfEngine, IMPACT_LEVEL, SIMULATION_STATUS } from '../../services/whatIfEngine';
 
-import React, { useState, useEffect, useCallback } from 'react';
-import { getWhatIfEngine, SIMULATION_STATUS, IMPACT_LEVEL } from '../../services/whatIfEngine';
+const TABS = ['summary', 'impact', 'tests', 'security', 'bundle'];
+
+function getRiskStyle(level) {
+  switch (level) {
+    case IMPACT_LEVEL.CRITICAL:
+      return { bg: 'bg-red-600', text: 'text-red-200', border: 'border-red-500' };
+    case IMPACT_LEVEL.HIGH:
+      return { bg: 'bg-orange-600', text: 'text-orange-200', border: 'border-orange-500' };
+    case IMPACT_LEVEL.MEDIUM:
+      return { bg: 'bg-amber-600', text: 'text-amber-200', border: 'border-amber-500' };
+    case IMPACT_LEVEL.LOW:
+      return { bg: 'bg-green-600', text: 'text-green-200', border: 'border-green-500' };
+    default:
+      return { bg: 'bg-gray-600', text: 'text-gray-200', border: 'border-gray-500' };
+  }
+}
 
 const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
   const [simulations, setSimulations] = useState([]);
@@ -16,13 +27,11 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
 
   useEffect(() => {
     const engine = getWhatIfEngine();
-    
     const unsubscribe = engine.addListener((state) => {
       setSimulations(state.all);
       setCurrentSimulation(state.current);
     });
 
-    // Get initial state
     setSimulations(engine.getAllSimulations());
     setCurrentSimulation(engine.getCurrentSimulation());
 
@@ -30,32 +39,28 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
   }, []);
 
   const handleCreateSimulation = useCallback(async () => {
-    if (!proposedChange.trim()) return;
+    const normalizedChange = proposedChange.trim();
+    if (!normalizedChange) return;
 
     const engine = getWhatIfEngine();
     setIsRunning(true);
 
     try {
-      // Create simulation
       const simulation = await engine.createSimulation(
-        [{ type: 'description', content: proposedChange }],
-        { name: proposedChange.substring(0, 50) }
+        [{ type: 'description', content: normalizedChange }],
+        { name: normalizedChange.substring(0, 50) }
       );
-
-      // Run simulation
       await engine.runSimulation(simulation.id, projectFiles);
-      
       setProposedChange('');
     } catch (error) {
       console.error('Simulation failed:', error);
     } finally {
       setIsRunning(false);
     }
-  }, [proposedChange, projectFiles]);
+  }, [projectFiles, proposedChange]);
 
   const handleApply = useCallback(() => {
     if (!currentSimulation) return;
-    
     const engine = getWhatIfEngine();
     const { patches } = engine.applySimulation(currentSimulation.id);
     onApplyChanges?.(patches);
@@ -67,28 +72,14 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
     getWhatIfEngine().discardSimulation(currentSimulation.id);
   }, [currentSimulation]);
 
-  // Risk level styling
-  const getRiskStyle = (level) => {
-    switch (level) {
-      case IMPACT_LEVEL.CRITICAL:
-        return { bg: 'bg-red-600', text: 'text-red-200', border: 'border-red-500' };
-      case IMPACT_LEVEL.HIGH:
-        return { bg: 'bg-orange-600', text: 'text-orange-200', border: 'border-orange-500' };
-      case IMPACT_LEVEL.MEDIUM:
-        return { bg: 'bg-amber-600', text: 'text-amber-200', border: 'border-amber-500' };
-      case IMPACT_LEVEL.LOW:
-        return { bg: 'bg-green-600', text: 'text-green-200', border: 'border-green-500' };
-      default:
-        return { bg: 'bg-gray-600', text: 'text-gray-200', border: 'border-gray-500' };
-    }
-  };
+  const summary = currentSimulation?.summary || null;
+  const summaryRiskStyle = getRiskStyle(summary?.overallRisk);
 
   return (
     <div className="h-full flex flex-col bg-gray-900">
-      {/* Header */}
       <div className="px-4 py-3 border-b border-gray-700 flex items-center justify-between">
         <div className="flex items-center gap-2">
-          <span className="text-xl">🔮</span>
+          <span className="text-xl" aria-hidden="true">[?]</span>
           <h2 className="font-medium text-gray-200">What-If Simulation</h2>
         </div>
         {onClose && (
@@ -100,7 +91,6 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
         )}
       </div>
 
-      {/* Create Simulation */}
       <div className="p-4 border-b border-gray-700">
         <label className="text-sm text-gray-400 mb-2 block">
           Describe the change you want to simulate:
@@ -126,27 +116,25 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
             </>
           ) : (
             <>
-              <span>🔮</span>
+              <span aria-hidden="true">[?]</span>
               Simulate Changes
             </>
           )}
         </button>
       </div>
 
-      {/* Current Simulation Results */}
       {currentSimulation && currentSimulation.status === SIMULATION_STATUS.COMPLETED && (
         <div className="flex-1 overflow-hidden flex flex-col">
-          {/* Summary Header */}
-          <div className={`px-4 py-3 ${getRiskStyle(currentSimulation.summary?.overallRisk).bg}`}>
+          <div className={`px-4 py-3 ${summaryRiskStyle.bg}`}>
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="font-medium text-white">{currentSimulation.name}</h3>
-                <p className={`text-sm ${getRiskStyle(currentSimulation.summary?.overallRisk).text}`}>
-                  Risk Level: {currentSimulation.summary?.overallRisk?.toUpperCase() || 'NONE'}
+                <p className={`text-sm ${summaryRiskStyle.text}`}>
+                  Risk Level: {summary?.overallRisk?.toUpperCase() || 'NONE'}
                 </p>
               </div>
               <div className="flex items-center gap-2">
-                {currentSimulation.summary?.canProceed ? (
+                {summary?.canProceed ? (
                   <span className="px-2 py-1 bg-green-500/30 text-green-200 text-xs rounded">
                     Safe to Apply
                   </span>
@@ -159,15 +147,14 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
             </div>
           </div>
 
-          {/* Tabs */}
           <div className="flex border-b border-gray-700">
-            {['summary', 'impact', 'tests', 'security', 'bundle'].map((tab) => (
+            {TABS.map((tab) => (
               <button
                 key={tab}
                 onClick={() => setActiveTab(tab)}
                 className={`px-4 py-2 text-sm capitalize ${
-                  activeTab === tab 
-                    ? 'text-blue-400 border-b-2 border-blue-400' 
+                  activeTab === tab
+                    ? 'text-blue-400 border-b-2 border-blue-400'
                     : 'text-gray-400 hover:text-gray-200'
                 }`}
               >
@@ -176,18 +163,16 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
             ))}
           </div>
 
-          {/* Tab Content */}
           <div className="flex-1 overflow-y-auto p-4">
-            {activeTab === 'summary' && currentSimulation.summary && (
+            {activeTab === 'summary' && summary && (
               <div className="space-y-4">
-                {/* Blockers */}
-                {currentSimulation.summary.blockers.length > 0 && (
+                {summary.blockers.length > 0 && (
                   <div className="bg-red-900/30 border border-red-700 rounded-lg p-3">
                     <h4 className="text-sm font-medium text-red-300 mb-2">Blockers</h4>
                     <ul className="space-y-1">
-                      {currentSimulation.summary.blockers.map((blocker, i) => (
-                        <li key={i} className="text-sm text-red-200 flex items-start gap-2">
-                          <span>🚫</span>
+                      {summary.blockers.map((blocker, index) => (
+                        <li key={`blocker:${index}`} className="text-sm text-red-200 flex items-start gap-2">
+                          <span aria-hidden="true">!</span>
                           {blocker}
                         </li>
                       ))}
@@ -195,14 +180,13 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
                   </div>
                 )}
 
-                {/* Warnings */}
-                {currentSimulation.summary.warnings.length > 0 && (
+                {summary.warnings.length > 0 && (
                   <div className="bg-amber-900/30 border border-amber-700 rounded-lg p-3">
                     <h4 className="text-sm font-medium text-amber-300 mb-2">Warnings</h4>
                     <ul className="space-y-1">
-                      {currentSimulation.summary.warnings.map((warning, i) => (
-                        <li key={i} className="text-sm text-amber-200 flex items-start gap-2">
-                          <span>⚠️</span>
+                      {summary.warnings.map((warning, index) => (
+                        <li key={`warning:${index}`} className="text-sm text-amber-200 flex items-start gap-2">
+                          <span aria-hidden="true">!</span>
                           {warning}
                         </li>
                       ))}
@@ -210,14 +194,13 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
                   </div>
                 )}
 
-                {/* Positives */}
-                {currentSimulation.summary.positives.length > 0 && (
+                {summary.positives.length > 0 && (
                   <div className="bg-green-900/30 border border-green-700 rounded-lg p-3">
                     <h4 className="text-sm font-medium text-green-300 mb-2">Improvements</h4>
                     <ul className="space-y-1">
-                      {currentSimulation.summary.positives.map((positive, i) => (
-                        <li key={i} className="text-sm text-green-200 flex items-start gap-2">
-                          <span>✅</span>
+                      {summary.positives.map((positive, index) => (
+                        <li key={`positive:${index}`} className="text-sm text-green-200 flex items-start gap-2">
+                          <span aria-hidden="true">+</span>
                           {positive}
                         </li>
                       ))}
@@ -225,13 +208,11 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
                   </div>
                 )}
 
-                {/* All clear */}
-                {currentSimulation.summary.blockers.length === 0 && 
-                 currentSimulation.summary.warnings.length === 0 && (
+                {summary.blockers.length === 0 && summary.warnings.length === 0 && (
                   <div className="bg-green-900/30 border border-green-700 rounded-lg p-3 text-center">
-                    <span className="text-2xl">✨</span>
+                    <span className="text-2xl" aria-hidden="true">OK</span>
                     <p className="text-sm text-green-200 mt-1">
-                      No issues detected! Changes look safe to apply.
+                      No issues detected. Changes look safe to apply.
                     </p>
                   </div>
                 )}
@@ -243,11 +224,11 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
                 <div className="text-sm text-gray-400">
                   {currentSimulation.results.impact.affectedFiles.length} files will be affected
                 </div>
-                {currentSimulation.results.impact.affectedFiles.map((file, i) => (
-                  <div key={i} className="bg-gray-800 rounded-lg p-3">
+                {currentSimulation.results.impact.affectedFiles.map((file, index) => (
+                  <div key={`impact:${index}`} className="bg-gray-800 rounded-lg p-3">
                     <div className="flex items-center gap-2">
-                      <span className={file.directChanges ? 'text-blue-400' : 'text-gray-400'}>
-                        {file.directChanges ? '📝' : '🔗'}
+                      <span className={file.directChanges ? 'text-blue-400' : 'text-gray-400'} aria-hidden="true">
+                        {file.directChanges ? 'D' : 'L'}
                       </span>
                       <span className="text-sm text-gray-200 truncate">{file.file}</span>
                     </div>
@@ -289,9 +270,9 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
                     <div className="text-xs text-gray-500">Skipped</div>
                   </div>
                 </div>
-                
-                {currentSimulation.results.tests.details.map((detail, i) => (
-                  <div key={i} className="bg-gray-800 rounded-lg p-3 text-sm">
+
+                {currentSimulation.results.tests.details.map((detail, index) => (
+                  <div key={`test:${index}`} className="bg-gray-800 rounded-lg p-3 text-sm">
                     <div className="text-gray-200">{detail.file}</div>
                     <div className="text-xs text-gray-400 mt-1">{detail.impact}</div>
                   </div>
@@ -301,32 +282,40 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
 
             {activeTab === 'security' && currentSimulation.results.security && (
               <div className="space-y-4">
-                {currentSimulation.results.security.vulnerabilities.length === 0 && 
-                 currentSimulation.results.security.warnings.length === 0 && (
+                {currentSimulation.results.security.vulnerabilities.length === 0
+                  && currentSimulation.results.security.warnings.length === 0 && (
                   <div className="bg-green-900/30 border border-green-700 rounded-lg p-4 text-center">
-                    <span className="text-2xl">🛡️</span>
+                    <span className="text-2xl" aria-hidden="true">OK</span>
                     <p className="text-sm text-green-200 mt-1">No security issues detected</p>
                   </div>
                 )}
-                
-                {currentSimulation.results.security.vulnerabilities.map((vuln, i) => (
-                  <div key={i} className={`rounded-lg p-3 border ${
-                    vuln.severity === 'critical' ? 'bg-red-900/30 border-red-700' : 'bg-orange-900/30 border-orange-700'
-                  }`}>
+
+                {currentSimulation.results.security.vulnerabilities.map((vulnerability, index) => (
+                  <div
+                    key={`vulnerability:${index}`}
+                    className={`rounded-lg p-3 border ${
+                      vulnerability.severity === 'critical'
+                        ? 'bg-red-900/30 border-red-700'
+                        : 'bg-orange-900/30 border-orange-700'
+                    }`}
+                  >
                     <div className="flex items-center gap-2">
-                      <span className={vuln.severity === 'critical' ? 'text-red-400' : 'text-orange-400'}>
-                        {vuln.severity === 'critical' ? '🚨' : '⚠️'}
+                      <span
+                        className={vulnerability.severity === 'critical' ? 'text-red-400' : 'text-orange-400'}
+                        aria-hidden="true"
+                      >
+                        !
                       </span>
-                      <span className="text-sm font-medium text-gray-200">{vuln.message}</span>
+                      <span className="text-sm font-medium text-gray-200">{vulnerability.message}</span>
                     </div>
-                    <div className="text-xs text-gray-400 mt-1">{vuln.file}</div>
+                    <div className="text-xs text-gray-400 mt-1">{vulnerability.file}</div>
                   </div>
                 ))}
-                
-                {currentSimulation.results.security.warnings.map((warn, i) => (
-                  <div key={i} className="bg-amber-900/20 rounded-lg p-3 border border-amber-800">
-                    <div className="text-sm text-amber-200">{warn.message}</div>
-                    <div className="text-xs text-gray-400 mt-1">{warn.file}</div>
+
+                {currentSimulation.results.security.warnings.map((warning, index) => (
+                  <div key={`security-warning:${index}`} className="bg-amber-900/20 rounded-lg p-3 border border-amber-800">
+                    <div className="text-sm text-amber-200">{warning.message}</div>
+                    <div className="text-xs text-gray-400 mt-1">{warning.file}</div>
                   </div>
                 ))}
               </div>
@@ -334,19 +323,23 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
 
             {activeTab === 'bundle' && currentSimulation.results.bundle && (
               <div className="space-y-4">
-                <div className={`rounded-lg p-4 text-center ${
-                  currentSimulation.results.bundle.status === 'good' ? 'bg-green-900/30' :
-                  currentSimulation.results.bundle.status === 'warning' ? 'bg-amber-900/30' :
-                  'bg-gray-800'
-                }`}>
+                <div
+                  className={`rounded-lg p-4 text-center ${
+                    currentSimulation.results.bundle.status === 'good'
+                      ? 'bg-green-900/30'
+                      : currentSimulation.results.bundle.status === 'warning'
+                        ? 'bg-amber-900/30'
+                        : 'bg-gray-800'
+                  }`}
+                >
                   <div className="text-3xl font-bold text-gray-200">
                     {currentSimulation.results.bundle.changeFormatted}
                   </div>
                   <div className="text-sm text-gray-400">Estimated bundle size change</div>
                 </div>
-                
-                {currentSimulation.results.bundle.details.map((detail, i) => (
-                  <div key={i} className="bg-gray-800 rounded-lg p-3">
+
+                {currentSimulation.results.bundle.details.map((detail, index) => (
+                  <div key={`bundle:${index}`} className="bg-gray-800 rounded-lg p-3">
                     <div className="text-sm text-gray-200">{detail.file}</div>
                     {detail.type === 'new_imports' && (
                       <div className="text-xs text-gray-400 mt-1">
@@ -362,7 +355,6 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
             )}
           </div>
 
-          {/* Actions */}
           <div className="p-4 border-t border-gray-700 flex items-center justify-end gap-2">
             <button
               onClick={handleDiscard}
@@ -372,9 +364,9 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
             </button>
             <button
               onClick={handleApply}
-              disabled={!currentSimulation.summary?.canProceed}
+              disabled={!summary?.canProceed}
               className={`px-4 py-2 text-sm font-medium rounded-lg transition-colors ${
-                currentSimulation.summary?.canProceed
+                summary?.canProceed
                   ? 'bg-green-600 hover:bg-green-500 text-white'
                   : 'bg-gray-700 text-gray-500 cursor-not-allowed'
               }`}
@@ -385,19 +377,24 @@ const WhatIfPanel = ({ projectFiles, onApplyChanges, onClose }) => {
         </div>
       )}
 
-      {/* Empty State */}
       {!currentSimulation && (
         <div className="flex-1 flex items-center justify-center p-8">
           <div className="text-center">
-            <span className="text-4xl">🔮</span>
+            <span className="text-4xl" aria-hidden="true">[?]</span>
             <h3 className="text-lg font-medium text-gray-300 mt-4">
               Simulate Before You Commit
             </h3>
             <p className="text-sm text-gray-500 mt-2 max-w-sm">
-              Describe a change you're considering and see what would happen 
-              before you actually make it. No risk, full insight.
+              Describe a change you are considering and see what would happen
+              before you actually make it.
             </p>
           </div>
+        </div>
+      )}
+
+      {simulations.length > 0 && (
+        <div className="px-4 py-2 border-t border-gray-800 text-[11px] text-gray-500">
+          Simulations tracked: {simulations.length}
         </div>
       )}
     </div>

@@ -1,20 +1,50 @@
-import React, { useEffect, useState, lazy, Suspense, memo, useCallback } from 'react';
+import React, { useEffect, useState, lazy, Suspense, memo } from 'react';
 import { useAppStore } from './stores/appStore';
 import { useKeyboardShortcuts } from './hooks/useKeyboardShortcuts';
 import { Layout } from './components/Layout/Layout';
 import { Sidebar } from './components/Sidebar/Sidebar';
-import { ChatArea } from './components/Chat/ChatArea';
 import { LockScreen } from './components/Workspaces/LockScreen';
 import { ToastContainer } from './components/ui/Toast';
 import { KeyboardShortcutsModal, useKeyboardShortcutsModal } from './components/ui/KeyboardShortcuts';
-import { useCommandsStore } from './stores/commandsStore';
 import { useAnimationStore } from './stores/animationStore';
 import ErrorBoundary from './components/ErrorBoundary';
 import { api, isElectron } from './utils/electronAPI';
+import { ModelHubPanel as ModelHubDirectInner } from './components/ModelHub/ModelHubPanel';
 
-// Soul Engine
-import { SuggestionContainer } from './components/Soul/SoulIndicator';
-import { useSoulStore } from './stores/soulStore';
+class ModelHubErrorCatcher extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+  componentDidCatch(error, info) {
+    console.error('[ModelHub] CRASH:', error, info?.componentStack);
+  }
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/80" onClick={this.props.onClose}>
+          <div className="bg-red-900 text-white p-8 rounded-xl max-w-lg" onClick={e => e.stopPropagation()}>
+            <h2 className="text-xl font-bold mb-2">ModelHub crashed</h2>
+            <pre className="text-xs whitespace-pre-wrap break-all">{this.state.error?.message}{'\n'}{this.state.error?.stack}</pre>
+            <button onClick={this.props.onClose} className="mt-4 px-4 py-2 bg-red-600 text-white rounded">Close</button>
+          </div>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function ModelHubDirect({ isOpen, onClose }) {
+  return (
+    <ModelHubErrorCatcher onClose={onClose}>
+      <ModelHubDirectInner isOpen={isOpen} onClose={onClose} />
+    </ModelHubErrorCatcher>
+  );
+}
 
 // ===========================================
 // LAZY LOADED COMPONENTS (Performance optimization)
@@ -23,19 +53,14 @@ import { useSoulStore } from './stores/soulStore';
 const SettingsModal = lazy(() => import('./components/Settings/SettingsModal').then(m => ({ default: m.SettingsModal })));
 const ImageGenModal = lazy(() => import('./components/ImageGen/ImageGenModal').then(m => ({ default: m.ImageGenModal })));
 const ExportModal = lazy(() => import('./components/Export/ExportModal').then(m => ({ default: m.ExportModal })));
-const ModelFinder = lazy(() => import('./components/Models/ModelFinder').then(m => ({ default: m.ModelFinder })));
-const ModelLibrary = lazy(() => import('./components/Models/ModelLibrary').then(m => ({ default: m.ModelLibrary })));
-const ModelManager = lazy(() => import('./components/Code/ModelManager').then(m => ({ default: m.ModelManager })));
-const ModelHubPanel = lazy(() => import('./components/ModelHub/ModelHubPanel').then(m => ({ default: m.ModelHubPanel })));
 const DownloadCenter = lazy(() => import('./components/Downloads/DownloadCenter').then(m => ({ default: m.DownloadCenter })));
 const OnboardingWizard = lazy(() => import('./components/Onboarding/OnboardingWizard').then(m => ({ default: m.OnboardingWizard })));
+const ModelSelector = lazy(() => import('./components/ModelSelector/ModelSelector').then(m => ({ default: m.ModelSelector })));
 // StartupScreen is NOT lazy - it's the first thing users see, must be instant
 import { StartupScreen } from './components/Startup/StartupScreen';
-const CommandPalette = lazy(() => import('./components/CommandPalette/CommandPalette').then(m => ({ default: m.CommandPalette })));
-const AnimationShowcase = lazy(() => import('./components/Demo/AnimationShowcase'));
-const ForgeConsole = lazy(() => import('./components/ForgeConsole/ForgeConsole').then(m => ({ default: m.ForgeConsole })));
-const FXOverlay = lazy(() => import('./components/FX/FXOverlay').then(m => ({ default: m.FXOverlay })));
-const GlobalSearch = lazy(() => import('./components/Search/GlobalSearch').then(m => ({ default: m.GlobalSearch })));
+const ChatV2Harness = lazy(() => import('./chat-v2/ui/ChatV2Harness').then(m => ({ default: m.ChatV2Harness })));
+const CodeWorkbench = lazy(() => import('./components/Code/CodeWorkbench').then(m => ({ default: m.CodeWorkbench })));
+const ResearchWorkspace = lazy(() => import('./components/Research/ResearchWorkspace').then(m => ({ default: m.ResearchWorkspace })));
 
 // Minimal loading fallback - PURE BLACK to prevent any flash
 // Uses inline styles because CSS may not be loaded yet
@@ -60,6 +85,17 @@ const LoadingFallback = memo(() => (
   </div>
 ));
 
+const STARTUP_COMPLETE_SESSION_KEY = 'devforge:startup-complete';
+
+function shouldShowStartupScreenOnBoot() {
+  if (typeof window === 'undefined') return true;
+  try {
+    return window.sessionStorage?.getItem(STARTUP_COMPLETE_SESSION_KEY) !== '1';
+  } catch {
+    return true;
+  }
+}
+
 function App() {
   // === SELECTIVE SUBSCRIPTIONS for optimal re-render performance ===
   const currentWorkspace = useAppStore(s => s.currentWorkspace);
@@ -67,37 +103,29 @@ function App() {
   const showSettings = useAppStore(s => s.showSettings);
   const showImageGen = useAppStore(s => s.showImageGen);
   const showExportModal = useAppStore(s => s.showExportModal);
-  const showModelFinder = useAppStore(s => s.showModelFinder);
-  const showModelLibrary = useAppStore(s => s.showModelLibrary);
   const showModelHub = useAppStore(s => s.showModelHub);
   const showDownloadCenter = useAppStore(s => s.showDownloadCenter);
+  const showModelSelector = useAppStore(s => s.showModelSelector);
   
   // Actions - stable references
-  const toggleModelFinder = useAppStore(s => s.toggleModelFinder);
   const initializeApp = useAppStore(s => s.initializeApp);
   const initializeDownloads = useAppStore(s => s.initializeDownloads);
   const createConversation = useAppStore(s => s.createConversation);
   const toggleSettings = useAppStore(s => s.toggleSettings);
   const toggleModelSelector = useAppStore(s => s.toggleModelSelector);
   const toggleImageGen = useAppStore(s => s.toggleImageGen);
-  const toggleModelLibrary = useAppStore(s => s.toggleModelLibrary);
   const toggleModelHub = useAppStore(s => s.toggleModelHub);
   const toggleDownloadCenter = useAppStore(s => s.toggleDownloadCenter);
   const setWorkspace = useAppStore(s => s.setWorkspace);
   const stopGeneration = useAppStore(s => s.stopGeneration);
-  const setModel = useAppStore(s => s.setModel);
   
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [isCheckingOnboarding, setIsCheckingOnboarding] = useState(true);
-  const [showStartupScreen, setShowStartupScreen] = useState(true);
-  const [showAnimationDemo, setShowAnimationDemo] = useState(false);
-  const [showGlobalSearch, setShowGlobalSearch] = useState(false);
+  const [showStartupScreen, setShowStartupScreen] = useState(() => shouldShowStartupScreenOnBoot());
+  
   
   // Animation store initialization
   const initializeAnimations = useAnimationStore(state => state.initialize);
-  
-  // Soul store initialization
-  const initializeSoul = useSoulStore(state => state.initialize);
   
   // Keyboard shortcuts modal
   const { isOpen: showKeyboardShortcuts, close: closeKeyboardShortcuts } = useKeyboardShortcutsModal();
@@ -159,9 +187,6 @@ function App() {
     // Initialize animation system
     initializeAnimations();
     
-    // Initialize Soul Engine
-    initializeSoul();
-
     // Check if user has completed onboarding
     const checkOnboarding = async () => {
       try {
@@ -182,7 +207,7 @@ function App() {
     };
     
     checkOnboarding();
-    
+
     // Listen for panic mode (only in Electron)
     let cleanup = null;
     if (isElectron() && window.electronAPI?.onPanicMode) {
@@ -190,12 +215,39 @@ function App() {
         useAppStore.getState().triggerPanic();
       });
     }
-    
+
+    // Hardcoded Shift+Escape panic key -- always works, even from inputs/textareas.
+    // Also serves as global idle auto-lock for the vault workspace.
+    const panicHandler = (e) => {
+      if (e.shiftKey && e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        useAppStore.getState().triggerPanic();
+      }
+    };
+    window.addEventListener('keydown', panicHandler, true);
+
+    // Auto-lock vault workspace after 5 minutes of inactivity
+    let idleTimer = null;
+    const resetIdle = () => {
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        const state = useAppStore.getState();
+        if (state.currentWorkspace === 'nsfw' && !state.isLocked) {
+          state.lockNsfw();
+        }
+      }, 5 * 60 * 1000);
+    };
+    const idleEvents = ['mousemove', 'keydown', 'mousedown', 'touchstart', 'scroll'];
+    idleEvents.forEach(evt => window.addEventListener(evt, resetIdle, { passive: true }));
+    resetIdle();
+
     return () => {
-      // Cleanup global error handlers
       window.removeEventListener('error', handleGlobalError);
       window.removeEventListener('unhandledrejection', handleUnhandledRejection);
-      
+      window.removeEventListener('keydown', panicHandler, true);
+      idleEvents.forEach(evt => window.removeEventListener(evt, resetIdle));
+      if (idleTimer) clearTimeout(idleTimer);
       if (cleanup && typeof cleanup === 'function') {
         cleanup();
       }
@@ -216,7 +268,6 @@ function App() {
       }
     },
     'export-conversation': () => {
-      // Will be wired to export modal in Phase 1.2
       const openExportModal = useAppStore.getState().openExportModal;
       if (openExportModal) {
         openExportModal();
@@ -228,14 +279,8 @@ function App() {
     },
     'workspace-casual': () => setWorkspace('casual'),
     'workspace-work': () => setWorkspace('work'),
+    'workspace-research': () => setWorkspace('research'),
     'workspace-code': () => setWorkspace('code'),
-    'workspace-private': () => setWorkspace('nsfw'),
-    'global-search': () => {
-      setShowGlobalSearch(true);
-    },
-    'forge-console': () => {
-      useSoulStore.getState().toggleForgeConsole();
-    },
     'cancel-or-close': () => {
       const { isGenerating } = useAppStore.getState();
       if (isGenerating) {
@@ -248,29 +293,25 @@ function App() {
         toggleSettings();
       } else if (showImageGen) {
         toggleImageGen();
-      } else if (showModelFinder) {
-        toggleModelFinder();
-      } else if (showModelLibrary) {
-        toggleModelLibrary();
       } else if (showModelHub) {
         toggleModelHub();
       } else if (showDownloadCenter) {
         toggleDownloadCenter();
       }
     },
-    'command-palette': () => {
-      const { toggle } = useCommandsStore.getState();
-      toggle();
-    },
-    'animation-demo': () => {
-      setShowAnimationDemo(true);
-    },
   });
 
   // Show premium 3D startup screen during initial boot
   // NOT wrapped in Suspense - StartupScreen is directly imported for instant render
   if (showStartupScreen) {
-    return <StartupScreen onComplete={() => setShowStartupScreen(false)} />;
+    return <StartupScreen onComplete={() => {
+      try {
+        window.sessionStorage?.setItem(STARTUP_COMPLETE_SESSION_KEY, '1');
+      } catch {
+        // Non-blocking
+      }
+      setShowStartupScreen(false);
+    }} />;
   }
 
   if (isCheckingOnboarding) {
@@ -317,7 +358,15 @@ function App() {
           {/* Main Content */}
           <main className="flex-1 flex flex-col min-w-0">
             <ErrorBoundary level="component">
-              <ChatArea />
+              <Suspense fallback={<LoadingFallback />}>
+                {currentWorkspace === 'code' ? (
+                  <CodeWorkbench />
+                ) : currentWorkspace === 'research' ? (
+                  <ResearchWorkspace workspace={currentWorkspace} />
+                ) : (
+                  <ChatV2Harness />
+                )}
+              </Suspense>
             </ErrorBoundary>
           </main>
         </div>
@@ -339,38 +388,14 @@ function App() {
               <ExportModal onClose={() => useAppStore.getState().closeExportModal()} />
             </ErrorBoundary>
           )}
-          {showModelFinder && (
+          {showModelSelector && (
             <ErrorBoundary level="component">
-              <ModelFinder 
-                onClose={toggleModelFinder}
-                onImportComplete={(count) => console.log(`Imported ${count} models`)}
-              />
-            </ErrorBoundary>
-          )}
-          {showModelLibrary && (
-            <ErrorBoundary level="component">
-              {currentWorkspace === 'code' ? (
-                <ModelManager onClose={toggleModelLibrary} />
-              ) : (
-                <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
-                  <div className="w-full max-w-4xl h-[85vh] bg-forge-surface border border-forge-border rounded-xl shadow-2xl overflow-hidden">
-                    <ModelLibrary
-                      onClose={toggleModelLibrary}
-                      onSelectModel={(model) => {
-                        if (model?.source === 'ollama' && model.name) {
-                          setModel(model.name);
-                          toggleModelLibrary();
-                        }
-                      }}
-                    />
-                  </div>
-                </div>
-              )}
+              <ModelSelector onClose={() => toggleModelSelector()} />
             </ErrorBoundary>
           )}
           {showModelHub && (
-            <ErrorBoundary level="component">
-              <ModelHubPanel isOpen={showModelHub} onClose={toggleModelHub} />
+            <ErrorBoundary level="component" scope="ModelHub">
+              <ModelHubDirect isOpen={showModelHub} onClose={toggleModelHub} />
             </ErrorBoundary>
           )}
           {showDownloadCenter && (
@@ -378,37 +403,11 @@ function App() {
               <DownloadCenter isOpen={showDownloadCenter} onClose={toggleDownloadCenter} />
             </ErrorBoundary>
           )}
-          <CommandPalette />
         </Suspense>
         
         <ToastContainer />
         <KeyboardShortcutsModal isOpen={showKeyboardShortcuts} onClose={closeKeyboardShortcuts} />
-        
-        {/* Heavy components - lazy loaded */}
-        <Suspense fallback={null}>
-          {showAnimationDemo && <AnimationShowcase onClose={() => setShowAnimationDemo(false)} />}
-        </Suspense>
-        
-        {/* Soul Engine */}
-        <SuggestionContainer />
-        
-        <Suspense fallback={null}>
-          <ForgeConsole />
-        </Suspense>
-        
-        {/* Global Search Modal (Cmd+K) */}
-        <Suspense fallback={null}>
-          <GlobalSearch 
-            isOpen={showGlobalSearch} 
-            onClose={() => setShowGlobalSearch(false)} 
-          />
-        </Suspense>
       </Layout>
-      
-      {/* Global FX Overlay - lazy loaded for performance */}
-      <Suspense fallback={null}>
-        <FXOverlay />
-      </Suspense>
       </div>
     </ErrorBoundary>
   );

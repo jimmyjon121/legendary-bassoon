@@ -82,6 +82,7 @@ class OllamaBackend extends BaseBackend {
     return new Promise((resolve, reject) => {
       const url = new URL(this.endpoint);
       const protocol = url.protocol === 'https:' ? https : http;
+      const shouldLogDiagnostics = process.env.NODE_ENV !== 'production';
 
       const reqOptions = {
         hostname: url.hostname,
@@ -104,20 +105,59 @@ class OllamaBackend extends BaseBackend {
           return;
         }
 
+        let buffer = '';
+        let emittedContent = false;
+        let sawDoneSignal = false;
+
         res.on('data', (chunk) => {
-          const lines = chunk.toString().split('\n').filter(line => line.trim());
-          for (const line of lines) {
+          buffer += chunk.toString();
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || '';
+
+          for (const rawLine of lines) {
+            const line = rawLine.trim();
+            if (!line) continue;
             try {
               const parsed = JSON.parse(line);
+              if (parsed?.done) sawDoneSignal = true;
+              if (
+                (typeof parsed?.response === 'string' && parsed.response.length > 0) ||
+                (typeof parsed?.message?.content === 'string' && parsed.message.content.length > 0)
+              ) {
+                emittedContent = true;
+              }
               onChunk(parsed);
-            } catch {
-              // Ignore parse errors for partial chunks
+            } catch (error) {
+              if (shouldLogDiagnostics) {
+                console.warn('[OllamaBackend] Failed to parse stream line:', error.message);
+              }
             }
           }
         });
 
         res.on('end', () => {
+          const trailing = buffer.trim();
+          if (trailing) {
+            try {
+              const parsed = JSON.parse(trailing);
+              if (parsed?.done) sawDoneSignal = true;
+              if (
+                (typeof parsed?.response === 'string' && parsed.response.length > 0) ||
+                (typeof parsed?.message?.content === 'string' && parsed.message.content.length > 0)
+              ) {
+                emittedContent = true;
+              }
+              onChunk(parsed);
+            } catch (error) {
+              if (shouldLogDiagnostics) {
+                console.warn('[OllamaBackend] Dropped trailing partial stream buffer:', error.message);
+              }
+            }
+          }
           this.activeRequests.delete(requestId);
+          if (shouldLogDiagnostics && sawDoneSignal && !emittedContent) {
+            console.warn('[OllamaBackend] Stream finished without content after done signal');
+          }
           resolve();
         });
       });
@@ -205,6 +245,13 @@ class OllamaBackend extends BaseBackend {
       const hasMessages = Array.isArray(payload.messages) && payload.messages.length > 0;
       const apiPath = hasMessages ? '/api/chat' : '/api/generate';
 
+      // Default to long residency when upstream didn't set a keep_alive.
+      // The orchestrator normally sets this profile-aware; this fallback
+      // applies only for callers that bypass the orchestrator.
+      const keepAlive = payload.keep_alive !== undefined && payload.keep_alive !== null
+        ? payload.keep_alive
+        : '24h';
+
       const requestBody = hasMessages
         ? {
             model: payload.model,
@@ -213,6 +260,7 @@ class OllamaBackend extends BaseBackend {
               : payload.messages,
             stream: false,
             options,
+            keep_alive: keepAlive,
             ...(payload.format ? { format: payload.format } : {}),
           }
         : {
@@ -221,6 +269,7 @@ class OllamaBackend extends BaseBackend {
             system: payload.system,
             stream: false,
             options,
+            keep_alive: keepAlive,
             ...(payload.format ? { format: payload.format } : {}),
             ...(payload.images ? { images: payload.images } : {}),
           };
@@ -256,6 +305,10 @@ class OllamaBackend extends BaseBackend {
       const hasMessages = Array.isArray(payload.messages) && payload.messages.length > 0;
       const apiPath = hasMessages ? '/api/chat' : '/api/generate';
 
+      const keepAlive = payload.keep_alive !== undefined && payload.keep_alive !== null
+        ? payload.keep_alive
+        : '24h';
+
       const requestBody = hasMessages
         ? {
             model: payload.model,
@@ -264,6 +317,7 @@ class OllamaBackend extends BaseBackend {
               : payload.messages,
             stream: true,
             options,
+            keep_alive: keepAlive,
             ...(payload.format ? { format: payload.format } : {}),
           }
         : {
@@ -272,6 +326,7 @@ class OllamaBackend extends BaseBackend {
             system: payload.system,
             stream: true,
             options,
+            keep_alive: keepAlive,
             ...(payload.images ? { images: payload.images } : {}),
           };
 

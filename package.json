@@ -1,6 +1,6 @@
 {
   "name": "devforge",
-  "version": "0.1.0",
+  "version": "0.3.0",
   "description": "Sovereign AI Development Environment - Local, Private, Unrestricted",
   "main": "electron/main.js",
   "author": "Christopher",
@@ -27,16 +27,33 @@
     "eval:research": "node scripts/research-eval.js",
     "eval:casual": "node scripts/casual-eval.js",
     "eval:coding": "node scripts/coding-eval.js",
-    "eval:release-gate": "node scripts/release-gate.js"
+    "eval:chat-v2": "node scripts/chat-v2-eval.js",
+    "eval:llm-mode": "node scripts/llm-mode-eval.js",
+    "eval:live-chat-smoke": "node scripts/live-chat-smoke.js",
+    "eval:perf-chat-stream": "node scripts/perf-chat-stream.js",
+    "eval:perf-db-save": "node scripts/perf-db-save.js",
+    "eval:perf-ui-polling": "node scripts/perf-ui-polling.js",
+    "eval:perf-gate": "node scripts/release-perf-gate.js",
+    "eval:model-hub": "node scripts/model-hub-eval.js",
+    "eval:ipc-security": "node scripts/ipc-security-eval.js",
+    "eval:long-context": "node scripts/long-context-eval.js",
+    "eval:mode-switch": "node scripts/mode-switch-smoke.js",
+    "eval:llamanode": "node scripts/llamanode-smoke.js",
+    "eval:llamanode-live": "node scripts/llamanode-live-smoke.js",
+    "eval:tiered-utilization": "node scripts/tiered-utilization-smoke.js",
+    "eval:live-smoke": "node scripts/stream-cold-load-smoke.js && node scripts/npu-genai-smoke.js",
+    "eval:baseline-v03": "node scripts/v03-baseline-session.js",
+    "eval:release-gate": "node scripts/release-gate.js",
+    "shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File ./create-shortcut.ps1",
+    "shortcut:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File ./create-shortcut.ps1 -Mode Dev"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
-    "@pnpm/npm-resolver": "^20.0.0",
     "@react-three/drei": "^9.122.0",
     "@react-three/fiber": "^8.18.0",
     "@react-three/postprocessing": "^3.0.4",
     "@tanstack/react-query": "^5.17.0",
-    "@tanstack/react-virtual": "^3.13.13",
+    "@tanstack/react-virtual": "^3.13.19",
     "crypto-js": "^4.2.0",
     "date-fns": "^3.3.1",
     "dompurify": "^3.3.1",
@@ -50,6 +67,7 @@
     "mammoth": "^1.6.0",
     "marked": "^12.0.0",
     "monaco-editor": "^0.52.0",
+    "node-llama-cpp": "2.8.16",
     "node-powershell": "^4.0.0",
     "pdf-parse": "^1.1.1",
     "puppeteer-core": "^24.32.0",
@@ -90,9 +108,30 @@
     "files": [
       "dist/**/*",
       "electron/**/*",
-      "scripts/**/*",
-      "node_modules/**/*",
       "package.json"
+    ],
+    "asarUnpack": [
+      "electron/services/**",
+      "node_modules/node-llama-cpp/**"
+    ],
+    "extraResources": [
+      {
+        "from": "openvino-env",
+        "to": "openvino-env",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "scripts",
+        "to": "scripts",
+        "filter": [
+          "setup-openvino.ps1",
+          "start-npu-server.py",
+          "openvino-model.json",
+          "convert-to-openvino.py"
+        ]
+      }
     ],
     "win": {
       "target": [
@@ -101,14 +140,9 @@
           "arch": [
             "x64"
           ]
-        },
-        {
-          "target": "portable",
-          "arch": [
-            "x64"
-          ]
         }
       ],
+      "icon": "assets/icon.ico",
       "publisherName": "DevForge",
       "verifyUpdateCodeSignature": false,
       "signAndEditExecutable": false
@@ -116,10 +150,14 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true,
+      "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
       "shortcutName": "DevForge",
-      "deleteAppDataOnUninstall": false
+      "deleteAppDataOnUninstall": false,
+      "installerIcon": "assets/icon.ico",
+      "uninstallerIcon": "assets/icon.ico",
+      "installerHeaderIcon": "assets/icon.ico",
+      "warningsAsErrors": false
     },
     "mac": {
       "target": "dmg",

@@ -5,6 +5,8 @@
  * and protects that state by queueing non-urgent notifications and reducing interruptions.
  */
 
+import { pollingCoordinator } from './pollingCoordinator';
+
 // Flow state detection thresholds
 const FLOW_CONFIG = {
   // Minimum duration of consistent activity to consider "flow"
@@ -84,19 +86,20 @@ class FlowStateMonitor {
    * Start flow state monitoring
    */
   start() {
-    if (this.checkInterval) return;
-    
-    this.checkInterval = setInterval(() => {
-      if (this.isEnabled) {
-        this.updateFlowState();
-      }
-    }, 5000); // Check every 5 seconds
+    if (this._unsubscribe) return;
+
+    this._unsubscribe = pollingCoordinator.subscribe('flowStateMonitor', {
+      run: () => { if (this.isEnabled) this.updateFlowState(); },
+      intervalMs: 5000,
+      runWhenHidden: false,
+    });
   }
 
-  /**
-   * Stop monitoring
-   */
   stop() {
+    if (this._unsubscribe) {
+      this._unsubscribe();
+      this._unsubscribe = null;
+    }
     if (this.checkInterval) {
       clearInterval(this.checkInterval);
       this.checkInterval = null;

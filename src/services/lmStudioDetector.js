@@ -39,12 +39,14 @@ function enrichModelInfo(model) {
 export async function detectLMStudioModels() {
   try {
     const result = await api.scanLMStudioModels();
+    const scannedPaths = result?.scannedPaths || result?.searchedPaths || [];
     
     if (!result || !result.models) {
       return {
         found: false,
         models: [],
-        searchedPaths: result?.searchedPaths || [],
+        searchedPaths: scannedPaths,
+        scannedPaths,
       };
     }
     
@@ -53,7 +55,8 @@ export async function detectLMStudioModels() {
     return {
       found: enrichedModels.length > 0,
       models: enrichedModels,
-      searchedPaths: result.searchedPaths,
+      searchedPaths: scannedPaths,
+      scannedPaths,
     };
   } catch (error) {
     console.error('Failed to detect LM Studio models:', error);
@@ -61,6 +64,7 @@ export async function detectLMStudioModels() {
       found: false,
       models: [],
       searchedPaths: [],
+      scannedPaths: [],
       error: error.message,
     };
   }
@@ -125,4 +129,3 @@ export default {
   checkLMStudioAPI,
   importToOllama,
 };
-

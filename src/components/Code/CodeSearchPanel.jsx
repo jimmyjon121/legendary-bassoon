@@ -2,12 +2,13 @@ import React, { useState } from 'react';
 import { Search } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore';
 import { searchCodeIndex, hasCodeIndex } from '../../services/codeIndexer';
+import { shallow } from 'zustand/shallow';
 
 export function CodeSearchPanel() {
   const { rootPath, isIndexingCode } = useEditorStore((state) => ({
     rootPath: state.rootPath,
     isIndexingCode: state.isIndexingCode,
-  }));
+  }), shallow);
   const openFile = useEditorStore((state) => state.openFile);
 
   const [query, setQuery] = useState('');

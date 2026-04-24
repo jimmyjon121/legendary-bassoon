@@ -67,10 +67,26 @@ class OllamaHelper {
 
   async start() {
     const binary = this.detectBinary();
+    const env = { ...process.env };
+    // Only assert CUDA_VISIBLE_DEVICES when an NVIDIA GPU is actually present.
+    // Setting it unconditionally confuses logs on AMD/Intel/Apple systems and
+    // can even cause llama.cpp-based backends to try a non-existent CUDA path.
+    if (!env.CUDA_VISIBLE_DEVICES && this._hasNvidiaGpu()) {
+      env.CUDA_VISIBLE_DEVICES = '0';
+    }
+    env.OLLAMA_FLASH_ATTENTION = env.OLLAMA_FLASH_ATTENTION || '1';
+    // Keep models resident by default (LM Studio-style). Per-request
+    // keep_alive from the orchestrator overrides this based on the
+    // active performance profile.
+    env.OLLAMA_KEEP_ALIVE = env.OLLAMA_KEEP_ALIVE || '24h';
+    env.OLLAMA_NUM_PARALLEL = env.OLLAMA_NUM_PARALLEL || '1';
+    env.OLLAMA_MAX_LOADED_MODELS = env.OLLAMA_MAX_LOADED_MODELS || '1';
+
     const child = spawn(binary, ['serve'], {
       detached: true,
       stdio: 'ignore',
-      windowsHide: true
+      windowsHide: true,
+      env,
     });
     child.unref();
     this.child = child;
@@ -85,6 +101,34 @@ class OllamaHelper {
     }
     this.child = null;
     return { success: true };
+  }
+
+  /**
+   * Best-effort detection of an NVIDIA GPU without blocking startup. Reads the
+   * hardware-detection cache if available; otherwise falls back to checking
+   * for nvidia-smi on disk. Intentionally never triggers fresh detection here.
+   * @returns {boolean}
+   */
+  _hasNvidiaGpu() {
+    try {
+      const hw = require('./hardware-detection');
+      const cached = hw && typeof hw.getCachedHardware === 'function' ? hw.getCachedHardware() : null;
+      if (cached?.gpus?.some?.((g) => String(g.vendor || g.type || '').toLowerCase().includes('nvidia'))) {
+        return true;
+      }
+    } catch (_) {
+      // non-blocking
+    }
+    if (process.platform === 'win32') {
+      const candidates = [
+        path.join(process.env.ProgramFiles || '', 'NVIDIA Corporation', 'NVSMI', 'nvidia-smi.exe'),
+        'C:/Windows/System32/nvidia-smi.exe',
+      ];
+      return candidates.some((p) => {
+        try { return fs.existsSync(p); } catch { return false; }
+      });
+    }
+    return false;
   }
 
   /**

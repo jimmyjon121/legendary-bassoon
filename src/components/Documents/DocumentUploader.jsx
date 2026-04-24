@@ -3,7 +3,7 @@ import { Upload, Loader } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 
 export function DocumentUploader({ onUploaded }) {
-  const { currentWorkspace } = useAppStore();
+  const currentWorkspace = useAppStore((s) => s.currentWorkspace);
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState(null);
 

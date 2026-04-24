@@ -7,6 +7,15 @@ const checks = [
   { id: 'research', command: 'node scripts/research-eval.js' },
   { id: 'casual', command: 'node scripts/casual-eval.js' },
   { id: 'coding', command: 'node scripts/coding-eval.js' },
+  { id: 'chat-v2', command: 'node scripts/chat-v2-eval.js' },
+  { id: 'perf', command: 'node scripts/release-perf-gate.js' },
+  { id: 'model-hub', command: 'node scripts/model-hub-eval.js' },
+  { id: 'ipc-security', command: 'node scripts/ipc-security-eval.js' },
+  { id: 'normal-mode', command: 'node scripts/normal-mode-eval.js' },
+  { id: 'long-context', command: 'node scripts/long-context-eval.js' },
+  { id: 'mode-switch', command: 'node scripts/mode-switch-smoke.js' },
+  { id: 'llamanode', command: 'node scripts/llamanode-smoke.js' },
+  { id: 'tiered-utilization', command: 'node scripts/tiered-utilization-smoke.js' },
 ];
 
 function runCheck(check) {

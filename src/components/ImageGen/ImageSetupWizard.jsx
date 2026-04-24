@@ -4,7 +4,7 @@ import {
   Image, Download, CheckCircle, ExternalLink, Loader, AlertTriangle, 
   Folder, Play, Shield, Zap, Eye, HardDrive, RefreshCw, Sparkles
 } from 'lucide-react';
-import { safeCall } from '../../utils/electronAPI';
+import { api, safeCall } from '../../utils/electronAPI';
 
 // NSFW-friendly models - NO safety filters or content restrictions
 const AVAILABLE_MODELS = {
@@ -168,7 +168,15 @@ export function ImageSetupWizard({ onComplete, onSkip }) {
   };
 
   const openExternalLink = (url) => {
-    window.electronAPI?.openExternal?.(url);
+    api.openExternal(url);
+  };
+
+  const openDetectedPath = async () => {
+    if (!status?.path) return;
+    const result = await api.openPath(status.path);
+    if (result?.success === false) {
+      setError(result.error || 'Failed to open detected path');
+    }
   };
 
   // Step 1: Introduction & Check
@@ -212,9 +220,18 @@ export function ImageSetupWizard({ onComplete, onSkip }) {
             <CheckCircle className="text-green-400" size={20} />
             <span className="text-sm font-medium text-green-400">ComfyUI Detected!</span>
           </div>
-          <p className="text-xs text-text-muted mt-1">
-            Found at: {status.path}
-          </p>
+          <div className="mt-1 flex items-center gap-2">
+            <p className="text-xs text-text-muted truncate" title={status.path}>
+              Found at: {status.path}
+            </p>
+            <button
+              type="button"
+              onClick={openDetectedPath}
+              className="text-xs text-green-300 hover:text-green-200 whitespace-nowrap"
+            >
+              Open
+            </button>
+          </div>
         </div>
       ) : (
         <div className="p-4 bg-amber-500/10 border border-amber-500/30 rounded-lg">

@@ -1,107 +1,106 @@
 # IPC API Reference
 
-This document describes all IPC channels exposed via `window.electronAPI` in the renderer process.
+This is the canonical IPC contract for DevForge as of February 19, 2026.
 
-## Window Controls
+## Security Model
 
-- `minimizeWindow()` - Minimize the main window
-- `maximizeWindow()` - Toggle maximize/restore
-- `closeWindow()` - Hide the window (doesn't quit)
-- `isMaximized()` - Check if window is maximized
+- Renderer data access is **typed** through `window.electronAPI.data.*`.
+- Renderer filesystem access is **scope-granted** through `window.electronAPI.fsScoped.*`.
+- Raw SQL and broad filesystem IPC remain available only during a **one-release deprecation window**.
 
-## Settings/Store
+## Typed Data API (`window.electronAPI.data`)
 
-- `getSettings(key)` - Get a setting value from electron-store
-- `setSettings(key, value)` - Set a setting value
+### Conversations
 
-## LLM Communication
+- `conversationsList(payload)`
+  - Payload: `{ workspace?: string, limit?: number, offset?: number }`
+- `conversationsCreate(payload)`
+  - Payload: `{ id, workspace, title?, model?, encrypted?, pinned?, starred?, tags?, folder_id?, message_count?, preview? }`
+- `conversationsGetById(idOrPayload)`
+  - Input: conversation id string or `{ id }`
+- `conversationsUpdateMeta(payload)`
+  - Payload: `{ id, title?, model?, preview?, messageCount?, folderId?, starred?, pinned?, tags?, encrypted?, updatedAt? }`
+- `conversationsDelete(idOrPayload)`
+  - Input: conversation id string or `{ id }`
 
-- `sendToLLM(payload)` - Send non-streaming request to Ollama
-- `streamFromLLM(payload, callback)` - Stream response from Ollama
-  - Returns cleanup function to cancel stream
-  - Payload: `{ model, prompt, system, options, channel }`
-- `cancelLLMStream(channel)` - Cancel an active stream
-- `getModels()` - Get list of available Ollama models
-- `loadModel(modelPath)` - Pull/load a model in Ollama
-- `unloadModel()` - Unload current model (no-op for Ollama)
-- `checkLLMHealth()` - Check Ollama backend health
-  - Returns: `{ healthy: boolean, status: string, models: number, error?: string }`
+### Messages
 
-## Image Generation
+- `messagesListByConversation(payload)`
+  - Payload: `{ conversationId, branchId?, includeAllBranches?, limit?, offset? }`
+- `messagesAppend(payload)`
+  - Payload: `{ id, conversationId, role, content, model?, tokensUsed?, createdAt?, branchId?, parentMessageId? }`
+- `messagesUpdate(payload)`
+  - Payload: `{ id, content?, model?, tokensUsed?, branchId?, parentMessageId?, conversationId? }`
+- `messagesDelete(idOrPayload)`
+  - Input: message id string or `{ id, conversationId? }`
+- `messagesDeleteMany(payload)`
+  - Payload: `{ ids: string[], conversationId? }`
+- `messagesSearch(payload)`
+  - Payload: `{ query, workspace?, conversationId?, limit? }`
 
-- `generateImage(payload)` - Submit workflow to ComfyUI
-  - Payload: `{ workflow: object }`
-- `getImageModels()` - Get available ComfyUI checkpoints
-- `interruptGeneration()` - Cancel active image generation
-- `checkImageHealth()` - Check ComfyUI backend health
-  - Returns: `{ healthy: boolean, status: string, error?: string }`
+### Attachments
 
-## File System
+- `attachmentsListByMessage(messageIdOrPayload)`
+  - Input: message id string or `{ messageId }`
+- `attachmentsSave(payload)`
+  - Payload: `{ messageId, files, password? }`
+- `attachmentsRead(payload)`
+  - Payload: `{ filePath, password?, encoding?: 'base64' | 'utf-8' | 'buffer' }`
 
-- `selectFile(options)` - Show file picker dialog
-- `selectFolder(options)` - Show folder picker dialog
-- `readFile(filePath)` - Read file contents as UTF-8
-- `writeFile(filePath, content)` - Write file contents
-- `listModels(directory)` - List GGUF/BIN files in directory
+### Branches
 
-## Database
+- `branchesList(conversationIdOrPayload)`
+  - Input: conversation id string or `{ conversationId }`
+- `branchesCreate(payload)`
+  - Payload: `{ id, conversationId, parentBranchId?, name? }`
+- `branchesSwitch(payload)`
+  - Payload: `{ conversationId, branchId? }`
 
-- `dbQuery(sql, params)` - Execute SELECT query
-  - Returns: Array of rows
-- `dbRun(sql, params)` - Execute INSERT/UPDATE/DELETE
-  - Returns: `{ changes: number, lastInsertRowid: number }`
+### Search
 
-## NSFW Password Management
+- `searchConversations(payload)`
+  - Payload: `{ query, workspace?, limit? }`
+- `searchMessages(payload)`
+  - Payload: `{ query, workspace?, conversationId?, limit? }`
 
-- `setNsfwPassword(password)` - Set/update NSFW workspace password
-- `verifyNsfwPassword(password)` - Verify password
-  - Returns: `{ verified: boolean, error?: string }`
-- `hasNsfwPassword()` - Check if password is set
-  - Returns: `{ hasPassword: boolean }`
+## Scoped Filesystem API (`window.electronAPI.fsScoped`)
 
-## Encryption
+### Grant lifecycle
 
-- `encrypt(data, password)` - Encrypt data with password
-  - Returns: `{ encrypted: string, iv: string, salt: string, authTag: string }`
-- `decrypt(data, password)` - Decrypt data with password
-  - Data: `{ encrypted, iv, salt, authTag }`
-  - Returns: Decrypted string
+- `grantRoot(rootPath, label?)`
+- `listGrantedRoots()`
+- `revokeRoot(rootPath)`
 
-## System Events
+### Scoped operations
 
-- `onPanicMode(callback)` - Listen for panic mode trigger
-  - Returns cleanup function
+- `read(path, encoding?)`
+- `write(path, content, encoding?)`
+- `list(path, options?)`
+- `mkdir(path, recursive?)`
 
-## App Info
+All scoped operations require the target path to be within a granted root.
 
-- `getAppPath()` - Get user data directory path
-- `getVersion()` - Get app version
-- `getPlatform()` - Get OS platform (win32, darwin, linux)
-- `getGPUInfo()` - Get GPU information
+## Deprecated APIs (One-Release Compatibility)
+
+These are deprecated and emit runtime warnings:
+
+- Raw SQL: `dbQuery`, `dbRun` (`db:query`, `db:run`)
+- Broad FS: `readFile`, `writeFile`, `createFolder`, `listModels` (`fs:readFile`, `fs:writeFile`, `fs:createFolder`, `fs:listModels`)
+- Legacy attachment channels: `saveMessageAttachments`, `readAttachment`
+
+Migration target:
+
+- Replace SQL usage with `window.electronAPI.data.*`
+- Replace broad FS usage with `window.electronAPI.fsScoped.*`
 
 ## Error Handling
 
-All IPC handlers may throw errors. The renderer should catch and handle appropriately:
+All methods may throw. Handle with try/catch in renderer code.
 
 ```javascript
 try {
-  const result = await window.electronAPI.someMethod();
+  const rows = await window.electronAPI.data.messagesSearch({ query: 'rollback', limit: 20 });
 } catch (error) {
-  console.error('IPC error:', error.message);
-  // Show user-friendly error message
+  console.error(error.message);
 }
 ```
-
-## Channel Naming Convention
-
-- `window:*` - Window operations
-- `store:*` - Settings storage
-- `llm:*` - LLM/Ollama operations
-- `image:*` - Image generation
-- `fs:*` - File system
-- `db:*` - Database operations
-- `crypto:*` - Encryption/decryption
-- `nsfw:*` - NSFW workspace management
-- `app:*` - App metadata
-- `system:*` - System information
-

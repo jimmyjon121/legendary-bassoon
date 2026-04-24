@@ -4,6 +4,7 @@ import { useEditorStore } from '../../stores/editorStore';
 import { useAppStore } from '../../stores/appStore';
 import { CommandPalette } from './CommandPalette';
 import { ModelManager } from './ModelManager';
+import { shallow } from 'zustand/shallow';
 
 export function AgentStatusBar() {
   const [showCommandPalette, setShowCommandPalette] = useState(false);
@@ -56,12 +57,12 @@ export function AgentStatusBar() {
     projectContext: state.projectContext,
     isAnalyzingProject: state.isAnalyzingProject,
     pendingAgentActions: state.pendingAgentActions,
-  }));
+  }), shallow);
 
   const { currentModel, isGenerating } = useAppStore((state) => ({
     currentModel: state.currentModel,
     isGenerating: state.isGenerating,
-  }));
+  }), shallow);
 
   const openFileCount = Object.keys(openFiles || {}).length;
   const hasUnsaved = Object.values(openFiles || {}).some((file) => file?.dirty);
@@ -166,4 +167,3 @@ function StatusPill({ icon: Icon, label, helper, danger }) {
 }
 
 export default AgentStatusBar;
-

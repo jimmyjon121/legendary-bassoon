@@ -155,6 +155,23 @@ function unwrapToolResponse(result, fallbackError = 'Tool not available') {
   return { ok: true, ...result };
 }
 
+function inferReasonCodeFromError(errorOrText, fallback = 'tool_execution_failed') {
+  const text = String(
+    typeof errorOrText === 'string'
+      ? errorOrText
+      : (errorOrText?.message || errorOrText || '')
+  ).toLowerCase();
+
+  if (!text) return fallback;
+  if (text.includes('blocked by risk policy') || text.includes('command blocked')) return 'command_blocked';
+  if (text.includes('not allowed')) return 'command_not_allowlisted';
+  if (text.includes('timed out')) return 'command_timeout';
+  if (text.includes('network policy')) return 'network_policy_blocked';
+  if (text.includes('tool not available') || text.includes('not available')) return 'tool_unavailable';
+  if (text.includes('checkpoint') && text.includes('rollback')) return 'rollback_failure';
+  return fallback;
+}
+
 // ============================================================================
 // Tool Executor
 // ============================================================================
@@ -255,7 +272,12 @@ async function executeTool(toolCall, projectRoot, options = {}) {
           stdout: result.stdout || details?.stdout,
           stderr: result.stderr || details?.stderr,
           exitCode: result.exitCode ?? details?.exitCode,
-          error: result.error
+          error: result.error,
+          reasonCode: result.code || details?.code || (result.ok ? null : inferReasonCodeFromError(result.error, 'command_failed')),
+          executionId: result.executionId || details?.executionId || null,
+          checkpointId: result.checkpointId || details?.checkpointId || null,
+          rollback: result.rollback || details?.rollback || null,
+          audit: result.audit || details?.audit || null,
         };
       }
       
@@ -316,7 +338,8 @@ async function executeTool(toolCall, projectRoot, options = {}) {
             success: false,
             type: 'web_search',
             query: args.query,
-            error: 'Web access blocked by network policy (offline).'
+            error: 'Web access blocked by network policy (offline).',
+            reasonCode: 'network_policy_blocked',
           };
         }
         const result = await safeCall(
@@ -350,7 +373,8 @@ async function executeTool(toolCall, projectRoot, options = {}) {
             success: false,
             type: 'web_page',
             url: args.url,
-            error: 'Web access blocked by network policy (offline).'
+            error: 'Web access blocked by network policy (offline).',
+            reasonCode: 'network_policy_blocked',
           };
         }
         const result = await safeCall(
@@ -372,14 +396,16 @@ async function executeTool(toolCall, projectRoot, options = {}) {
         return {
           success: false,
           type: 'unknown',
-          error: `Unknown tool: ${name}`
+          error: `Unknown tool: ${name}`,
+          reasonCode: 'unknown_tool',
         };
     }
   } catch (error) {
     return {
       success: false,
       type: name,
-      error: error.message
+      error: error.message,
+      reasonCode: inferReasonCodeFromError(error, 'tool_execution_failed'),
     };
   }
 }
@@ -404,12 +430,37 @@ export class ToolEnabledLLM {
     this.onChunk = options.onChunk || (() => {});
     this.onThinking = options.onThinking || (() => {});
     
+    // Abort control
+    this._aborted = false;
+    this._activeController = null;
+
     // Tracking
     this.filesRead = new Set();
     this.toolCalls = [];
     this.proposedChanges = [];
     this.iteration = 0;
     this.defaultTextToolMode = Boolean(options.defaultTextToolMode);
+    this.reliabilityMetrics = {
+      toolFailures: 0,
+      failureByReason: {},
+      blockedCommands: 0,
+      rollbackAttempts: 0,
+      rollbackSucceeded: 0,
+      networkPolicyBlocks: 0,
+      nativeToolFallbacks: 0,
+    };
+  }
+
+  abort() {
+    this._aborted = true;
+    if (this._activeController) {
+      try { this._activeController.abort(); } catch (_) {}
+    }
+  }
+
+  resetAbort() {
+    this._aborted = false;
+    this._activeController = null;
   }
 
   /**
@@ -689,6 +740,9 @@ ${toolDescriptions}
           const details = typeof result.error === 'string' ? result.error : JSON.stringify(result.error);
           if (useNativeTools && /support tools|unsupported|tool/i.test(details)) {
             console.warn('[ToolEnabledLLM] Native tools rejected, switching to text-based mode');
+            if (this.reliabilityMetrics) {
+              this.reliabilityMetrics.nativeToolFallbacks = Number(this.reliabilityMetrics.nativeToolFallbacks || 0) + 1;
+            }
             this._textToolMode = true;
             return this.callOllama(messages, systemPrompt);
           }
@@ -697,6 +751,9 @@ ${toolDescriptions}
 
         if (useNativeTools && !result.message?.tool_calls?.length && !result.message?.content?.trim()) {
           console.warn('[ToolEnabledLLM] Native tools returned empty, switching to text-based mode');
+          if (this.reliabilityMetrics) {
+            this.reliabilityMetrics.nativeToolFallbacks = Number(this.reliabilityMetrics.nativeToolFallbacks || 0) + 1;
+          }
           this._textToolMode = true;
           return this.callOllama(messages, systemPrompt);
         }
@@ -705,7 +762,9 @@ ${toolDescriptions}
       }
 
       const controller = new AbortController();
+      this._activeController = controller;
       const timeout = setTimeout(() => controller.abort(), DEFAULT_OLLAMA_TIMEOUT);
+      if (this._aborted) { clearTimeout(timeout); throw new Error('Aborted'); }
       try {
         const response = await fetch(`${endpoint}/api/chat`, {
           method: 'POST',
@@ -738,6 +797,9 @@ ${toolDescriptions}
             details.includes('tool')
           )) {
             console.warn('[ToolEnabledLLM] Native tools rejected, switching to text-based mode');
+            if (this.reliabilityMetrics) {
+              this.reliabilityMetrics.nativeToolFallbacks = Number(this.reliabilityMetrics.nativeToolFallbacks || 0) + 1;
+            }
             this._textToolMode = true;
             clearTimeout(timeout);
             return this.callOllama(messages, systemPrompt);
@@ -752,6 +814,9 @@ ${toolDescriptions}
         // If native tools returned no tool_calls AND no content, try text mode
         if (useNativeTools && !result.message?.tool_calls?.length && !result.message?.content?.trim()) {
           console.warn('[ToolEnabledLLM] Native tools returned empty, switching to text-based mode');
+          if (this.reliabilityMetrics) {
+            this.reliabilityMetrics.nativeToolFallbacks = Number(this.reliabilityMetrics.nativeToolFallbacks || 0) + 1;
+          }
           this._textToolMode = true;
           clearTimeout(timeout);
           return this.callOllama(messages, systemPrompt);
@@ -774,12 +839,25 @@ ${toolDescriptions}
    * Works with both native tool-calling models and text-based fallback.
    */
   async chat(userMessage, conversationHistory = []) {
+    this.resetAbort();
     this.iteration = 0;
     this.filesRead.clear();
     this.toolCalls = [];
     this.proposedChanges = [];
-    this._textToolMode = this.defaultTextToolMode; // Start native unless caller forces text mode
+    this._textToolMode = this.defaultTextToolMode;
     let toolSteps = 0;
+    let consecutiveToolFailures = 0;
+    let lastFailureReasonCode = null;
+    const reliabilityMetrics = {
+      toolFailures: 0,
+      failureByReason: {},
+      blockedCommands: 0,
+      rollbackAttempts: 0,
+      rollbackSucceeded: 0,
+      networkPolicyBlocks: 0,
+      nativeToolFallbacks: 0,
+    };
+    this.reliabilityMetrics = reliabilityMetrics;
 
     const messages = [
       ...conversationHistory,
@@ -789,6 +867,7 @@ ${toolDescriptions}
     const systemPrompt = this.buildSystemPrompt();
 
     while (this.iteration < this.maxIterations) {
+      if (this._aborted) throw new Error('Generation stopped by user');
       this.iteration++;
       this.onThinking(`Iteration ${this.iteration}/${this.maxIterations}${this._textToolMode ? ' (text mode)' : ''}...`);
 
@@ -813,6 +892,8 @@ ${toolDescriptions}
           iterations: this.iteration,
           textToolMode: this._textToolMode,
           toolSteps,
+          failureReasonCode: null,
+          reliabilityMetrics,
         };
       }
 
@@ -826,7 +907,9 @@ ${toolDescriptions}
             proposedChanges: this.proposedChanges,
             iterations: this.iteration,
             textToolMode: this._textToolMode,
-            maxToolStepsReached: true
+            maxToolStepsReached: true,
+            failureReasonCode: 'max_tool_steps_reached',
+            reliabilityMetrics,
           };
         }
 
@@ -837,10 +920,33 @@ ${toolDescriptions}
           autoRollbackOnFailure: this.autoRollbackOnFailure,
         });
         toolSteps += 1;
+        const reasonCode = result.reasonCode || (result.success ? null : inferReasonCodeFromError(result.error, 'tool_execution_failed'));
+        if (!result.success) {
+          consecutiveToolFailures += 1;
+          lastFailureReasonCode = reasonCode || lastFailureReasonCode || 'tool_execution_failed';
+          reliabilityMetrics.toolFailures += 1;
+          const reasonKey = reasonCode || 'tool_execution_failed';
+          reliabilityMetrics.failureByReason[reasonKey] = Number(reliabilityMetrics.failureByReason[reasonKey] || 0) + 1;
+          if (reasonKey === 'command_blocked' || reasonKey === 'command_not_allowlisted') {
+            reliabilityMetrics.blockedCommands += 1;
+          }
+          if (reasonKey === 'network_policy_blocked') {
+            reliabilityMetrics.networkPolicyBlocks += 1;
+          }
+        } else {
+          consecutiveToolFailures = 0;
+        }
+        if (result.rollback) {
+          reliabilityMetrics.rollbackAttempts += 1;
+          if (result.rollback?.success) {
+            reliabilityMetrics.rollbackSucceeded += 1;
+          }
+        }
         
         this.toolCalls.push({
           ...toolCall,
           result,
+          reasonCode,
           timestamp: Date.now()
         });
 
@@ -859,6 +965,21 @@ ${toolDescriptions}
         }
 
         this.onToolResult(toolCall, result);
+
+        if (consecutiveToolFailures >= 3) {
+          return {
+            content: 'Stopping due to repeated tool failures. Review the failure reason and retry with tighter constraints.',
+            filesRead: Array.from(this.filesRead),
+            toolCalls: this.toolCalls,
+            proposedChanges: this.proposedChanges,
+            iterations: this.iteration,
+            textToolMode: this._textToolMode,
+            toolSteps,
+            failureReasonCode: 'consecutive_tool_failures',
+            lastFailureReasonCode,
+            reliabilityMetrics,
+          };
+        }
 
         if (this._textToolMode) {
           // In text mode, inject tool result as a user message for the next turn.
@@ -904,6 +1025,9 @@ ${toolDescriptions}
       textToolMode: this._textToolMode,
       maxIterationsReached: true,
       toolSteps,
+      failureReasonCode: 'max_iterations_reached',
+      lastFailureReasonCode,
+      reliabilityMetrics,
     };
   }
 
@@ -968,9 +1092,11 @@ ${toolDescriptions}
       iterations: this.iteration,
       filesRead: Array.from(this.filesRead),
       toolCallCount: this.toolCalls.length,
+      reliabilityMetrics: this.reliabilityMetrics || null,
       toolCalls: this.toolCalls.map(tc => ({
         name: tc.function.name,
         success: tc.result?.success,
+        reasonCode: tc.reasonCode || tc.result?.reasonCode || null,
         timestamp: tc.timestamp
       })),
       proposedChanges: this.proposedChanges.map(p => ({

@@ -199,8 +199,35 @@ export const createOrganizationSlice = (set, get) => ({
   },
 
   getFilteredConversations: () => {
-    const { conversations, activeFolderId, activeFilter, searchQuery } = get();
+    const {
+      conversations,
+      activeFolderId,
+      activeFilter,
+      searchQuery,
+      currentWorkspace,
+      activeProjectId,
+      activeProjectConversationIds,
+    } = get();
     let filtered = conversations || [];
+
+    // Never show NSFW conversations outside the Private workspace
+    if (currentWorkspace !== 'nsfw') {
+      filtered = filtered.filter(c => c.workspace !== 'nsfw');
+    }
+
+    // Project scope filter: when a project is active, only show linked chats.
+    if (activeProjectId) {
+      const linkedIds = new Set(
+        Array.isArray(activeProjectConversationIds)
+          ? activeProjectConversationIds.map((id) => String(id || '').trim()).filter(Boolean)
+          : []
+      );
+      if (linkedIds.size === 0) {
+        filtered = [];
+      } else {
+        filtered = filtered.filter((conversation) => linkedIds.has(String(conversation?.id || '').trim()));
+      }
+    }
 
     // Apply folder filter
     if (activeFolderId) {
@@ -351,4 +378,3 @@ export const createOrganizationSlice = (set, get) => ({
     }
   },
 });
-

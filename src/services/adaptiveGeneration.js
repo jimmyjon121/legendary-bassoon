@@ -1,61 +1,55 @@
 /**
  * Adaptive Generation Engine
- * 
- * REAL hardware-aware optimization:
- * 1. Monitor actual GPU/RAM/NPU usage before generation
- * 2. Dynamically adjust context length, batch size, and GPU layers
- * 3. Maximize GPU offload - push ALL layers to GPU when VRAM allows
- * 4. Enable flash attention and KV cache quantization for capable hardware
- * 5. NPU-aware: detect when NPU offload is beneficial
- * 6. Throttle when system is under load
- * 
- * PHILOSOPHY: You have powerful hardware -- USE IT. Full GPU offload,
- * maximum batch sizes, aggressive context windows. Don't leave performance
- * on the table.
+ *
+ * Hardware-aware optimization with strict resource guardrails:
+ * 1. Monitor GPU/RAM/NPU usage before generation
+ * 2. Dynamically adjust context, batch, and offload options
+ * 3. Keep acceleration enabled while preventing RAM runaway
+ * 4. Prioritize responsiveness when multitasking
  */
 
 import { create } from 'zustand';
 import { api } from '../utils/electronAPI';
 
 // Default generation profiles
-// Modern models support 32K-128K+ contexts. Push the hardware!
+// Tuned to preserve system responsiveness under normal multitasking.
 const PROFILES = {
   performance: {
     name: 'Performance',
-    contextLength: 32768,   // 32K - fast with plenty of context
-    numPredict: 1024,
-    numBatch: 512,          // Large batch = faster prompt processing
-    numGpu: -1,             // ALL layers on GPU always
+    contextLength: 8192,
+    numPredict: 768,
+    numBatch: 192,
+    numGpu: -1,
     temperature: 0.7,
-    flashAttention: true,   // Enable flash attention for speed
-    kvCacheQuant: 'q8_0',  // Quantize KV cache to fit more context in VRAM
+    flashAttention: true,
+    kvCacheQuant: 'q8_0',
   },
   balanced: {
     name: 'Balanced',
-    contextLength: 65536,   // 64K - generous context for long conversations
-    numPredict: 2048,
-    numBatch: 512,
+    contextLength: 12288,
+    numPredict: 1024,
+    numBatch: 224,
     numGpu: -1,
     temperature: 0.7,
     flashAttention: true,
     kvCacheQuant: 'q8_0',
   },
   quality: {
-    name: 'Quality (Max Context)',
-    contextLength: 131072,  // 128K - maximum context for deep conversations
-    numPredict: 4096,
-    numBatch: 512,
+    name: 'Quality',
+    contextLength: 16384,
+    numPredict: 1536,
+    numBatch: 256,
     numGpu: -1,
     temperature: 0.8,
     flashAttention: true,
-    kvCacheQuant: 'q4_0',  // More aggressive KV quantization to fit 128K in VRAM
+    kvCacheQuant: 'q4_0',
   },
   lowMemory: {
     name: 'Low Memory',
-    contextLength: 16384,   // 16K - reasonable for constrained systems
+    contextLength: 4096,
     numPredict: 512,
-    numBatch: 128,
-    numGpu: 20,             // Partial offload
+    numBatch: 96,
+    numGpu: 12,
     temperature: 0.7,
     flashAttention: true,
     kvCacheQuant: 'q4_0',
@@ -162,93 +156,85 @@ export const useAdaptiveGeneration = create((set, get) => ({
       }
 
       // === VRAM-BASED FINE-TUNING ===
-      // PHILOSOPHY: Push the hardware HARD. Full GPU offload whenever possible.
+      // Keep acceleration aggressive but cap memory-heavy knobs.
       const baseProfile = PROFILES[profile];
       customOptions = { ...baseProfile };
 
       if (vramTotalMB > 0) {
-        // ALWAYS full GPU offload if we have a dedicated GPU
-        // Ollama handles memory management well - trust it
+        // Prefer full offload for dedicated GPUs.
         if (isNvidiaGpu || vramTotalMB >= 4000) {
-          customOptions.numGpu = -1; // ALL layers on GPU, no exceptions
+          customOptions.numGpu = -1;
         }
 
         if (vramTotalMB >= 24000) {
-          // 24GB+ VRAM (RTX 3090/4090/A5000+) - beast mode
-          customOptions.contextLength = 131072;  // 128K
-          customOptions.numBatch = 1024;          // Maximum batch
-          customOptions.numPredict = 4096;
+          customOptions.contextLength = 16384;
+          customOptions.numBatch = 256;
+          customOptions.numPredict = 1536;
           customOptions.numGpu = -1;
           customOptions.flashAttention = true;
           customOptions.kvCacheQuant = 'q8_0';
-          console.log('[Adaptive] Beast mode: 24GB+ VRAM, 128K context, batch 1024');
         } else if (vramTotalMB >= 16000) {
-          // 16GB VRAM (RTX 4080/4070Ti Super etc.)
-          customOptions.contextLength = 65536;    // 64K
-          customOptions.numBatch = 512;
-          customOptions.numPredict = 4096;
+          customOptions.contextLength = 12288;
+          customOptions.numBatch = 224;
+          customOptions.numPredict = 1280;
           customOptions.numGpu = -1;
           customOptions.flashAttention = true;
           customOptions.kvCacheQuant = 'q8_0';
-          console.log('[Adaptive] High performance: 16GB VRAM, 64K context, batch 512');
         } else if (vramTotalMB >= 12000) {
-          // 12GB VRAM (RTX 3060 12GB, RTX 4070)
-          customOptions.contextLength = 32768;    // 32K
-          customOptions.numBatch = 512;
-          customOptions.numPredict = 2048;
-          customOptions.numGpu = -1;
-          customOptions.flashAttention = true;
-          customOptions.kvCacheQuant = 'q4_0';    // More aggressive KV quant to fit
-          console.log('[Adaptive] Strong: 12GB VRAM, 32K context, batch 512');
-        } else if (vramTotalMB >= 8000) {
-          // 8GB VRAM (RTX 3060 Ti, RTX 3070, RTX 4060)
-          customOptions.contextLength = 16384;    // 16K
-          customOptions.numBatch = 512;
+          customOptions.contextLength = 10240;
+          customOptions.numBatch = 192;
           customOptions.numPredict = 1024;
           customOptions.numGpu = -1;
           customOptions.flashAttention = true;
           customOptions.kvCacheQuant = 'q4_0';
-          console.log('[Adaptive] Good: 8GB VRAM, 16K context, batch 512');
-        } else if (vramTotalMB >= 6000) {
-          // 6GB VRAM (RTX 2060, GTX 1660 Super)
+        } else if (vramTotalMB >= 8000) {
           customOptions.contextLength = 8192;
-          customOptions.numBatch = 256;
+          customOptions.numBatch = 160;
+          customOptions.numPredict = 768;
+          customOptions.numGpu = -1;
+          customOptions.flashAttention = true;
+          customOptions.kvCacheQuant = 'q4_0';
+        } else if (vramTotalMB >= 6000) {
+          customOptions.contextLength = 6144;
+          customOptions.numBatch = 128;
           customOptions.numPredict = 512;
           customOptions.numGpu = -1;
           customOptions.flashAttention = true;
           customOptions.kvCacheQuant = 'q4_0';
         } else if (vramTotalMB >= 4000) {
-          // 4GB VRAM
           customOptions.contextLength = 4096;
-          customOptions.numBatch = 128;
+          customOptions.numBatch = 96;
           customOptions.numPredict = 256;
-          customOptions.numGpu = -1; // Still try full offload
+          customOptions.numGpu = -1;
           customOptions.flashAttention = true;
           customOptions.kvCacheQuant = 'q4_0';
         } else {
-          // Less than 4GB - partial offload
-          customOptions.contextLength = 4096;
+          customOptions.contextLength = 3072;
           customOptions.numBatch = 64;
           customOptions.numPredict = 256;
-          customOptions.numGpu = 15;
+          customOptions.numGpu = 8;
         }
       } else if (ramTotalGB >= 32) {
-        // No dedicated GPU but tons of RAM - can still do decent context on CPU
-        customOptions.contextLength = 32768;
-        customOptions.numBatch = 256;
+        customOptions.contextLength = 8192;
+        customOptions.numBatch = 128;
         customOptions.numGpu = 0;
       } else if (ramTotalGB >= 16) {
-        customOptions.contextLength = 16384;
-        customOptions.numBatch = 128;
+        customOptions.contextLength = 4096;
+        customOptions.numBatch = 96;
         customOptions.numGpu = 0;
       }
 
       // Apply efficiency intent as a *final* conservative cap (don't fight hardware, just tone down).
       if (perfIntent === 'efficiency') {
-        customOptions.numBatch = Math.min(customOptions.numBatch || 128, 256);
-        customOptions.numPredict = Math.min(customOptions.numPredict || 512, 2048);
-        customOptions.contextLength = Math.min(customOptions.contextLength || 8192, 32768);
+        customOptions.numBatch = Math.min(customOptions.numBatch || 96, 128);
+        customOptions.numPredict = Math.min(customOptions.numPredict || 512, 1024);
+        customOptions.contextLength = Math.min(customOptions.contextLength || 4096, 8192);
       }
+
+      // Hard global safety caps to avoid RAM starvation.
+      customOptions.contextLength = Math.max(1024, Math.min(customOptions.contextLength || 4096, 16384));
+      customOptions.numPredict = Math.max(64, Math.min(customOptions.numPredict || 512, 1536));
+      customOptions.numBatch = Math.max(32, Math.min(customOptions.numBatch || 96, 256));
 
       // === NPU STATUS TRACKING ===
       if (hasNpu) {

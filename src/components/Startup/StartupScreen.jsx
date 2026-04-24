@@ -39,24 +39,7 @@ function inferStatusStep(text) {
 }
 
 function WindowControls() {
-  const handleMinimize = () => window.electronAPI?.minimizeWindow?.();
-  const handleMaximize = () => window.electronAPI?.maximizeWindow?.();
-  const handleClose = () => window.electronAPI?.closeWindow?.();
-  if (!window.electronAPI) return null;
-
-  return (
-    <div className="su-controls">
-      <button className="su-ctrl-btn" onClick={handleMinimize} title="Minimize">
-        <svg width="10" height="1"><rect width="10" height="1" fill="currentColor" /></svg>
-      </button>
-      <button className="su-ctrl-btn" onClick={handleMaximize} title="Maximize">
-        <svg width="10" height="10"><rect x="0.5" y="0.5" width="9" height="9" fill="none" stroke="currentColor" strokeWidth="1" /></svg>
-      </button>
-      <button className="su-ctrl-btn su-ctrl-close" onClick={handleClose} title="Close">
-        <svg width="10" height="10"><line x1="0" y1="0" x2="10" y2="10" stroke="currentColor" strokeWidth="1.2" /><line x1="10" y1="0" x2="0" y2="10" stroke="currentColor" strokeWidth="1.2" /></svg>
-      </button>
-    </div>
-  );
+  return null;
 }
 
 // Ring progress indicator

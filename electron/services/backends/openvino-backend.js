@@ -18,13 +18,21 @@ const { getNpuBridge } = require('../npu-bridge');
 
 class OpenVinoBackend extends BaseBackend {
   constructor(config = {}) {
+    const deviceStr = String(config.device || 'NPU');
+    const isHybrid = deviceStr.startsWith('HETERO:') || deviceStr.startsWith('MULTI:') || deviceStr.startsWith('AUTO:');
+    const isNpu = deviceStr === 'NPU';
+    const defaultId = isHybrid ? 'openvino-hybrid' : isNpu ? 'openvino-npu' : 'openvino-gpu';
+    const defaultName = isHybrid
+      ? `OpenVINO Hybrid (${deviceStr})`
+      : isNpu ? 'OpenVINO (NPU)' : 'OpenVINO (Intel GPU)';
+
     super({
-      id: config.device === 'NPU' ? 'openvino-npu' : 'openvino-gpu',
-      name: config.device === 'NPU' ? 'OpenVINO (NPU)' : 'OpenVINO (Intel GPU)',
+      id: config.id || defaultId,
+      name: config.name || defaultName,
       type: 'openvino',
       endpoint: config.endpoint || 'http://localhost:8081',
-      device: config.device || 'NPU',
-      priority: config.device === 'NPU' ? 3 : 4,
+      device: deviceStr,
+      priority: isHybrid ? 0 : isNpu ? 3 : 4,
       capabilities: {
         streaming: true,
         vision: false,
@@ -44,6 +52,9 @@ class OpenVinoBackend extends BaseBackend {
     this._healthCache = { at: 0, value: null };
     this._healthCacheTTL = 15000; // 15 seconds
     this._autoStartAttempted = false;
+    // Concurrent requests share a single server-start promise so we never
+    // spawn the OpenVINO Python server twice in a race.
+    this._lazyStartPromise = null;
   }
 
   // ------------------------------------------------------------------
@@ -136,7 +147,9 @@ class OpenVinoBackend extends BaseBackend {
       };
     }
 
-    if (this.device === 'NPU' && !npuStatus.npuAvailable) {
+    const deviceStr = String(this.device || '');
+    const isHybrid = deviceStr.startsWith('HETERO:') || deviceStr.startsWith('MULTI:') || deviceStr.startsWith('AUTO:');
+    if (deviceStr === 'NPU' && !npuStatus.npuAvailable) {
       this.setStatus('unavailable');
       return {
         available: false,
@@ -144,6 +157,20 @@ class OpenVinoBackend extends BaseBackend {
         error: 'Intel NPU not detected',
         devices: npuStatus.devices
       };
+    }
+    if (isHybrid) {
+      const devices = npuStatus.devices || [];
+      const hasGpu = devices.some(d => /^GPU/i.test(d.id));
+      const hasNpu = devices.some(d => /^NPU/i.test(d.id));
+      if (!hasGpu && !hasNpu) {
+        this.setStatus('unavailable');
+        return {
+          available: false,
+          status: 'no-hybrid-devices',
+          error: 'Neither Intel GPU nor NPU detected for hybrid mode',
+          devices,
+        };
+      }
     }
 
     // Step 2: Check if server is running via lightweight /status endpoint
@@ -177,9 +204,25 @@ class OpenVinoBackend extends BaseBackend {
 
   /** @private Handle server-offline scenario with auto-start logic */
   async _handleServerOffline() {
-    if (!this._autoStartAttempted) {
-      this._autoStartAttempted = true;
+    // Concurrent callers share one in-flight start attempt so we never spawn
+    // the Python server twice. The promise resolves to the final availability
+    // result (success or failure) and is cleared on both outcomes.
+    if (this._lazyStartPromise) {
+      return this._lazyStartPromise;
+    }
 
+    if (this._autoStartAttempted) {
+      this.setStatus('unavailable');
+      return {
+        available: false,
+        status: 'server-offline',
+        error: 'OpenVINO server not running',
+        serverRequired: true,
+      };
+    }
+
+    this._autoStartAttempted = true;
+    this._lazyStartPromise = (async () => {
       console.log('[OpenVINO Backend] Server offline, attempting auto-start...');
       try {
         const startResult = await this.npuBridge.startServer({ device: this.device });
@@ -221,15 +264,21 @@ class OpenVinoBackend extends BaseBackend {
 
       // Allow another auto-start attempt after 2 minutes
       setTimeout(() => { this._autoStartAttempted = false; }, 120000);
-    }
 
-    this.setStatus('unavailable');
-    return {
-      available: false,
-      status: 'server-offline',
-      error: 'OpenVINO server not running',
-      serverRequired: true
-    };
+      this.setStatus('unavailable');
+      return {
+        available: false,
+        status: 'server-offline',
+        error: 'OpenVINO server not running',
+        serverRequired: true,
+      };
+    })();
+
+    try {
+      return await this._lazyStartPromise;
+    } finally {
+      this._lazyStartPromise = null;
+    }
   }
 
   // ------------------------------------------------------------------
@@ -404,20 +453,46 @@ class OpenVinoBackend extends BaseBackend {
   // ------------------------------------------------------------------
 
   estimatePerformance(parameterCount) {
+    const deviceStr = String(this.device || '');
+    const isHetero = deviceStr.startsWith('HETERO:');
+    const isMulti = deviceStr.startsWith('MULTI:');
+    const isAuto = deviceStr.startsWith('AUTO:');
+
+    if (isHetero || isMulti) {
+      const gpuBase = parameterCount < 7 ? 30 : parameterCount < 13 ? 15 : 8;
+      const multiplier = isHetero ? 1.5 : 1.3;
+      return {
+        tokensPerSecond: Math.round(gpuBase * multiplier),
+        memoryRequired: parameterCount * 1.2,
+        suitable: parameterCount < 20,
+        powerEfficient: true,
+        unified: isHetero,
+      };
+    }
+
+    if (isAuto) {
+      return {
+        tokensPerSecond: parameterCount < 7 ? 35 : parameterCount < 13 ? 18 : 10,
+        memoryRequired: parameterCount * 1.3,
+        suitable: parameterCount < 20,
+        powerEfficient: true,
+      };
+    }
+
     if (this.device === 'NPU') {
       return {
         tokensPerSecond: parameterCount < 3 ? 40 : parameterCount < 7 ? 20 : 5,
         memoryRequired: parameterCount * 1.5,
         suitable: parameterCount < 7,
-        powerEfficient: true
-      };
-    } else {
-      return {
-        tokensPerSecond: parameterCount < 7 ? 30 : parameterCount < 13 ? 15 : 8,
-        memoryRequired: parameterCount * 1.5,
-        suitable: parameterCount < 20
+        powerEfficient: true,
       };
     }
+
+    return {
+      tokensPerSecond: parameterCount < 7 ? 30 : parameterCount < 13 ? 15 : 8,
+      memoryRequired: parameterCount * 1.5,
+      suitable: parameterCount < 20,
+    };
   }
 
   getSetupInstructions() {

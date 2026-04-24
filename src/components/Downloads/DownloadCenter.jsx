@@ -77,7 +77,7 @@ const StatusBadge = memo(({ status }) => {
 });
 
 // Individual download item component
-const DownloadItem = memo(({ job, onPause, onResume, onRetry, onCancel, onDelete, onSetPriority }) => {
+const DownloadItem = memo(({ job, onPause, onResume, onRetry, onCancel, onDelete, onSetPriority, onConvertNpu }) => {
   const [expanded, setExpanded] = useState(false);
   const [showMenu, setShowMenu] = useState(false);
   
@@ -92,10 +92,10 @@ const DownloadItem = memo(({ job, onPause, onResume, onRetry, onCancel, onDelete
       initial={{ opacity: 0, y: 10 }}
       animate={{ opacity: 1, y: 0 }}
       exit={{ opacity: 0, x: -20 }}
-      className="bg-surface-2/50 border border-border/30 rounded-lg overflow-hidden"
+      className="bg-surface-2/45 border border-border/25 rounded-xl overflow-hidden"
     >
       {/* Main row */}
-      <div className="p-4 flex items-center gap-4">
+      <div className="p-3.5 flex items-center gap-3">
         {/* Icon */}
         <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${
           isActive ? 'bg-green-500/20' : 
@@ -202,6 +202,16 @@ const DownloadItem = memo(({ job, onPause, onResume, onRetry, onCancel, onDelete
               <X className="w-4 h-4" />
             </button>
           )}
+
+          {isCompleted && onConvertNpu && (
+            <button
+              onClick={() => onConvertNpu(job)}
+              className="px-2 py-1 text-xs bg-violet-500/15 text-violet-300 hover:bg-violet-500/25 rounded-lg transition-colors flex items-center gap-1"
+              title="Convert to OpenVINO for NPU acceleration"
+            >
+              <Zap className="w-3 h-3" /> NPU
+            </button>
+          )}
           
           <button
             onClick={() => setExpanded(!expanded)}
@@ -219,7 +229,7 @@ const DownloadItem = memo(({ job, onPause, onResume, onRetry, onCancel, onDelete
             </button>
             
             {showMenu && (
-              <div className="absolute right-0 top-full mt-1 bg-surface-2 border border-border rounded-lg shadow-xl z-10 min-w-[160px]">
+              <div className="absolute right-0 top-full mt-1 bg-surface-2 border border-border rounded-lg shadow-[0_18px_44px_-28px_rgba(0,0,0,0.9)] z-10 min-w-[160px]">
                 <button
                   onClick={() => { onSetPriority(job.id, (job.priority || 0) + 1); setShowMenu(false); }}
                   className="w-full px-4 py-2 text-left text-sm hover:bg-surface-3 flex items-center gap-2"
@@ -392,13 +402,13 @@ export const DownloadCenter = memo(({ isOpen, onClose }) => {
         animate={{ scale: 1, opacity: 1 }}
         exit={{ scale: 0.95, opacity: 0 }}
         onClick={e => e.stopPropagation()}
-        className="w-full max-w-4xl max-h-[80vh] bg-surface-1 border border-border rounded-2xl shadow-2xl overflow-hidden flex flex-col"
+        className="w-full max-w-4xl max-h-[80vh] bg-surface-1 border border-border rounded-xl shadow-[0_24px_80px_-48px_rgba(0,0,0,0.95)] overflow-hidden flex flex-col"
       >
         {/* Header */}
         <div className="p-6 border-b border-border">
-          <div className="flex items-center justify-between mb-4">
+          <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-green-500/20 to-emerald-500/20 flex items-center justify-center">
+              <div className="w-9 h-9 rounded-lg bg-gradient-to-br from-green-500/18 to-emerald-500/18 flex items-center justify-center">
                 <Download className="w-5 h-5 text-green-400" />
               </div>
               <div>
@@ -469,6 +479,21 @@ export const DownloadCenter = memo(({ isOpen, onClose }) => {
                   onCancel={cancelDownload}
                   onDelete={deleteDownload}
                   onSetPriority={setDownloadPriority}
+                  onConvertNpu={async (completedJob) => {
+                    try {
+                      const result = await window.electronAPI?.convertModelToNPU?.({
+                        inputPath: completedJob.outputPath || completedJob.metadata?.outputPath || completedJob.name,
+                        precision: 'fp16',
+                      });
+                      if (result?.success) {
+                        alert(`Converted to OpenVINO for NPU: ${result.outputPath || 'done'}`);
+                      } else {
+                        alert(`NPU conversion failed: ${result?.error || 'Unknown error'}`);
+                      }
+                    } catch (err) {
+                      alert(`NPU conversion error: ${err?.message || 'Unknown'}`);
+                    }
+                  }}
                 />
               ))
             )}

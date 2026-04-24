@@ -34,9 +34,33 @@ function main() {
     failures
   );
   assertContains(
+    llm,
+    'reliabilityMetrics',
+    'ToolEnabledLLM must expose reliability metrics for coding runs',
+    failures
+  );
+  assertContains(
+    llm,
+    'failureReasonCode',
+    'ToolEnabledLLM must emit deterministic failure reason codes',
+    failures
+  );
+  assertContains(
     codeToolsIpc,
     'scoreCommandRisk',
     'Code tools IPC must include command risk scoring',
+    failures
+  );
+  assertContains(
+    codeToolsIpc,
+    'command_not_allowlisted',
+    'Code tools IPC must return explicit reason code for non-allowlisted commands',
+    failures
+  );
+  assertContains(
+    codeToolsIpc,
+    'rollbackReasonCode',
+    'Code tools IPC must report rollback reason codes for failed mutations',
     failures
   );
   assertContains(
@@ -55,6 +79,12 @@ function main() {
     codeChatPanel,
     "networkPolicy: 'offline'",
     'Code chat agent must run with offline policy',
+    failures
+  );
+  assertContains(
+    read('src/services/agents/agentOrchestrator.js'),
+    'reliability metrics:',
+    'Agent orchestrator must surface execution reliability diagnostics',
     failures
   );
 

@@ -3,6 +3,7 @@ import ReactFlow, { Background, Controls, MiniMap } from 'reactflow';
 import 'reactflow/dist/style.css';
 import { useEditorStore } from '../../stores/editorStore';
 import { getIndexedFiles, hasCodeIndex } from '../../services/codeIndexer';
+import { shallow } from 'zustand/shallow';
 
 const importPattern = /from ['"](.+?)['"]|require\(['"](.+?)['"]\)/g;
 
@@ -56,7 +57,7 @@ function normalizeImport(baseDir, spec) {
 export function DependencyGraph() {
   const { rootPath } = useEditorStore((state) => ({
     rootPath: state.rootPath,
-  }));
+  }), shallow);
 
   const graph = useMemo(() => buildGraph(), [rootPath]);
 

@@ -84,7 +84,8 @@ export class ProjectBrain {
    */
   async detectTechStack() {
     try {
-      const pkgContent = await api.readFile(`${this.projectRoot}/package.json`);
+      await api.grantFsRoot(this.projectRoot, 'project-brain-root');
+      const pkgContent = await api.readFileScoped(`${this.projectRoot}/package.json`, this.projectRoot);
       const pkg = JSON.parse(pkgContent || '{}');
       
       const deps = { ...pkg.dependencies, ...pkg.devDependencies };

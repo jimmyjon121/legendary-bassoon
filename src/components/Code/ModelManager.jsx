@@ -4,6 +4,7 @@ import { detectLMStudioModels, checkLMStudioAPI } from '../../services/lmStudioD
 import { useAppStore } from '../../stores/appStore';
 import { api } from '../../utils/electronAPI';
 import { ProgressBar, LoadingSpinner } from '../ui/ProgressBar';
+import { shallow } from 'zustand/shallow';
 
 export function ModelManager({ onClose }) {
   const [lmStudioModels, setLmStudioModels] = useState([]);
@@ -24,7 +25,7 @@ export function ModelManager({ onClose }) {
     availableModels: state.availableModels,
     setModel: state.setModel,
     refreshModels: state.refreshModels,
-  }));
+  }), shallow);
 
   const mergeModels = useCallback((existing, extra) => {
     const byPath = new Map();
@@ -116,22 +117,20 @@ export function ModelManager({ onClose }) {
     setError(null);
     
     try {
-      // Use the progress-enabled IPC call
-      const result = await window.electronAPI?.createOllamaModelWithProgress(
-        { name: safeName, path: model.path },
-        (progress) => {
-          // Update progress state
-          setImporting(prev => ({
-            ...prev,
-            [model.path]: {
-              active: progress.stage !== 'complete' && progress.stage !== 'error',
-              progress: progress.progress,
-              message: progress.message,
-              stage: progress.stage,
-            }
-          }));
+      setImporting(prev => ({
+        ...prev,
+        [model.path]: {
+          active: true,
+          progress: 35,
+          message: 'Registering model with Ollama...',
+          stage: 'creating',
         }
-      );
+      }));
+
+      const result = await window.electronAPI?.createOllamaModelFromFile({
+        name: safeName,
+        path: model.path,
+      });
 
       if (result?.success) {
         setSuccessMessage(`Successfully imported ${safeName}!`);

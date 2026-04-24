@@ -5,17 +5,20 @@ const path = require('path');
 /**
  * Run the OpenVINO setup PowerShell script from the packaged app.
  *
- * This wraps scripts/setup-openvino.ps1 so the user can just press a
- * button in the UI instead of typing commands.
+ * This wraps scripts/setup-openvino.ps1 so the user can start setup from UI
+ * without manual shell commands.
  */
 function runOpenVinoSetup(appPath) {
   return new Promise((resolve) => {
     try {
+      const resourcesPath = process.resourcesPath || null;
       const candidates = [
         appPath ? path.join(appPath, 'scripts', 'setup-openvino.ps1') : null,
         appPath && String(appPath).includes('app.asar')
           ? path.join(String(appPath).replace('app.asar', 'app.asar.unpacked'), 'scripts', 'setup-openvino.ps1')
           : null,
+        resourcesPath ? path.join(resourcesPath, 'app.asar.unpacked', 'scripts', 'setup-openvino.ps1') : null,
+        resourcesPath ? path.join(resourcesPath, 'scripts', 'setup-openvino.ps1') : null,
         path.join(process.cwd(), 'scripts', 'setup-openvino.ps1'),
         path.join(__dirname, '../../scripts/setup-openvino.ps1'),
       ].filter(Boolean);
@@ -29,7 +32,6 @@ function runOpenVinoSetup(appPath) {
         return;
       }
 
-      // Windows‑only helper
       if (process.platform !== 'win32') {
         resolve({
           success: false,
@@ -38,11 +40,12 @@ function runOpenVinoSetup(appPath) {
         return;
       }
 
+      const workingDir = path.dirname(path.dirname(scriptPath));
       const child = spawn(
         'powershell.exe',
         ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath],
         {
-          cwd: path.dirname(path.dirname(scriptPath)),
+          cwd: workingDir,
           windowsHide: true,
         },
       );
@@ -62,6 +65,8 @@ function runOpenVinoSetup(appPath) {
         resolve({
           success: false,
           error: error.message,
+          scriptPath,
+          cwd: workingDir,
           stdout,
           stderr,
         });
@@ -71,6 +76,8 @@ function runOpenVinoSetup(appPath) {
         resolve({
           success: code === 0,
           code,
+          scriptPath,
+          cwd: workingDir,
           stdout,
           stderr,
         });
@@ -84,8 +91,10 @@ function runOpenVinoSetup(appPath) {
   });
 }
 
-module.exports = {
+const exported = {
   runOpenVinoSetup,
+  runOpenVINOSetup: runOpenVinoSetup,
 };
 
-
+module.exports = exported;
+module.exports.default = exported;

@@ -1,16 +1,28 @@
-import React, { useState, useEffect, useCallback, memo } from 'react';
-import { Minus, Square, X, Maximize2, WifiOff, Globe, Cpu } from 'lucide-react';
+import React, { useState, useEffect, memo } from 'react';
+import { WifiOff, Globe, Cpu, RefreshCw, RotateCcw, X, Minus, Square } from 'lucide-react';
 import { useAppStore, WORKSPACES } from '../../stores/appStore';
-import { SoulIndicator } from '../Soul/SoulIndicator';
-import { useSoulStore } from '../../stores/soulStore';
+import { pollingCoordinator } from '../../services/pollingCoordinator';
+import { api } from '../../utils/electronAPI';
 
 // Workspace colors - simple object, no re-computation
 const WORKSPACE_COLORS = {
   casual: '#818cf8',
   work: '#10b981',
+  research: '#38bdf8',
   code: '#f59e0b',
   nsfw: '#f472b6',
 };
+
+function formatCurrentModelLabel(currentModel) {
+  const raw = String(currentModel || '').trim();
+  if (!raw) return 'No model';
+  if (/^npu:/i.test(raw)) {
+    const target = raw.slice(4).trim();
+    const parts = target.split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] || 'NPU model';
+  }
+  return raw.split(':')[0] || raw;
+}
 
 // Memoized title bar to prevent re-renders
 const TitleBar = memo(function TitleBar({ 
@@ -19,107 +31,127 @@ const TitleBar = memo(function TitleBar({
   currentModel, 
   modelStatus, 
   sovereigntyStatus,
-  onMinimize,
-  onMaximize,
-  onClose,
-  isMaximized
+  showDevRefresh,
+  showWindowControls,
+  isWindowMaximized,
+  onRefreshApp,
+  onRestartApp,
+  isRefreshingApp,
+  isRestartingApp,
+  onWindowMinimize,
+  onWindowMaximize,
+  onWindowClose,
 }) {
   return (
     <header 
-      className="titlebar relative z-20 h-12 flex items-center justify-between px-4 border-b bg-surface-0/95 border-border-subtle"
+      className="titlebar relative z-20 h-10 flex items-center justify-between px-3 border-b bg-[#0a0b10]/95 border-white/[0.06]"
       style={{ WebkitAppRegion: 'drag' }}
     >
-      {/* Left: App Info - no-drag for clickable elements */}
-      <div className="flex items-center gap-3" style={{ WebkitAppRegion: 'no-drag' }}>
+      {/* Left: App branding */}
+      <div className="flex items-center gap-2.5" style={{ WebkitAppRegion: 'no-drag' }}>
         <div 
-          className="w-7 h-7 rounded-lg flex items-center justify-center"
+          className="w-6 h-6 rounded-md flex items-center justify-center"
           style={{ background: accentColor }}
         >
-          <span className="text-white text-xs font-bold">DF</span>
+          <span className="text-white text-[10px] font-bold">DF</span>
         </div>
         
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-semibold text-text-primary">DevForge</span>
-          <span className="text-[10px] px-1.5 py-0.5 rounded bg-glass-2 text-text-muted font-mono">
-            v0.1.0
-          </span>
-        </div>
+        <span className="text-[13px] font-semibold text-text-primary">DevForge</span>
 
         {sovereigntyStatus && (
-          <div className={`flex items-center gap-1.5 ml-2 px-2 py-1 rounded-lg border ${
+          <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${
             sovereigntyStatus.localOnly 
-              ? 'bg-accent-success/10 border-accent-success/20' 
-              : 'bg-glass-2 border-border-subtle'
+              ? 'text-emerald-400/80' 
+              : 'text-text-muted/60'
           }`}>
             {sovereigntyStatus.localOnly ? (
               <>
-                <WifiOff size={11} className="text-accent-success" />
-                <span className="text-[10px] text-accent-success font-medium">Local</span>
+                <WifiOff size={10} />
+                Local
               </>
             ) : (
               <>
-                <Globe size={11} className="text-text-muted" />
-                <span className="text-[10px] text-text-muted">Network</span>
+                <Globe size={10} />
+                Network
               </>
             )}
-          </div>
+          </span>
         )}
       </div>
 
-      {/* Center: Model Status - no-drag for potential click actions */}
-      <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-glass-2 border border-border-subtle" style={{ WebkitAppRegion: 'no-drag' }}>
-        <div className={`w-2 h-2 rounded-full ${
-          modelStatus === 'online' ? 'bg-accent-success' :
-          modelStatus === 'loading' ? 'bg-accent-warning' : 'bg-text-muted'
+      {/* Center: Model status */}
+      <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2 px-2.5 py-1 rounded-md bg-white/[0.03] border border-white/[0.06]" style={{ WebkitAppRegion: 'no-drag' }}>
+        <div className={`w-1.5 h-1.5 rounded-full ${
+          modelStatus === 'online' ? 'bg-emerald-400' :
+          (modelStatus === 'loading' || modelStatus === 'warming') ? 'bg-amber-400' : 'bg-zinc-600'
         }`} />
-        <Cpu size={12} className="text-text-muted" />
-        <span className="text-xs text-text-secondary font-medium">
-          {currentModel?.split(':')[0] || 'No model'}
+        <span className="text-[11px] text-zinc-400 font-medium">
+          {formatCurrentModelLabel(currentModel)}
         </span>
       </div>
 
-      {/* Right: Controls - no-drag so buttons are clickable */}
-      <div className="flex items-center gap-2" style={{ WebkitAppRegion: 'no-drag' }}>
-        <SoulIndicator onClick={() => useSoulStore.getState().toggleForgeConsole()} />
-        
-        {/* Workspace badge */}
-        <div 
-          className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg ml-1 border"
-          style={{
-            background: `${accentColor}15`,
-            borderColor: `${accentColor}30`
-          }}
-        >
-          <div 
-            className="w-1.5 h-1.5 rounded-full"
-            style={{ background: accentColor }}
-          />
-          <span className="text-[11px] font-medium" style={{ color: accentColor }}>
-            {workspace?.name}
-          </span>
-        </div>
-        
-        {/* Window controls */}
-        <div className="flex items-center ml-2">
-          <button
-            onClick={onMinimize}
-            className="w-9 h-8 flex items-center justify-center rounded-lg text-text-muted hover:text-text-primary hover:bg-glass-3 transition-colors"
-          >
-            <Minus size={14} />
-          </button>
-          <button
-            onClick={onMaximize}
-            className="w-9 h-8 flex items-center justify-center rounded-lg text-text-muted hover:text-text-primary hover:bg-glass-3 transition-colors"
-          >
-            {isMaximized ? <Square size={11} /> : <Maximize2 size={13} />}
-          </button>
-          <button
-            onClick={onClose}
-            className="w-9 h-8 flex items-center justify-center rounded-lg text-text-muted hover:text-white hover:bg-red-500/80 transition-colors"
-          >
-            <X size={14} />
-          </button>
-        </div>
+      {/* Right: Refresh + Restart are prominent and clearly labeled, sitting
+          before the window controls with a visual divider. Refresh reloads
+          the renderer (fast, picks up UI changes). Restart relaunches the
+          whole Electron app (slower but picks up main-process, native
+          module, and orchestrator changes). The X (close) stays rightmost
+          to match Windows chrome conventions. */}
+      <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' }}>
+        {showDevRefresh && (
+          <>
+            <button
+              type="button"
+              onClick={onRefreshApp}
+              disabled={isRefreshingApp || isRestartingApp}
+              className="flex items-center gap-1.5 h-7 px-2.5 rounded-md text-zinc-300 hover:text-white hover:bg-white/[0.08] border border-white/[0.05] hover:border-white/[0.12] transition-colors disabled:opacity-50 disabled:cursor-wait"
+              title="Refresh UI — picks up renderer changes (fast). Use this after editing anything under src/."
+            >
+              <RefreshCw size={13} className={isRefreshingApp ? 'animate-spin' : ''} />
+              <span className="text-[11px] font-medium">{isRefreshingApp ? 'Refreshing…' : 'Refresh'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={onRestartApp}
+              disabled={isRefreshingApp || isRestartingApp}
+              className="flex items-center gap-1.5 h-7 px-2.5 rounded-md text-amber-300/90 hover:text-amber-200 hover:bg-amber-500/[0.12] border border-amber-500/[0.15] hover:border-amber-500/30 transition-colors disabled:opacity-50 disabled:cursor-wait"
+              title="Restart app — full Electron relaunch. Picks up changes to electron/, native modules, orchestrator, and IPC handlers."
+            >
+              <RotateCcw size={13} className={isRestartingApp ? 'animate-spin' : ''} />
+              <span className="text-[11px] font-medium">{isRestartingApp ? 'Restarting…' : 'Restart'}</span>
+            </button>
+          </>
+        )}
+        {showDevRefresh && showWindowControls && (
+          <div className="w-px h-5 bg-white/[0.1] mx-1.5" aria-hidden />
+        )}
+        {showWindowControls && (
+          <div className="flex items-center gap-0.5">
+            <button
+              type="button"
+              onClick={onWindowMinimize}
+              className="flex h-7 w-8 items-center justify-center rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.05] transition-colors"
+              title="Minimize"
+            >
+              <Minus size={13} />
+            </button>
+            <button
+              type="button"
+              onClick={onWindowMaximize}
+              className="flex h-7 w-8 items-center justify-center rounded text-zinc-500 hover:text-zinc-300 hover:bg-white/[0.05] transition-colors"
+              title={isWindowMaximized ? 'Restore' : 'Maximize'}
+            >
+              <Square size={12} className={isWindowMaximized ? 'scale-90' : ''} />
+            </button>
+            <button
+              type="button"
+              onClick={onWindowClose}
+              className="flex h-7 w-8 items-center justify-center rounded text-zinc-500 hover:text-red-300 hover:bg-red-500/20 transition-colors"
+              title="Close"
+            >
+              <X size={13} />
+            </button>
+          </div>
+        )}
       </div>
     </header>
   );
@@ -151,21 +183,130 @@ export function Layout({ children }) {
   const error = useAppStore(state => state.error);
   const clearError = useAppStore(state => state.clearError);
   
-  const [isMaximized, setIsMaximized] = useState(false);
   const [sovereigntyStatus, setSovereigntyStatus] = useState(null);
+  const [showDevRefresh, setShowDevRefresh] = useState(
+    typeof window !== 'undefined' && Boolean(window.electronAPI)
+  );
+  const [showWindowControls, setShowWindowControls] = useState(
+    typeof window !== 'undefined' && Boolean(window.electronAPI)
+  );
+  const [isWindowMaximized, setIsWindowMaximized] = useState(false);
+  const [isRefreshingApp, setIsRefreshingApp] = useState(false);
+  const [isRestartingApp, setIsRestartingApp] = useState(false);
   
   const workspace = WORKSPACES[currentWorkspace];
   const accentColor = WORKSPACE_COLORS[currentWorkspace] || WORKSPACE_COLORS.casual;
 
-  const checkMaximized = useCallback(async () => {
-    const maximized = await window.electronAPI?.isMaximized();
-    setIsMaximized(maximized);
+  useEffect(() => {
+    let mounted = true;
+    const resolveDevRefreshVisibility = () => {
+      if (mounted) {
+        setShowDevRefresh(typeof window !== 'undefined' && Boolean(window.electronAPI));
+      }
+    };
+
+    resolveDevRefreshVisibility();
+    return () => {
+      mounted = false;
+    };
   }, []);
 
   useEffect(() => {
-    checkMaximized();
+    let mounted = true;
+    const canUseWindowApi = typeof window !== 'undefined' && Boolean(window.electronAPI);
+    setShowWindowControls(canUseWindowApi);
+    if (!canUseWindowApi) return undefined;
 
-    // Check sovereignty status less frequently
+    const syncWindowState = async () => {
+      const maximized = await api.isMaximized();
+      if (mounted) setIsWindowMaximized(Boolean(maximized));
+    };
+
+    syncWindowState();
+    window.addEventListener('resize', syncWindowState);
+    window.addEventListener('focus', syncWindowState);
+
+    return () => {
+      mounted = false;
+      window.removeEventListener('resize', syncWindowState);
+      window.removeEventListener('focus', syncWindowState);
+    };
+  }, []);
+
+  const handleWindowMinimize = async () => {
+    await api.minimizeWindow();
+  };
+
+  const handleWindowMaximize = async () => {
+    await api.maximizeWindow();
+    const maximized = await api.isMaximized();
+    setIsWindowMaximized(Boolean(maximized));
+  };
+
+  const handleWindowClose = async () => {
+    await api.closeWindow();
+  };
+
+  // Renderer-only refresh: reloads the current window to pick up the
+  // latest bundled UI. Fast. Use this after editing anything under src/.
+  // Alt-click still bypasses cache for stubborn cached assets.
+  const handleRefreshApp = async (event) => {
+    const ignoreCache = event?.altKey === true;
+
+    if (typeof window === 'undefined' || isRefreshingApp || isRestartingApp) return;
+    setIsRefreshingApp(true);
+
+    try {
+      window.sessionStorage?.setItem('devforge:startup-complete', '1');
+    } catch { /* non-blocking */ }
+
+    try {
+      if (window.electronAPI?.reloadWindow) {
+        await window.electronAPI.reloadWindow({ ignoreCache });
+        return; // renderer detaches on reload
+      }
+      // Fallback when running outside Electron (dev browser inspection).
+      if (ignoreCache && typeof window.location.reload === 'function') {
+        window.location.reload(true);
+      } else {
+        window.location.reload();
+      }
+    } catch (error) {
+      console.warn('[Layout] Refresh failed:', error?.message || error);
+      window.location.reload();
+    } finally {
+      setIsRefreshingApp(false);
+    }
+  };
+
+  // Full-app restart: relaunches Electron, so main-process changes
+  // (new IPC handlers, orchestrator updates, native modules like
+  // node-llama-cpp) actually take effect. Slower than a refresh
+  // but picks up everything.
+  const handleRestartApp = async () => {
+    if (typeof window === 'undefined' || isRefreshingApp || isRestartingApp) return;
+    setIsRestartingApp(true);
+
+    try {
+      window.sessionStorage?.setItem('devforge:startup-complete', '1');
+    } catch { /* non-blocking */ }
+
+    try {
+      if (window.electronAPI?.restartApp) {
+        await window.electronAPI.restartApp();
+        return; // electron exits + relaunches; we won't reach here
+      }
+      // Fallback: no electron bridge — best we can do is a hard reload.
+      window.location.reload();
+    } catch (error) {
+      console.warn('[Layout] Restart failed:', error?.message || error);
+      window.location.reload();
+    } finally {
+      setIsRestartingApp(false);
+    }
+  };
+
+  useEffect(() => {
     const refreshSovereignty = async () => {
       if (window.electronAPI?.getSovereigntyStatus) {
         try {
@@ -178,18 +319,14 @@ export function Layout({ children }) {
     };
 
     refreshSovereignty();
-    // Check every 30 seconds instead of 15
-    const interval = setInterval(refreshSovereignty, 30000);
+    const unsubscribePolling = pollingCoordinator.subscribe('layout:sovereignty-status', {
+      run: refreshSovereignty,
+      intervalMs: 30000,
+      hiddenIntervalMs: 120000,
+    });
 
-    return () => clearInterval(interval);
-  }, [checkMaximized]);
-
-  const handleMinimize = useCallback(() => window.electronAPI?.minimizeWindow(), []);
-  const handleMaximize = useCallback(async () => {
-    await window.electronAPI?.maximizeWindow();
-    setIsMaximized(prev => !prev);
+    return () => unsubscribePolling?.();
   }, []);
-  const handleClose = useCallback(() => window.electronAPI?.closeWindow(), []);
 
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-surface-base">
@@ -199,10 +336,16 @@ export function Layout({ children }) {
         currentModel={currentModel}
         modelStatus={modelStatus}
         sovereigntyStatus={sovereigntyStatus}
-        onMinimize={handleMinimize}
-        onMaximize={handleMaximize}
-        onClose={handleClose}
-        isMaximized={isMaximized}
+        showDevRefresh={showDevRefresh}
+        showWindowControls={showWindowControls}
+        isWindowMaximized={isWindowMaximized}
+        onRefreshApp={handleRefreshApp}
+        onRestartApp={handleRestartApp}
+        isRefreshingApp={isRefreshingApp}
+        isRestartingApp={isRestartingApp}
+        onWindowMinimize={handleWindowMinimize}
+        onWindowMaximize={handleWindowMaximize}
+        onWindowClose={handleWindowClose}
       />
 
       <ErrorToast error={error} onClear={clearError} />

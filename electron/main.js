@@ -2,6 +2,7 @@ const electron = require('electron');
 const path = require('path');
 const crypto = require('crypto');
 const fs = require('fs');
+const os = require('os');
 const { execSync, spawn, spawnSync } = require('child_process');
 
 const isElectronMainProcess = Boolean(
@@ -27,13 +28,30 @@ if (!isElectronMainProcess) {
   process.exit(1);
 }
 
-const { app, BrowserWindow, ipcMain, globalShortcut, dialog, Menu } = electron;
+const { app, BrowserWindow, ipcMain, globalShortcut, dialog, Menu, screen } = electron;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // LITE MODE: Memory optimizations for lightweight operation
 // ─────────────────────────────────────────────────────────────────────────────
-// Limit V8 heap size to reduce memory footprint (default is ~1.4GB, we use 512MB)
-app.commandLine.appendSwitch('js-flags', '--max-old-space-size=512');
+function resolveHeapLimitMb() {
+  const explicit = Number(process.env.DEVFORGE_HEAP_MB);
+  if (Number.isFinite(explicit) && explicit >= 512) {
+    return Math.round(explicit);
+  }
+
+  if (process.env.LITE_MODE === 'true') {
+    return 512;
+  }
+
+  const totalRamGb = os.totalmem() / (1024 ** 3);
+  if (totalRamGb <= 16) return 768;
+  if (totalRamGb <= 32) return 1024;
+  if (totalRamGb <= 64) return 1536;
+  return 2048;
+}
+
+const HEAP_LIMIT_MB = resolveHeapLimitMb();
+app.commandLine.appendSwitch('js-flags', `--max-old-space-size=${HEAP_LIMIT_MB}`);
 // NOTE:
 // Disabling GPU compositing makes animations and transitions noticeably choppy.
 // Only disable it when explicitly running in "lite mode".
@@ -49,11 +67,52 @@ app.commandLine.appendSwitch('enable-features', 'MemoryPressureBasedSourceBuffer
 let Store = null;
 let setupIpcHandlers = null;
 let saveDatabase = null;
+let flushDbSaves = null;
+let shutdownDbWriter = null;
 let startupManager = null;
+let cancelAllActiveStreams = null;
 
 // Setup logging (use sync initially since we log before app is ready)
 const logPath = path.join(app.getPath('userData'), 'devforge.log');
+const MAX_LOG_SIZE_BYTES = 50 * 1024 * 1024;
+
+function prepareLogFile(logFilePath) {
+  try {
+    const stats = fs.statSync(logFilePath);
+    if (!stats.isFile() || stats.size <= MAX_LOG_SIZE_BYTES) return;
+
+    const rotatedPath = `${logFilePath}.previous`;
+    try {
+      if (fs.existsSync(rotatedPath)) {
+        fs.unlinkSync(rotatedPath);
+      }
+    } catch (_) {
+      // non-blocking
+    }
+
+    fs.renameSync(logFilePath, rotatedPath);
+  } catch (_) {
+    // Missing or inaccessible log file is non-fatal.
+  }
+}
+
+prepareLogFile(logPath);
+
 const logStream = fs.createWriteStream(logPath, { flags: 'a' });
+let fileLoggingDisabled = false;
+let stdoutLoggingDisabled = false;
+
+logStream.on('error', (error) => {
+  if (error?.code === 'EPIPE') {
+    fileLoggingDisabled = true;
+    return;
+  }
+  try {
+    process.stderr.write(`[DevForge][LogError] ${error?.message || error}\n`);
+  } catch (_) {
+    // noop
+  }
+});
 
 function normalizeLogSymbols(input) {
   return String(input || '')
@@ -69,9 +128,23 @@ function log(message, level = 'INFO') {
   const normalizedMessage = normalizeLogSymbols(message);
   const timestamp = new Date().toISOString();
   const logMessage = `[${timestamp}] [${level}] ${normalizedMessage}\n`;
-  logStream.write(logMessage);
-  if (process.env.NODE_ENV !== 'production') {
-    console.log(logMessage.trim());
+  if (!fileLoggingDisabled) {
+    try {
+      logStream.write(logMessage);
+    } catch (error) {
+      if (error?.code === 'EPIPE') {
+        fileLoggingDisabled = true;
+      }
+    }
+  }
+  if (!app.isPackaged && process.env.NODE_ENV !== 'production' && !stdoutLoggingDisabled) {
+    try {
+      process.stdout.write(logMessage);
+    } catch (error) {
+      if (error?.code === 'EPIPE') {
+        stdoutLoggingDisabled = true;
+      }
+    }
   }
 }
 
@@ -102,6 +175,7 @@ function withTimeout(taskFn, timeoutMs, label = 'operation') {
 }
 
 log('DevForge starting...');
+log(`V8 heap policy applied: ${HEAP_LIMIT_MB}MB`);
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SELF-HEALING: Ensure all npm dependencies are installed before anything else
@@ -195,17 +269,22 @@ function ensureDependenciesSync() {
 // Run dependency check immediately (before app.whenReady)
 ensureDependenciesSync();
 
-// NOW load modules that depend on npm packages (after deps are installed)
 let setupLedgerHandlers = null;
+let _modulesLoaded = false;
 
 function loadDependentModules() {
+  if (_modulesLoaded) return;
+  _modulesLoaded = true;
   log('Loading dependent modules...');
   try {
     Store = require('electron-store');
     const ipcHandlers = require('./ipc-handlers');
     setupIpcHandlers = ipcHandlers.setupIpcHandlers;
     saveDatabase = ipcHandlers.saveDatabase;
+    flushDbSaves = ipcHandlers.flushDbSaves;
+    shutdownDbWriter = ipcHandlers.shutdownDbWriter;
     setupLedgerHandlers = ipcHandlers.setupLedgerHandlers;
+    cancelAllActiveStreams = ipcHandlers.cancelAllActiveStreams;
     startupManager = require('./services/startup-manager');
     log('✓ All modules loaded');
   } catch (err) {
@@ -214,7 +293,9 @@ function loadDependentModules() {
   }
 }
 
-loadDependentModules();
+// Load Store eagerly (small module, needed for window bounds)
+// but defer the heavy ipc-handlers + startup-manager until createWindow needs them
+try { Store = require('electron-store'); } catch (e) { log(`electron-store load deferred: ${e.message}`, 'WARN'); }
 
 // ─────────────────────────────────────────────────────────────────────────────
 // SELF-HEALING: Auto-start Vite dev server if not running (dev mode only)
@@ -408,6 +489,35 @@ function getDefaultEncryptionKey() {
   return crypto.createHash('sha256').update(machineId + 'devforge-fallback').digest('hex').substring(0, 32);
 }
 
+const DEFAULT_WINDOW_BOUNDS = Object.freeze({ width: 1400, height: 900 });
+const MIN_WINDOW_WIDTH = 860;
+const MIN_WINDOW_HEIGHT = 560;
+
+function clamp(value, min, max) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function resolveWindowBounds(storedBounds) {
+  const workArea = screen.getPrimaryDisplay()?.workAreaSize || DEFAULT_WINDOW_BOUNDS;
+  const maxWidth = Math.max(MIN_WINDOW_WIDTH, Number(workArea.width) || DEFAULT_WINDOW_BOUNDS.width);
+  const maxHeight = Math.max(MIN_WINDOW_HEIGHT, Number(workArea.height) || DEFAULT_WINDOW_BOUNDS.height);
+
+  const parsedWidth = Number(storedBounds?.width);
+  const parsedHeight = Number(storedBounds?.height);
+
+  const safeWidth = Number.isFinite(parsedWidth)
+    ? Math.round(parsedWidth)
+    : DEFAULT_WINDOW_BOUNDS.width;
+  const safeHeight = Number.isFinite(parsedHeight)
+    ? Math.round(parsedHeight)
+    : DEFAULT_WINDOW_BOUNDS.height;
+
+  return {
+    width: clamp(safeWidth, MIN_WINDOW_WIDTH, maxWidth),
+    height: clamp(safeHeight, MIN_WINDOW_HEIGHT, maxHeight),
+  };
+}
+
 // Persistent store for app settings (initialized lazily after modules load)
 let store = null;
 function getStore() {
@@ -417,11 +527,14 @@ function getStore() {
       defaults: {
         theme: 'dark',
         lastWorkspace: 'casual',
+        preferredBackend: 'ollama-cuda',
         // Prefer IPv4 loopback to avoid ::1/IPv6 binding issues on Windows
         llmEndpoint: 'http://127.0.0.1:11434',
         imageGenEndpoint: 'http://127.0.0.1:8188',
-        windowBounds: { width: 1400, height: 900 },
-        hasOnboarded: false
+        windowBounds: DEFAULT_WINDOW_BOUNDS,
+        hasOnboarded: false,
+        chat_v2_enabled: false,
+        soul_engine_enabled: false,
       }
     });
   }
@@ -431,8 +544,35 @@ function getStore() {
 let mainWindow;
 let isQuitting = false;
 
+function getLaunchQuery() {
+  const explicitQuery = String(process.env.DEVFORGE_LAUNCH_QUERY || '').trim().replace(/^\?/, '');
+  const forceChatV2Enabled = process.env.DEVFORGE_CHATV2_ENABLED === '1' || process.argv.includes('--chatv2');
+  const chatV2DemoEnabled = process.env.DEVFORGE_CHATV2_DEMO === '1' || process.argv.includes('--chatv2-demo');
+  if (forceChatV2Enabled || chatV2DemoEnabled) {
+    return 'chatv2=1&chatv2live=1';
+  }
+  return explicitQuery;
+}
+
+function appendQueryToUrl(baseUrl, query) {
+  if (!query) return baseUrl;
+  try {
+    const next = new URL(baseUrl);
+    const pairs = new URLSearchParams(query);
+    for (const [key, value] of pairs.entries()) {
+      next.searchParams.set(key, value);
+    }
+    return next.toString();
+  } catch (_) {
+    return baseUrl;
+  }
+}
+
 app.on('before-quit', () => {
   isQuitting = true;
+  // Abort any in-flight LLM streams so we don't leave orphaned inferences
+  // running on the backend after the user has asked to quit.
+  try { cancelAllActiveStreams?.('before-quit'); } catch (_) { /* noop */ }
 });
 
 // Security: Disable remote module
@@ -443,41 +583,78 @@ app.on('remote-get-current-window', (event) => event.preventDefault());
 app.on('remote-get-current-web-contents', (event) => event.preventDefault());
 
 async function createWindow() {
+  loadDependentModules();
   log('Creating main window...');
-  const bounds = getStore()?.get('windowBounds') || { width: 1400, height: 900 };
+  const bounds = resolveWindowBounds(getStore()?.get('windowBounds'));
   
+  const isWin = process.platform === 'win32';
+  const isMac = process.platform === 'darwin';
+
   mainWindow = new BrowserWindow({
     width: bounds.width,
     height: bounds.height,
-    minWidth: 1000,
-    minHeight: 700,
-    frame: false, // Custom title bar
-    show: false, // Don't show until ready (prevents white flash)
-    backgroundColor: '#000000', // Pure black to match startup visual
+    minWidth: MIN_WINDOW_WIDTH,
+    minHeight: MIN_WINDOW_HEIGHT,
+    show: false,
+    backgroundColor: '#000000',
+    resizable: true,
+    maximizable: true,
+    minimizable: true,
+    fullscreenable: true,
     titleBarStyle: 'hidden',
-    trafficLightPosition: { x: 15, y: 15 },
+    ...(isMac ? { trafficLightPosition: { x: 15, y: 15 } } : {}),
+    ...(isWin ? {
+      thickFrame: true,
+      titleBarOverlay: {
+        color: '#00000000',
+        symbolColor: '#999999',
+        height: 48,
+      },
+    } : {}),
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
       preload: path.join(__dirname, 'preload.js'),
-      // Lite mode optimizations
-      backgroundThrottling: true, // Throttle when window not focused
-      spellcheck: false, // Disable spellcheck for performance
+      backgroundThrottling: true,
+      spellcheck: false,
     },
     icon: path.join(__dirname, '../assets/icon.png'),
-    // Lite mode: Disable features we don't need
     autoHideMenuBar: true,
   });
 
-  // Show window only when content is ready (prevents white flash)
-  // Small delay ensures React has finished first paint
-  mainWindow.once('ready-to-show', () => {
-    log('Window ready to show');
-    setTimeout(() => {
+  // Show window only when content is ready (prevents white flash).
+  // Small delay ensures React has finished first paint.
+  let windowShown = false;
+  const showWindowOnce = (reason) => {
+    if (windowShown) return;
+    windowShown = true;
+    log(`Showing window (reason: ${reason})`);
+    if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.show();
-    }, 50); // 50ms safety buffer for React render
+      mainWindow.focus();
+    }
+  };
+  mainWindow.once('ready-to-show', () => {
+    setTimeout(() => showWindowOnce('ready-to-show'), 50);
   });
+  // Safety net: if ready-to-show never fires (renderer silently errored
+  // during React mount, stuck Suspense, infinite loop in a store slice,
+  // etc.), show the window anyway after 10s AND auto-open DevTools so
+  // the user can see the actual error instead of staring at a tray icon.
+  setTimeout(() => {
+    if (!windowShown) {
+      log('ready-to-show never fired — forcing show + opening DevTools so renderer errors are visible', 'WARN');
+      showWindowOnce('safety-timeout');
+      try {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.openDevTools({ mode: 'detach' });
+        }
+      } catch (devToolsErr) {
+        log(`Failed to open DevTools for diagnostic: ${devToolsErr.message}`, 'WARN');
+      }
+    }
+  }, 10000);
 
   // Setup IPC handlers before loading the renderer to avoid race conditions
   try {
@@ -493,6 +670,7 @@ async function createWindow() {
   const devUrl = viteDevServerUrl || 'http://localhost:5173';
   const distPath = path.join(__dirname, '../dist/index.html');
   const shouldUseDevServer = !app.isPackaged && needsDevServer();
+  const launchQuery = getLaunchQuery();
   
   // Add webContents error handlers
   mainWindow.webContents.on('did-fail-load', (event, errorCode, errorDescription, validatedURL) => {
@@ -504,9 +682,7 @@ async function createWindow() {
   });
   
   mainWindow.webContents.on('console-message', (event, level, message, line, sourceId) => {
-    if (level >= 2) { // Only log warnings and errors
-      log(`[Renderer Console] ${message}`, level === 2 ? 'WARN' : 'ERROR');
-    }
+    console.log(`[Renderer] ${message}`);
   });
 
   // Load the app
@@ -514,8 +690,9 @@ async function createWindow() {
   // (or --dev/DEV_MODE forced it). Otherwise, always load dist/ to avoid
   // accidentally attaching to a stale localhost:5173 session.
   if (shouldUseDevServer) {
-    log(`Loading from Vite dev server: ${devUrl}`);
-    mainWindow.loadURL(devUrl);
+    const targetUrl = appendQueryToUrl(devUrl, launchQuery);
+    log(`Loading from Vite dev server: ${targetUrl}`);
+    mainWindow.loadURL(targetUrl);
     // Dev tools can be opened manually with F12 or Ctrl+Shift+I
   } else {
     try {
@@ -525,20 +702,26 @@ async function createWindow() {
       log(`Failed to clear renderer cache: ${cacheErr.message}`, 'WARN');
     }
     log('Loading pre-built app from dist/');
-    mainWindow.loadFile(distPath);
+    if (launchQuery) {
+      mainWindow.loadFile(distPath, { search: `?${launchQuery}` });
+    } else {
+      mainWindow.loadFile(distPath);
+    }
   }
 
   // Save window bounds on resize
   mainWindow.on('resize', () => {
-    if (!mainWindow.isMaximized()) {
+    if (!mainWindow.isMaximized() && !mainWindow.isMinimized()) {
       const [width, height] = mainWindow.getSize();
-      getStore()?.set('windowBounds', { width, height });
+      getStore()?.set('windowBounds', resolveWindowBounds({ width, height }));
     }
   });
 
   mainWindow.on('close', () => {
     // Closing the window should end the session on desktop builds.
     isQuitting = true;
+    // Abort streaming so the backend stops generating tokens nobody will see.
+    try { cancelAllActiveStreams?.('window-close'); } catch (_) { /* noop */ }
   });
 
   // Setup Unified Ledger handlers
@@ -822,6 +1005,7 @@ app.on('before-quit', () => {
 app.on('will-quit', () => {
   log('App quitting, cleaning up...');
   globalShortcut.unregisterAll();
+  try { cancelAllActiveStreams?.('will-quit'); } catch (_) { /* noop */ }
   
   // Stop Vite dev server if we started it
   if (viteProcess && !viteProcess.killed) {
@@ -849,7 +1033,23 @@ app.on('will-quit', () => {
   
   // Save database before quitting
   if (saveDatabase) {
-    saveDatabase();
+    try {
+      if (flushDbSaves) {
+        const flushResult = flushDbSaves();
+        if (flushResult && typeof flushResult.catch === 'function') {
+          flushResult.catch((error) => log(`Flush DB failed: ${error.message}`, 'WARN'));
+        }
+      }
+      saveDatabase({ reason: 'app-will-quit', priority: 'high', sync: true });
+      if (shutdownDbWriter) {
+        const shutdownResult = shutdownDbWriter();
+        if (shutdownResult && typeof shutdownResult.catch === 'function') {
+          shutdownResult.catch((error) => log(`Shutdown DB writer failed: ${error.message}`, 'WARN'));
+        }
+      }
+    } catch (error) {
+      log(`Error saving database on quit: ${error.message}`, 'WARN');
+    }
   }
   logStream.end();
 });

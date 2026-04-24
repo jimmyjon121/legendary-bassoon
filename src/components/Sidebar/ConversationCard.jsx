@@ -1,4 +1,4 @@
-import React, { useState, memo } from 'react';
+import { useState, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { 
   Star, 
@@ -6,7 +6,6 @@ import {
   Trash2, 
   MoreHorizontal,
   FolderInput,
-  Tag,
   MessageSquare
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
@@ -23,6 +22,13 @@ function parseTags(tagsStr) {
   }
 }
 
+function normalizeComparableText(value) {
+  return String(value || '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
 // Enhanced conversation card with organization features
 export const ConversationCard = memo(function ConversationCard({ 
   conv, 
@@ -30,6 +36,7 @@ export const ConversationCard = memo(function ConversationCard({
   onSelect, 
   onDelete, 
   accentColor,
+  maskPrivateMeta = false,
   style = {}
 }) {
   const [isHovered, setIsHovered] = useState(false);
@@ -43,6 +50,15 @@ export const ConversationCard = memo(function ConversationCard({
   const tags = parseTags(conv.tags);
   const isStarred = conv.starred === 1;
   const isPinned = conv.pinned === 1;
+  const displayTitle = maskPrivateMeta ? 'Vault note' : (conv.title || 'New conversation');
+  const displayPreview = maskPrivateMeta ? '' : conv.preview;
+  const normalizedTitle = normalizeComparableText(displayTitle);
+  const normalizedPreview = normalizeComparableText(displayPreview);
+  const shouldShowPreview = Boolean(
+    normalizedPreview &&
+    normalizedPreview !== normalizedTitle &&
+    !normalizedPreview.startsWith(normalizedTitle)
+  );
 
   const handleStarClick = async (e) => {
     e.stopPropagation();
@@ -60,21 +76,19 @@ export const ConversationCard = memo(function ConversationCard({
   };
 
   return (
-    <motion.div
-      layout
-      initial={{ opacity: 0, y: 5 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -5 }}
+    <div
       onMouseEnter={() => setIsHovered(true)}
       onMouseLeave={() => { setIsHovered(false); setShowMenu(false); }}
       onClick={() => onSelect(conv.id)}
       className={`
-        relative group rounded-lg cursor-pointer transition-colors
-        ${isActive ? 'bg-glass-4' : 'hover:bg-glass-2'}
+        relative group rounded-xl cursor-pointer border transition-all duration-150
+        ${isActive
+          ? 'border-white/10 bg-white/[0.05] shadow-[0_18px_48px_-36px_rgba(0,0,0,0.95)]'
+          : 'border-transparent bg-transparent hover:border-white/8 hover:bg-white/[0.03]'}
       `}
       style={style}
     >
-      <div className="px-3 py-2.5">
+      <div className="px-3.5 py-3">
         {/* Header row: title + indicators */}
         <div className="flex items-start gap-2">
           {/* Pinned/Starred indicators */}
@@ -89,20 +103,20 @@ export const ConversationCard = memo(function ConversationCard({
           
           {/* Title and preview */}
           <div className="flex-1 min-w-0">
-            <p className={`text-sm truncate ${isActive ? 'text-text-primary font-medium' : 'text-text-secondary'}`}>
-              {conv.title || 'New conversation'}
+            <p className={`text-[13px] leading-5 line-clamp-2 break-words ${isActive ? 'text-text-primary font-medium' : 'text-text-secondary'}`}>
+              {displayTitle}
             </p>
             
             {/* Preview text */}
-            {conv.preview && (
-              <p className="text-[11px] text-text-muted truncate mt-0.5 opacity-70">
-                {conv.preview}
+            {shouldShowPreview && (
+              <p className="mt-1 line-clamp-2 break-words text-[11px] leading-4 text-text-muted opacity-75">
+                {displayPreview}
               </p>
             )}
             
             {/* Meta row: time, message count */}
-            <div className="flex items-center gap-2 mt-1">
-              <span className="text-[10px] text-text-muted">
+            <div className="mt-2 flex items-center gap-2">
+              <span className="text-[10px] text-text-muted" title={conv.created_at ? `Started: ${new Date(conv.created_at).toLocaleString()}` : undefined}>
                 {formatDistanceToNow(new Date(conv.updated_at), { addSuffix: true })}
               </span>
               
@@ -160,7 +174,7 @@ export const ConversationCard = memo(function ConversationCard({
                     initial={{ opacity: 0, scale: 0.95 }}
                     animate={{ opacity: 1, scale: 1 }}
                     exit={{ opacity: 0, scale: 0.95 }}
-                    className="absolute right-0 top-full mt-1 bg-forge-surface border border-forge-border rounded-lg shadow-xl py-1 z-30 min-w-[150px]"
+                    className="absolute right-0 top-full mt-1 bg-forge-surface border border-forge-border rounded-lg shadow-[0_18px_44px_-28px_rgba(0,0,0,0.9)] py-1 z-30 min-w-[150px]"
                     onClick={(e) => e.stopPropagation()}
                   >
                     {/* Move to folder submenu */}
@@ -205,8 +219,8 @@ export const ConversationCard = memo(function ConversationCard({
         </div>
         
         {/* Tags row */}
-        {tags.length > 0 && (
-          <div className="flex items-center gap-1 mt-2 flex-wrap">
+        {!maskPrivateMeta && tags.length > 0 && (
+          <div className="mt-2.5 flex flex-wrap items-center gap-1">
             {tags.slice(0, 3).map((tag, i) => (
               <span
                 key={i}
@@ -231,11 +245,8 @@ export const ConversationCard = memo(function ConversationCard({
           style={{ background: accentColor }}
         />
       )}
-    </motion.div>
+    </div>
   );
 });
 
 export default ConversationCard;
-
-
-

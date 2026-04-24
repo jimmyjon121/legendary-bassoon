@@ -2,6 +2,8 @@
 // This is the main store that combines all feature slices for optimal performance
 
 import { create } from 'zustand';
+import { shallow } from 'zustand/shallow';
+import { describeSettings } from '../services/modelOptimizer';
 import {
   createWorkspaceSlice,
   createModelSlice,
@@ -10,15 +12,24 @@ import {
   createConversationSlice,
   createMessageSlice,
   createOrganizationSlice,
+  createProjectSlice,
   createDownloadSlice,
   createInstallerSlice,
   createScannerSlice,
   createConverterSlice,
   createCollectionsSlice,
+  createModelCatalogSlice,
   JobStatus,
   Engine,
   ModelType,
   WORKSPACES,
+  DEFAULT_SIDEBAR_WIDTH,
+  DEFAULT_SIDEBAR_SECTION_ORDER,
+  DEFAULT_SIDEBAR_SECTION_VISIBILITY,
+  clampSidebarWidth,
+  normalizeSidebarSectionOrder,
+  normalizeSidebarSectionVisibility,
+  normalizeActiveProjectByWorkspace,
 } from './slices';
 
 // Re-export WORKSPACES, JobStatus, Engine, ModelType for backward compatibility
@@ -36,53 +47,113 @@ export const useAppStore = create((set, get) => ({
       set({ isLoading: true });
       
       // Use batched IPC call for faster startup (single round-trip)
-      const [settings, models] = await Promise.all([
-        window.electronAPI?.getSettingsBatch?.(['lastWorkspace', 'currentModel', 'ragInfluence']) || {},
-        window.electronAPI?.getModels() || [],
-      ]);
+      const settings = await window.electronAPI?.getSettingsBatch?.([
+        'lastWorkspace',
+        'currentModel',
+        'ragInfluence',
+        'streamingRenderMode',
+        'fastChatMode',
+        'sidebarCollapsed',
+        'sidebarWidth',
+        'sidebarSectionOrder',
+        'sidebarSectionVisibility',
+        'activeProjectByWorkspace',
+      ]) || {};
       
       // Fallback to individual calls if batch not available
       const savedWorkspace = settings.lastWorkspace ?? await window.electronAPI?.getSettings('lastWorkspace');
       const savedModel = settings.currentModel ?? await window.electronAPI?.getSettings('currentModel');
       const savedRagInfluence = settings.ragInfluence ?? await window.electronAPI?.getSettings('ragInfluence');
-
-      // Hydrate real model metadata on startup so first message uses proper
-      // context length/template behavior even before the user re-selects model.
-      let savedModelInfo = null;
-      if (savedModel && window.electronAPI?.getModelInfo) {
-        try {
-          const info = await window.electronAPI.getModelInfo(savedModel);
-          if (info?.success) {
-            savedModelInfo = info;
-          }
-        } catch {
-          // Non-fatal; fallback logic handles missing model info
-        }
-      }
+      const savedStreamingRenderMode = settings.streamingRenderMode ?? await window.electronAPI?.getSettings('streamingRenderMode');
+      const savedFastChatMode = settings.fastChatMode ?? await window.electronAPI?.getSettings('fastChatMode');
+      const savedSidebarCollapsed = settings.sidebarCollapsed ?? await window.electronAPI?.getSettings('sidebarCollapsed');
+      const savedSidebarWidth = settings.sidebarWidth ?? await window.electronAPI?.getSettings('sidebarWidth');
+      const savedSidebarSectionOrder = settings.sidebarSectionOrder ?? await window.electronAPI?.getSettings('sidebarSectionOrder');
+      const savedSidebarSectionVisibility = settings.sidebarSectionVisibility ?? await window.electronAPI?.getSettings('sidebarSectionVisibility');
+      const savedActiveProjectByWorkspace = settings.activeProjectByWorkspace ?? await window.electronAPI?.getSettings('activeProjectByWorkspace');
+      const streamingRenderMode = ['hybrid', 'plain_stream', 'full_rich'].includes(savedStreamingRenderMode)
+        ? savedStreamingRenderMode
+        : 'hybrid';
+      const sidebarWidth = savedSidebarWidth == null
+        ? DEFAULT_SIDEBAR_WIDTH
+        : clampSidebarWidth(savedSidebarWidth);
+      const sidebarSectionOrder = savedSidebarSectionOrder == null
+        ? [...DEFAULT_SIDEBAR_SECTION_ORDER]
+        : normalizeSidebarSectionOrder(savedSidebarSectionOrder);
+      const sidebarSectionVisibility = savedSidebarSectionVisibility == null
+        ? { ...DEFAULT_SIDEBAR_SECTION_VISIBILITY }
+        : normalizeSidebarSectionVisibility(savedSidebarSectionVisibility);
+      const activeProjectByWorkspace = normalizeActiveProjectByWorkspace(savedActiveProjectByWorkspace);
       
       // Important: Set workspace FIRST so loadConversations filters correctly
       const workspace = savedWorkspace || 'casual';
-      // Don't restore to NSFW - always start in a safe workspace (user must unlock)
-      const safeWorkspace = workspace === 'nsfw' ? 'casual' : workspace;
-      set({ currentWorkspace: safeWorkspace });
+
+      // Try to auto-unlock the Vault if the user opted in to "Remember me" on
+      // a previous session. The password is stored only via OS-bound safeStorage
+      // (Windows DPAPI / macOS Keychain / Linux libsecret) and only usable by
+      // the same OS user account on the same machine.
+      let autoUnlocked = false;
+      let autoUnlockPassword = null;
+      try {
+        const remembered = await window.electronAPI?.getRememberedNsfwPassword?.();
+        if (remembered?.success && typeof remembered.password === 'string' && remembered.password) {
+          const verify = await window.electronAPI?.verifyNsfwPassword?.(remembered.password);
+          if (verify?.verified) {
+            autoUnlocked = true;
+            autoUnlockPassword = remembered.password;
+          } else {
+            // Stored password no longer matches (user rotated it) — drop the blob.
+            try { await window.electronAPI?.forgetNsfwPassword?.(); } catch (_) { /* noop */ }
+          }
+        }
+      } catch (_) { /* non-blocking */ }
+
+      // Only restore the Vault workspace if we successfully auto-unlocked.
+      const safeWorkspace = workspace === 'nsfw' && !autoUnlocked ? 'casual' : workspace;
+      set({
+        currentWorkspace: safeWorkspace,
+        activeProjectByWorkspace,
+        activeProjectId: activeProjectByWorkspace[safeWorkspace] || null,
+        ...(autoUnlocked
+          ? { isLocked: false, nsfwPassword: autoUnlockPassword }
+          : {}),
+      });
       
-      // Now load conversations for the correct workspace
-      const conversations = await get().loadConversations();
+      const llmBootstrapTask = get().initializeLlm
+        ? get().initializeLlm({
+          requestedModel: savedModel ?? undefined,
+          warmup: Boolean(savedModel),
+          updateError: false,
+        }).catch((error) => {
+          console.warn('[AppStore] LLM bootstrap degraded:', error?.message || error);
+          return null;
+        })
+        : Promise.resolve(null);
+
+      const [conversations] = await Promise.all([
+        get().loadConversations(),
+        llmBootstrapTask,
+      ]);
       
       set({
         initialized: true,
         isLoading: false,
-        currentModel: savedModel || null,
-        currentModelInfo: savedModelInfo,
-        availableModels: models,
         conversations,
         ragInfluence: typeof savedRagInfluence === 'number' ? savedRagInfluence : 0.5,
-        modelStatus: models.length > 0 ? 'online' : 'offline'
+        streamingRenderMode,
+        fastChatMode: Boolean(savedFastChatMode),
+        sidebarCollapsed: Boolean(savedSidebarCollapsed),
+        sidebarWidth,
+        sidebarSectionOrder,
+        sidebarSectionVisibility,
+        activeProjectByWorkspace,
+        activeProjectId: activeProjectByWorkspace[safeWorkspace] || null,
       });
       
       // Load folders and tags for current workspace (non-blocking)
       get().loadFolders?.();
       get().loadWorkspaceTags?.();
+      get().loadProjects?.(safeWorkspace);
     } catch (error) {
       set({ error: error.message, isLoading: false });
     }
@@ -99,11 +170,13 @@ export const useAppStore = create((set, get) => ({
   ...createConversationSlice(set, get),
   ...createMessageSlice(set, get),
   ...createOrganizationSlice(set, get),
+  ...createProjectSlice(set, get),
   ...createDownloadSlice(set, get),
   ...createInstallerSlice(set, get),
   ...createScannerSlice(set, get),
   ...createConverterSlice(set, get),
   ...createCollectionsSlice(set, get),
+  ...createModelCatalogSlice(set, get),
 }));
 
 // === Selective Subscription Helpers ===
@@ -118,9 +191,8 @@ export const useCurrentModel = () => useAppStore(s => s.currentModel);
 export const useAvailableModels = () => useAppStore(s => s.availableModels);
 export const useModelStatus = () => useAppStore(s => s.modelStatus);
 
-// Model optimization info (lazy import to avoid circular deps)
+// Model optimization info
 export const getModelOptimizationInfo = async (modelName) => {
-  const { describeSettings, parseModelName } = await import('../services/modelOptimizer');
   return describeSettings(modelName);
 };
 
@@ -139,11 +211,8 @@ export const useRagContext = () => useAppStore(s => s.ragContext);
 // UI selectors
 export const useShowSettings = () => useAppStore(s => s.showSettings);
 export const useShowImageGen = () => useAppStore(s => s.showImageGen);
-export const useShowModelFinder = () => useAppStore(s => s.showModelFinder);
-export const useShowModelLibrary = () => useAppStore(s => s.showModelLibrary);
 export const useShowModelHub = () => useAppStore(s => s.showModelHub);
 export const useShowExportModal = () => useAppStore(s => s.showExportModal);
-export const useShowDownloadCenter = () => useAppStore(s => s.showDownloadCenter);
 export const useSidebarCollapsed = () => useAppStore(s => s.sidebarCollapsed);
 
 // Organization selectors
@@ -162,13 +231,13 @@ export const useChatState = () => useAppStore(s => ({
   isGenerating: s.isGenerating,
   streamingContent: s.streamingContent,
   currentModel: s.currentModel,
-}));
+}), shallow);
 
 export const useWorkspaceState = () => useAppStore(s => ({
   currentWorkspace: s.currentWorkspace,
   isLocked: s.isLocked,
   workspaceSettings: s.workspaceSettings,
-}));
+}), shallow);
 
 // Action selectors (these never cause re-renders)
 export const useAppActions = () => useAppStore(s => ({
@@ -181,11 +250,8 @@ export const useAppActions = () => useAppStore(s => ({
   setWorkspace: s.setWorkspace,
   toggleSettings: s.toggleSettings,
   toggleImageGen: s.toggleImageGen,
-  toggleModelFinder: s.toggleModelFinder,
-  toggleModelLibrary: s.toggleModelLibrary,
   toggleModelHub: s.toggleModelHub,
-  toggleDownloadCenter: s.toggleDownloadCenter,
-}));
+}), shallow);
 
 // Organization action selectors
 export const useOrganizationActions = () => useAppStore(s => ({
@@ -204,7 +270,7 @@ export const useOrganizationActions = () => useAppStore(s => ({
   clearSearch: s.clearSearch,
   loadWorkspaceTags: s.loadWorkspaceTags,
   getFilteredConversations: s.getFilteredConversations,
-}));
+}), shallow);
 
 // Download selectors
 export const useDownloads = () => useAppStore(s => s.downloads);
@@ -228,7 +294,7 @@ export const useDownloadActions = () => useAppStore(s => ({
   getCompletedDownloads: s.getCompletedDownloads,
   getFailedDownloads: s.getFailedDownloads,
   getDownloadById: s.getDownloadById,
-}));
+}), shallow);
 
 // Installer selectors
 export const useAvailableEngines = () => useAppStore(s => s.availableEngines);
@@ -251,7 +317,7 @@ export const useInstallerActions = () => useAppStore(s => ({
   clearCompletedInstallations: s.clearCompletedInstallations,
   getEngineById: s.getEngineById,
   getActiveInstallationsCount: s.getActiveInstallationsCount,
-}));
+}), shallow);
 
 // Scanner selectors
 export const useScannerSources = () => useAppStore(s => s.scannerSources);
@@ -280,7 +346,7 @@ export const useScannerActions = () => useAppStore(s => ({
   getModelsBySourceLocal: s.getModelsBySourceLocal,
   getModelsByTypeLocal: s.getModelsByTypeLocal,
   getScanStats: s.getScanStats,
-}));
+}), shallow);
 
 // Converter selectors
 export const useConversionJobs = () => useAppStore(s => s.conversionJobs);
@@ -298,7 +364,7 @@ export const useConverterActions = () => useAppStore(s => ({
   fetchQuantTypes: s.fetchQuantTypes,
   estimateConversionTime: s.estimateConversionTime,
   setupConverterListeners: s.setupConverterListeners,
-}));
+}), shallow);
 
 // Collections selectors
 export const useStarterPacks = () => useAppStore(s => s.starterPacks);
@@ -328,4 +394,4 @@ export const useCollectionsActions = () => useAppStore(s => ({
   selectCollection: s.selectCollection,
   clearSelectedCollection: s.clearSelectedCollection,
   setupCollectionListeners: s.setupCollectionListeners,
-}));
+}), shallow);

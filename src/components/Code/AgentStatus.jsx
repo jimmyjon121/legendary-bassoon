@@ -1,11 +1,12 @@
 import React from 'react';
 import { Sparkles } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
+import { shallow } from 'zustand/shallow';
 
 export function AgentStatus() {
   const { sendMessage } = useAppStore((state) => ({
     sendMessage: state.sendMessage,
-  }));
+  }), shallow);
 
   const handleSuggestImprovements = () => {
     const code = window.getSelection()?.toString() || '';

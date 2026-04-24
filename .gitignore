@@ -44,6 +44,7 @@ coverage/
 ComfyUI/
 openvino-env/
 npu-models/
+.cache/
 
 # Backups and archives
 *.tar.gz

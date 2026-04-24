@@ -11,6 +11,40 @@ const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
 
+const HF_CREATOR_TRUST_HINTS = [
+  'meta',
+  'mistralai',
+  'qwen',
+  'deepseek',
+  'google',
+  'microsoft',
+  'tiiuae',
+  'allenai',
+  'nvidia',
+  'ibm',
+  'huggingface',
+  'openchat',
+  'thebloke',
+  'bartowski',
+  'unsloth',
+];
+
+const HF_MODEL_SIGNAL_TOKENS = [
+  'llama',
+  'mistral',
+  'mixtral',
+  'qwen',
+  'deepseek',
+  'gemma',
+  'phi',
+  'coder',
+  'instruct',
+  'chat',
+  'gguf',
+  'reason',
+  'agent',
+];
+
 class HuggingFaceBrowser extends EventEmitter {
   constructor() {
     super();
@@ -188,12 +222,27 @@ class HuggingFaceBrowser extends EventEmitter {
       const models = Array.isArray(response.data) ? response.data : [];
       const nextCursor = this.extractNextCursor(response.headers?.link || response.headers?.Link);
       
-      // Enrich results with additional info
-      const enrichedResults = models.map(model => this.enrichModelInfo(model));
+      // Enrich results, dedupe by id, and keep deterministic page ordering.
+      const enrichedResults = this.dedupeModelsById(models.map((model) => this.enrichModelInfo(model)));
+      const orderedResults = [...enrichedResults].sort((a, b) => {
+        if (sort === 'lastModified') {
+          const aTime = new Date(a?.lastModified || 0).getTime() || 0;
+          const bTime = new Date(b?.lastModified || 0).getTime() || 0;
+          if (aTime !== bTime) return direction >= 0 ? aTime - bTime : bTime - aTime;
+        } else if (sort === 'downloads') {
+          const aDownloads = Number(a?.downloadCount || a?.downloads || 0);
+          const bDownloads = Number(b?.downloadCount || b?.downloads || 0);
+          if (aDownloads !== bDownloads) return direction >= 0 ? aDownloads - bDownloads : bDownloads - aDownloads;
+        }
+        const qualityDiff = Number(b?.qualityScore || 0) - Number(a?.qualityScore || 0);
+        if (qualityDiff !== 0) return qualityDiff;
+        return String(a?.modelId || a?.id || '').localeCompare(String(b?.modelId || b?.id || ''));
+      });
+      const hasMore = Boolean(nextCursor && String(nextCursor) !== String(cursor || ''));
       const result = {
-        models: enrichedResults,
+        models: orderedResults,
         nextCursor,
-        hasMore: Boolean(nextCursor),
+        hasMore,
         fetchedAt: new Date().toISOString(),
       };
       
@@ -375,44 +424,254 @@ class HuggingFaceBrowser extends EventEmitter {
   }
 
   /**
-   * Enrich model info with computed fields
+   * Clamp quality/ranking scores.
+   */
+  clampScore(value, min = 0, max = 100) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return min;
+    return Math.min(max, Math.max(min, numeric));
+  }
+
+  normalizeCreatorInfo(input = '') {
+    const raw = String(input || '').trim();
+    const fallback = 'unknown';
+    if (!raw) {
+      return {
+        raw: fallback,
+        canonical: fallback,
+        displayName: fallback,
+      };
+    }
+    const compact = raw.replace(/\s+/g, ' ');
+    const canonical = compact.toLowerCase();
+    const displayName = compact
+      .split(/[-_.\s]+/)
+      .filter(Boolean)
+      .map((part) => (part.length <= 3 ? part.toUpperCase() : `${part[0].toUpperCase()}${part.slice(1)}`))
+      .join(' ');
+    return {
+      raw: compact,
+      canonical,
+      displayName: displayName || compact,
+    };
+  }
+
+  getCreatorTrustScore(creator = '') {
+    const normalized = String(creator || '').toLowerCase();
+    if (!normalized || normalized === 'unknown' || normalized === 'model') return 0;
+    if (HF_CREATOR_TRUST_HINTS.some((hint) => normalized.includes(hint))) return 5;
+    if (/(org|ai|research|labs|studio|foundation|team|community)/.test(normalized)) return 3;
+    if (this.isLikelyRandomSlug(normalized)) return 0;
+    return 1;
+  }
+
+  isLikelyRandomSlug(value = '') {
+    const input = String(value || '').trim();
+    if (!input) return true;
+    const compact = input.replace(/[-_.\s]/g, '');
+    if (compact.length < 11) return false;
+    if (HF_MODEL_SIGNAL_TOKENS.some((token) => input.toLowerCase().includes(token))) return false;
+
+    const letters = compact.replace(/[^a-zA-Z]/g, '');
+    const digits = (compact.match(/[0-9]/g) || []).length;
+    const lowers = (compact.match(/[a-z]/g) || []).length;
+    const uppers = (compact.match(/[A-Z]/g) || []).length;
+    const vowels = (letters.match(/[aeiouAEIOU]/g) || []).length;
+
+    const consonantHeavy = letters.length >= 9 && vowels <= Math.max(1, Math.floor(letters.length * 0.2));
+    const mixedJumble = lowers >= 4 && uppers >= 2 && digits >= 1;
+    const veryLongOpaque = compact.length >= 15 && digits >= 2 && !/\//.test(input);
+    return consonantHeavy || mixedJumble || veryLongOpaque;
+  }
+
+  normalizeTags(tags = []) {
+    return [...new Set((Array.isArray(tags) ? tags : [])
+      .map((tag) => String(tag || '').trim().toLowerCase())
+      .filter(Boolean))];
+  }
+
+  extractFormatSummary({ tags = [], fileStats = {}, name = '' } = {}) {
+    const normalizedTags = this.normalizeTags(tags);
+    const lowerName = String(name || '').toLowerCase();
+    const formats = new Set();
+
+    if (fileStats?.ggufFiles > 0 || normalizedTags.includes('gguf') || lowerName.includes('gguf')) formats.add('gguf');
+    if (fileStats?.safetensorsFiles > 0 || normalizedTags.includes('safetensors')) formats.add('safetensors');
+    if (fileStats?.onnxFiles > 0 || normalizedTags.includes('onnx')) formats.add('onnx');
+    if (fileStats?.binFiles > 0 || normalizedTags.includes('pytorch') || normalizedTags.includes('pt')) formats.add('pytorch');
+    if (fileStats?.ptFiles > 0) formats.add('pt');
+    if (formats.size === 0) formats.add('other');
+
+    const ordered = [...formats].sort();
+    return {
+      formats: ordered,
+      primaryFormat: ordered.includes('gguf')
+        ? 'gguf'
+        : ordered.includes('safetensors')
+          ? 'safetensors'
+          : ordered[0],
+      multiFormat: ordered.length > 1,
+    };
+  }
+
+  isLikelyLowSignalRepo({
+    name = '',
+    creatorCanonical = '',
+    creatorTrust = 0,
+    downloads = 0,
+    likes = 0,
+    fileStats = {},
+    tags = [],
+    description = '',
+  } = {}) {
+    const candidate = String(name || '').trim();
+    if (!candidate) return true;
+    const randomSlug = this.isLikelyRandomSlug(candidate);
+    const normalizedTags = this.normalizeTags(tags);
+    const signalBody = `${candidate.toLowerCase()} ${String(description || '').toLowerCase()} ${normalizedTags.join(' ')}`;
+    const hasSignalToken = HF_MODEL_SIGNAL_TOKENS.some((token) => signalBody.includes(token));
+    const lowTrustCreator = creatorTrust <= 1 || this.isLikelyRandomSlug(creatorCanonical);
+    const totalFiles = Number(fileStats?.totalFiles || 0);
+    const ggufFiles = Number(fileStats?.ggufFiles || 0);
+
+    if (!randomSlug && hasSignalToken && creatorTrust >= 1) return false;
+    if (randomSlug && lowTrustCreator && downloads < 12000 && likes < 250) return true;
+    if (lowTrustCreator && !hasSignalToken && downloads < 6000 && likes < 120 && totalFiles <= 8) return true;
+    if (!hasSignalToken && ggufFiles === 0 && totalFiles > 0 && totalFiles <= 4 && downloads < 3000) return true;
+    return downloads < 1200 && likes < 35 && totalFiles <= 4;
+  }
+
+  computeModelQualityScore({
+    downloads = 0,
+    likes = 0,
+    lastModified = null,
+    creatorTrust = 0,
+    lowSignal = false,
+    primaryFormat = 'other',
+    tags = [],
+  } = {}) {
+    let score = 20;
+    const normalizedDownloads = Math.log10(Math.max(1, Number(downloads || 0)));
+    const normalizedLikes = Math.log10(Math.max(1, Number(likes || 0)));
+    score += Math.min(30, normalizedDownloads * 8);
+    score += Math.min(22, normalizedLikes * 9);
+    score += this.clampScore(Number(creatorTrust || 0) * 7, 0, 35);
+
+    const modifiedTs = new Date(lastModified || 0).getTime();
+    if (Number.isFinite(modifiedTs) && modifiedTs > 0) {
+      const ageDays = Math.max(0, (Date.now() - modifiedTs) / (24 * 60 * 60 * 1000));
+      if (ageDays <= 7) score += 15;
+      else if (ageDays <= 30) score += 11;
+      else if (ageDays <= 90) score += 6;
+      else if (ageDays <= 365) score += 2;
+    }
+
+    if (primaryFormat === 'gguf') score += 8;
+    if (primaryFormat === 'safetensors') score += 4;
+    if (this.normalizeTags(tags).some((tag) => tag.includes('instruct') || tag.includes('chat'))) score += 3;
+    if (lowSignal) score -= 24;
+
+    return Math.round(this.clampScore(score, 0, 100));
+  }
+
+  dedupeModelsById(models = []) {
+    const seen = new Set();
+    const deduped = [];
+    for (const model of Array.isArray(models) ? models : []) {
+      const id = String(model?.modelId || model?.id || '').trim().toLowerCase();
+      if (!id || seen.has(id)) continue;
+      seen.add(id);
+      deduped.push(model);
+    }
+    return deduped;
+  }
+
+  /**
+   * Enrich model info with computed fields.
    */
   enrichModelInfo(model) {
     const modelId = model.modelId || model.id;
-    const name = String(modelId || '').split('/').pop() || '';
+    const [creatorRaw = 'unknown'] = String(modelId || '').split('/');
+    const name = String(modelId || '').split('/').slice(1).join('/') || String(modelId || '');
     const siblings = Array.isArray(model.siblings)
       ? model.siblings
           .filter((file) => file?.rfilename)
           .map((file) => ({ filename: file.rfilename, extension: path.extname(file.rfilename || '').toLowerCase() }))
       : [];
     const fileStats = this.computeFileStats(siblings);
-    const hasGgufFromFiles = fileStats.ggufFiles > 0;
-    const hasGgufFromTags = Array.isArray(model.tags) && model.tags.includes('gguf');
-    const hasGgufFromName = name.toLowerCase().includes('gguf');
+    const normalizedTags = this.normalizeTags(model.tags || []);
+    const formatSummary = this.extractFormatSummary({
+      tags: normalizedTags,
+      fileStats,
+      name,
+    });
+    const creator = this.normalizeCreatorInfo(creatorRaw);
+    const creatorTrustScore = this.getCreatorTrustScore(creator.canonical);
+    const lowSignal = this.isLikelyLowSignalRepo({
+      name,
+      creatorCanonical: creator.canonical,
+      creatorTrust: creatorTrustScore,
+      downloads: model.downloads || 0,
+      likes: model.likes || 0,
+      fileStats,
+      tags: normalizedTags,
+      description: model.description || '',
+    });
 
     // Detect model family
     const family = this.detectModelFamily(name);
-    
+
     // Detect parameter count
     const params = this.detectParams(name);
-    
+
     // Detect primary capability
-    const capability = this.detectCapability(name, model.tags || []);
+    const capability = this.detectCapability(name, normalizedTags);
+
+    const hasGgufFromFiles = fileStats.ggufFiles > 0;
+    const hasGgufFromTags = normalizedTags.includes('gguf');
+    const hasGgufFromName = name.toLowerCase().includes('gguf');
+    const isGGUF = hasGgufFromFiles || hasGgufFromTags || hasGgufFromName;
+    const downloadCount = Number(model.downloads || 0);
+    const qualityScore = this.computeModelQualityScore({
+      downloads: downloadCount,
+      likes: model.likes || 0,
+      lastModified: model.lastModified,
+      creatorTrust: creatorTrustScore,
+      lowSignal,
+      primaryFormat: formatSummary.primaryFormat,
+      tags: normalizedTags,
+    });
 
     return {
       ...model,
       displayName: name,
-      author: modelId.split('/')[0],
+      author: creator.raw,
+      creator: {
+        raw: creator.raw,
+        canonical: creator.canonical,
+        displayName: creator.displayName,
+        trustScore: creatorTrustScore,
+      },
+      creatorCanonical: creator.canonical,
+      creatorDisplayName: creator.displayName,
+      creatorTrustScore,
+      creatorLowSignal: lowSignal,
       family,
       params,
       capability,
+      tags: normalizedTags,
       fileStats,
       variationCount: fileStats.totalFiles,
       ggufVariantCount: fileStats.ggufFiles,
-      isGGUF: hasGgufFromFiles || hasGgufFromTags || hasGgufFromName,
-      downloadCount: model.downloads || 0,
-      likes: model.likes || 0,
+      isGGUF,
+      formatTags: formatSummary.formats,
+      primaryFormat: formatSummary.primaryFormat,
+      isMultiFormat: formatSummary.multiFormat,
+      downloadCount,
+      likes: Number(model.likes || 0),
       lastModified: model.lastModified,
+      qualityScore,
+      relevanceScore: qualityScore,
     };
   }
 

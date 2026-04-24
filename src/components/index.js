@@ -4,11 +4,6 @@ export { Layout } from './Layout/Layout';
 // Sidebar
 export { Sidebar } from './Sidebar/Sidebar';
 
-// Chat
-export { ChatArea } from './Chat/ChatArea';
-export { MessageBubble } from './Chat/MessageBubble';
-export { TypingIndicator } from './Chat/TypingIndicator';
-
 // Model Selector
 export { ModelSelector } from './ModelSelector/ModelSelector';
 
@@ -30,6 +25,6 @@ export { HardwareMonitorCompact, HardwareMonitorFull } from './HardwareMonitor/H
 // Power Mode
 export { PowerModeToggle } from './PowerMode/PowerModeToggle';
 
-// Models
-export { ModelLibrary } from './Models/ModelLibrary';
-export { ModelFinder } from './Models/ModelFinder';
+// Models — ModelHubPanel is the one discovery surface; per-model UI
+// primitives live under ModelBrowser/.
+export { ModelHubPanel } from './ModelHub/ModelHubPanel';

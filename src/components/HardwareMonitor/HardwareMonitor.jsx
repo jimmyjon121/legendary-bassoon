@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, memo, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, memo, useMemo, useRef } from 'react';
 import {
   Cpu, HardDrive, Monitor, Thermometer, Activity,
   ChevronDown, Zap, Brain, Layers, MemoryStick, Server
@@ -8,6 +8,17 @@ import { useInterval } from '../../hooks/useInterval';
 
 const Gpu = Monitor;
 const formatBytes = (gb) => gb >= 1000 ? `${(gb / 1000).toFixed(1)} TB` : `${gb} GB`;
+
+function formatModelName(modelName = '') {
+  const raw = String(modelName || '').trim();
+  if (!raw) return 'model';
+  if (/^npu:/i.test(raw)) {
+    const target = raw.slice(4).trim();
+    const parts = target.split(/[\\/]/).filter(Boolean);
+    return parts[parts.length - 1] || 'NPU model';
+  }
+  return raw.split(':')[0] || raw;
+}
 
 /**
  * Animated arc gauge — lightweight SVG mini-gauge.
@@ -101,6 +112,39 @@ const NpuStatus = memo(function NpuStatus({ npu }) {
   const isActive = npu.modelLoaded;
   const isReady = npu.serverRunning && !npu.modelLoaded;
   const isIdle = !npu.serverRunning;
+  const deviceStr = String(npu.device || '');
+  const isUnifiedBrain = deviceStr.startsWith('HETERO:') || deviceStr.startsWith('MULTI:') || deviceStr.startsWith('AUTO:');
+
+  if (isUnifiedBrain) {
+    return (
+      <div className="flex items-center gap-2.5 py-1.5">
+        <Brain size={13} className={isActive ? 'text-violet-400' : isReady ? 'text-violet-400/70' : 'text-white/30'} />
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center justify-between">
+            <span className="text-[10px] text-violet-400/80 font-medium uppercase tracking-wider">Unified Brain</span>
+            <div className="flex items-center gap-1.5">
+              {isActive && (
+                <span className="flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-violet-400 animate-pulse" />
+                  <span className="text-[10px] text-violet-400 font-medium">Active</span>
+                </span>
+              )}
+              {isReady && (
+                <span className="flex items-center gap-1">
+                  <span className="w-1.5 h-1.5 rounded-full bg-violet-400/70" />
+                  <span className="text-[10px] text-violet-400/70 font-medium">Ready</span>
+                </span>
+              )}
+              {isIdle && (
+                <span className="text-[10px] text-white/30 font-medium">Standby</span>
+              )}
+            </div>
+          </div>
+          <p className="text-[9px] text-white/25 mt-0.5">GPU+NPU · {deviceStr}{npu.tops ? ` · ${npu.tops} TOPS` : ''}</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex items-center gap-2.5 py-1.5">
@@ -143,18 +187,49 @@ const NpuStatus = memo(function NpuStatus({ npu }) {
 export function HardwareMonitorCompact({ className = '' }) {
   const [stats, setStats] = useState(null);
   const [isExpanded, setIsExpanded] = useState(false);
+  const fetchInFlightRef = useRef(false);
+  const lastStatsRef = useRef(null);
 
-  const fetchStats = useCallback(async () => {
-    try {
-      const data = await api.getHardwareStats();
-      if (data) setStats(data);
-    } catch {
-      setStats({ error: true, cpu: { usage: 0 }, memory: { usagePercent: 0, used: 0, total: 0 }, gpus: [] });
-    }
+  const shouldAcceptStatsUpdate = useCallback((prev, next) => {
+    if (!prev) return true;
+    if (!next) return false;
+
+    const cpuDelta = Math.abs((next.cpu?.usage || 0) - (prev.cpu?.usage || 0));
+    const memDelta = Math.abs((next.memory?.usagePercent || 0) - (prev.memory?.usagePercent || 0));
+    const prevGpu = prev.gpus?.[0];
+    const nextGpu = next.gpus?.[0];
+    const gpuDelta = Math.abs((nextGpu?.utilizationGpu || 0) - (prevGpu?.utilizationGpu || 0));
+    const vramDelta = Math.abs((nextGpu?.vramPercent || 0) - (prevGpu?.vramPercent || 0));
+    const prevNpu = prev.npu || {};
+    const nextNpu = next.npu || {};
+    const npuChanged =
+      Boolean(prevNpu.serverRunning) !== Boolean(nextNpu.serverRunning) ||
+      Boolean(prevNpu.modelLoaded) !== Boolean(nextNpu.modelLoaded) ||
+      (prevNpu.device || '') !== (nextNpu.device || '');
+
+    // Ignore tiny metric jitter to reduce unnecessary re-renders.
+    return cpuDelta >= 1 || memDelta >= 1 || gpuDelta >= 1 || vramDelta >= 1 || npuChanged;
   }, []);
 
+  const fetchStats = useCallback(async () => {
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
+    if (fetchInFlightRef.current) return;
+    fetchInFlightRef.current = true;
+    try {
+      const data = await api.getHardwareStats();
+      if (data && shouldAcceptStatsUpdate(lastStatsRef.current, data)) {
+        lastStatsRef.current = data;
+        setStats(data);
+      }
+    } catch {
+      setStats({ error: true, cpu: { usage: 0 }, memory: { usagePercent: 0, used: 0, total: 0 }, gpus: [] });
+    } finally {
+      fetchInFlightRef.current = false;
+    }
+  }, [shouldAcceptStatsUpdate]);
+
   useEffect(() => { fetchStats(); }, [fetchStats]);
-  useInterval(fetchStats, isExpanded ? 3000 : 15000);
+  useInterval(fetchStats, isExpanded ? 8000 : 30000);
 
   if (!stats) {
     return (
@@ -189,18 +264,15 @@ export function HardwareMonitorCompact({ className = '' }) {
       {/* Header / toggle */}
       <button
         onClick={() => setIsExpanded(!isExpanded)}
-        className="w-full px-3 pt-2.5 pb-1 flex items-center justify-between group"
+        className="w-full px-3 pt-2 pb-1 flex items-center justify-between group"
       >
         <div className="flex items-center gap-1.5">
-          <div className="relative">
-            <Activity size={11} className="text-white/35 group-hover:text-indigo-400 transition-colors" />
-            <div className="absolute -top-0.5 -right-0.5 w-1 h-1 rounded-full bg-emerald-400/70" />
-          </div>
-          <span className="text-[10px] text-white/45 font-medium tracking-wider uppercase">System</span>
+          <Activity size={10} className="text-white/30 group-hover:text-indigo-400/70 transition-colors" />
+          <span className="text-[9px] text-white/35 font-medium tracking-wider uppercase">System</span>
         </div>
         <ChevronDown
-          size={11}
-          className={`text-white/25 transition-transform duration-300 ${isExpanded ? 'rotate-180' : ''}`}
+          size={10}
+          className={`text-white/20 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
         />
       </button>
 
@@ -303,7 +375,7 @@ export function HardwareMonitorCompact({ className = '' }) {
               <div className="space-y-1">
                 {stats.ollama.models.slice(0, 4).map((model) => (
                   <div key={model.name} className="flex items-center justify-between py-1 px-2 rounded-md bg-white/[0.015]">
-                    <span className="text-[10px] text-white/45 font-mono truncate max-w-[110px]">{model.name?.split(':')[0]}</span>
+                    <span className="text-[10px] text-white/45 font-mono truncate max-w-[110px]">{formatModelName(model.name)}</span>
                     <span className="text-[10px] text-indigo-400/60 font-mono">{Math.round(model.sizeVram / (1024 * 1024))}MB</span>
                   </div>
                 ))}
@@ -311,30 +383,38 @@ export function HardwareMonitorCompact({ className = '' }) {
             </div>
           )}
 
-          {/* NPU detail (expanded) */}
-          {stats.npu?.detected && (
-            <div className="pt-2 border-t border-white/[0.04]">
-              <div className="flex items-center gap-1.5 mb-1.5">
-                <Brain size={10} className="text-cyan-400/60" />
-                <span className="text-[10px] text-white/40 font-medium uppercase tracking-wider">Neural Processing Unit</span>
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div className="p-2 rounded-md bg-white/[0.015]">
-                  <p className="text-[9px] text-white/25 uppercase">Status</p>
-                  <p className={`text-[10px] font-medium ${
-                    stats.npu.modelLoaded ? 'text-cyan-400' :
-                    stats.npu.serverRunning ? 'text-emerald-400' : 'text-white/35'
-                  }`}>
-                    {stats.npu.modelLoaded ? 'Active' : stats.npu.serverRunning ? 'Ready' : 'Standby'}
-                  </p>
+          {/* NPU / Unified Brain detail (expanded) */}
+          {stats.npu?.detected && (() => {
+            const devStr = String(stats.npu.device || '');
+            const isUni = devStr.startsWith('HETERO:') || devStr.startsWith('MULTI:') || devStr.startsWith('AUTO:');
+            return (
+              <div className="pt-2 border-t border-white/[0.04]">
+                <div className="flex items-center gap-1.5 mb-1.5">
+                  <Brain size={10} className={isUni ? 'text-violet-400/60' : 'text-cyan-400/60'} />
+                  <span className={`text-[10px] font-medium uppercase tracking-wider ${isUni ? 'text-violet-400/60' : 'text-white/40'}`}>
+                    {isUni ? 'Unified Brain' : 'Neural Processing Unit'}
+                  </span>
                 </div>
-                <div className="p-2 rounded-md bg-white/[0.015]">
-                  <p className="text-[9px] text-white/25 uppercase">Performance</p>
-                  <p className="text-[10px] text-cyan-400/80 font-medium">{stats.npu.tops || '—'} TOPS</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="p-2 rounded-md bg-white/[0.015]">
+                    <p className="text-[9px] text-white/25 uppercase">Status</p>
+                    <p className={`text-[10px] font-medium ${
+                      stats.npu.modelLoaded ? (isUni ? 'text-violet-400' : 'text-cyan-400') :
+                      stats.npu.serverRunning ? 'text-emerald-400' : 'text-white/35'
+                    }`}>
+                      {stats.npu.modelLoaded ? 'Active' : stats.npu.serverRunning ? 'Ready' : 'Standby'}
+                    </p>
+                  </div>
+                  <div className="p-2 rounded-md bg-white/[0.015]">
+                    <p className="text-[9px] text-white/25 uppercase">{isUni ? 'Device' : 'Performance'}</p>
+                    <p className={`text-[10px] font-medium ${isUni ? 'text-violet-400/80' : 'text-cyan-400/80'}`}>
+                      {isUni ? devStr : `${stats.npu.tops || '—'} TOPS`}
+                    </p>
+                  </div>
                 </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
         </div>
       </div>
     </div>
@@ -347,6 +427,8 @@ export function HardwareMonitorFull() {
   const [hardware, setHardware] = useState(null);
   const [stats, setStats] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [deviceActivity, setDeviceActivity] = useState(null);
+  const [activityExpanded, setActivityExpanded] = useState(false);
 
   useEffect(() => {
     const timer = setTimeout(async () => {
@@ -371,8 +453,18 @@ export function HardwareMonitorFull() {
     }
   }, []);
 
-  useEffect(() => { if (!loading) fetchStats(); }, [fetchStats, loading]);
+  const fetchDeviceActivity = useCallback(async () => {
+    try {
+      const data = await window.electronAPI?.getDeviceUtilization?.(60000);
+      if (data && data.available !== false) setDeviceActivity(data);
+    } catch (error) {
+      // Non-blocking — the card simply won't render if activity is unavailable.
+    }
+  }, []);
+
+  useEffect(() => { if (!loading) { fetchStats(); fetchDeviceActivity(); } }, [fetchStats, fetchDeviceActivity, loading]);
   useInterval(fetchStats, loading ? null : 5000);
+  useInterval(fetchDeviceActivity, loading ? null : 5000);
 
   if (loading) {
     return (
@@ -488,40 +580,171 @@ export function HardwareMonitorFull() {
         </div>
       )}
 
-      {/* NPU */}
-      {hardware.npu?.detected && (
-        <div className="p-5 bg-white/[0.02] border border-white/[0.06] rounded-xl">
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-2.5">
-              <Brain size={16} className="text-cyan-400" />
-              <div>
-                <p className="text-sm text-white/90 font-medium">{hardware.npu.name}</p>
-                <p className="text-[11px] text-white/35">Neural Processing Unit</p>
+      {/* NPU / Unified Brain */}
+      {hardware.npu?.detected && (() => {
+        const npuDevice = String(stats?.npu?.device || '');
+        const isUnified = npuDevice.startsWith('HETERO:') || npuDevice.startsWith('MULTI:') || npuDevice.startsWith('AUTO:');
+        return (
+          <div className={`p-5 border rounded-xl ${isUnified ? 'bg-gradient-to-br from-violet-500/[0.04] to-indigo-500/[0.04] border-violet-500/15' : 'bg-white/[0.02] border-white/[0.06]'}`}>
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2.5">
+                <Brain size={16} className={isUnified ? 'text-violet-400' : 'text-cyan-400'} />
+                <div>
+                  <p className="text-sm text-white/90 font-medium">
+                    {isUnified ? 'Unified Brain (GPU+NPU)' : hardware.npu.name}
+                  </p>
+                  <p className="text-[11px] text-white/35">
+                    {isUnified ? `${npuDevice} — One model, two chips` : 'Neural Processing Unit'}
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                {isUnified && <Badge text="Unified" color="violet" />}
+                <Badge text={`${hardware.npu.tops} TOPS`} color={isUnified ? 'violet' : 'cyan'} />
               </div>
             </div>
-            <Badge text={`${hardware.npu.tops} TOPS`} color="cyan" />
-          </div>
-          {stats?.npu && (
+            {stats?.npu && (
               <div className="grid grid-cols-3 gap-2 mt-3">
-              <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
-                <p className="text-[9px] text-white/30 uppercase mb-0.5">Status</p>
-                <p className={`text-[11px] font-medium ${
-                  stats.npu.modelLoaded ? 'text-cyan-400' :
-                  stats.npu.serverRunning ? 'text-emerald-400' : 'text-white/30'
-                }`}>
-                  {stats.npu.modelLoaded ? 'Active' : stats.npu.serverRunning ? 'Ready' : 'Standby'}
+                <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
+                  <p className="text-[9px] text-white/30 uppercase mb-0.5">Status</p>
+                  <p className={`text-[11px] font-medium ${
+                    stats.npu.modelLoaded ? (isUnified ? 'text-violet-400' : 'text-cyan-400') :
+                    stats.npu.serverRunning ? 'text-emerald-400' : 'text-white/30'
+                  }`}>
+                    {stats.npu.modelLoaded ? 'Active' : stats.npu.serverRunning ? 'Ready' : 'Standby'}
+                  </p>
+                </div>
+                <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
+                  <p className="text-[9px] text-white/30 uppercase mb-0.5">Model</p>
+                  <p className={`text-[11px] font-medium ${stats.npu.modelLoaded ? (isUnified ? 'text-violet-400' : 'text-cyan-400') : 'text-white/30'}`}>
+                    {stats.npu.modelLoaded ? 'Loaded' : 'None'}
+                  </p>
+                </div>
+                <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
+                  <p className="text-[9px] text-white/30 uppercase mb-0.5">Device</p>
+                  <p className={`text-[11px] font-medium ${isUnified ? 'text-violet-400' : 'text-white/50'}`}>
+                    {stats.npu.device || 'NPU'}
+                  </p>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
+
+      {/* Device Activity (Phase 1) — per-chip work over the last 60s */}
+      {deviceActivity?.devices?.length > 0 && (
+        <div className="p-5 bg-white/[0.02] border border-white/[0.06] rounded-xl">
+          <button
+            type="button"
+            onClick={() => setActivityExpanded((v) => !v)}
+            className="w-full flex items-center justify-between text-left"
+          >
+            <h4 className="text-sm font-semibold text-white/90 flex items-center gap-2">
+              <Activity size={15} className="text-emerald-400" />
+              Device Activity
+              <span className="text-[10px] font-normal text-white/35">last 60s</span>
+            </h4>
+            <ChevronDown
+              size={14}
+              className={`text-white/40 transition-transform ${activityExpanded ? 'rotate-180' : ''}`}
+            />
+          </button>
+          {activityExpanded && (
+            <div className="mt-4 space-y-2">
+              {deviceActivity.devices.map((dev) => {
+                const isWarm = dev.device === 'npu' && deviceActivity.warmloop?.active;
+                const warmloopTransitionCount = dev.device === 'npu'
+                  ? (Array.isArray(deviceActivity.streams?.warmloopTransitions)
+                      ? deviceActivity.streams.warmloopTransitions.length
+                      : 0)
+                  : 0;
+                const jobs = dev.jobs || 0;
+                const lastAgo = dev.lastActivityAt
+                  ? Math.max(0, Math.round((Date.now() - dev.lastActivityAt) / 1000))
+                  : null;
+                return (
+                  <div key={dev.device} className="flex items-center justify-between py-2 px-3 rounded-lg bg-white/[0.02] border border-white/[0.04]">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-[11px] text-white/70 font-medium w-16">{dev.label}</span>
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${jobs > 0 ? 'bg-emerald-500/15 text-emerald-300' : 'bg-white/[0.04] text-white/30'}`}>
+                        {jobs > 0 ? `${jobs} ${jobs === 1 ? 'job' : 'jobs'}` : 'idle'}
+                      </span>
+                      {isWarm && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/15 text-violet-300" title="NPU warm-loop keeps a small model resident">
+                          warm
+                        </span>
+                      )}
+                      {dev.device === 'npu' && (
+                        <span
+                          className="text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-300"
+                          title="Warm-loop active/inactive transitions seen in this window"
+                        >
+                          transitions {warmloopTransitionCount}
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-2 text-[10px] text-white/40 font-mono tabular-nums truncate">
+                      {dev.lastWorkload && (
+                        <span className="truncate max-w-[110px]" title={dev.lastWorkload}>{dev.lastWorkload}</span>
+                      )}
+                      {lastAgo !== null && jobs > 0 && (
+                        <span>{lastAgo}s ago</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+              <div className="flex items-center justify-between py-2 px-3 rounded-lg bg-white/[0.02] border border-white/[0.04]">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-[11px] text-white/70 font-medium w-16">Last stream</span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/15 text-sky-300">
+                    first token {
+                      Number.isFinite(Number(deviceActivity.streams?.last?.firstTokenMs))
+                        ? `${Math.round(Number(deviceActivity.streams.last.firstTokenMs))}ms`
+                        : 'n/a'
+                    }
+                  </span>
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-300">
+                    {
+                      Number.isFinite(Number(deviceActivity.streams?.last?.tokensPerSecond))
+                        ? `${Number(deviceActivity.streams.last.tokensPerSecond).toFixed(1)} tok/s`
+                        : '0.0 tok/s'
+                    }
+                  </span>
+                  {deviceActivity.streams?.last?.abort?.code && (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-500/15 text-rose-300">
+                      abort {deviceActivity.streams.last.abort.code}
+                    </span>
+                  )}
+                </div>
+                <div className="text-[10px] text-white/40 font-mono tabular-nums">
+                  {deviceActivity.streams?.last?.updatedAt
+                    ? `${Math.max(0, Math.round((Date.now() - Number(deviceActivity.streams.last.updatedAt)) / 1000))}s ago`
+                    : 'no stream yet'}
+                </div>
+              </div>
+              <div className="flex items-center justify-between py-2 px-3 rounded-lg bg-white/[0.02] border border-white/[0.04]">
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className="text-[11px] text-white/70 font-medium w-16">Aborts 60s</span>
+                  {Object.keys(deviceActivity.streams?.aborts || {}).length > 0 ? (
+                    Object.entries(deviceActivity.streams.aborts).map(([code, count]) => (
+                      <span key={code} className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/15 text-amber-300">
+                        {code}:{count}
+                      </span>
+                    ))
+                  ) : (
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/[0.04] text-white/40">none</span>
+                  )}
+                </div>
+                <div className="text-[10px] text-white/35">window 60s</div>
+              </div>
+              {deviceActivity.warmloop?.available && deviceActivity.warmloop?.lastDecision && (
+                <p className="text-[10px] text-white/35 mt-2">
+                  Warm-loop: {deviceActivity.warmloop.active ? 'active' : `idle (${deviceActivity.warmloop.lastDecision.reason})`}
+                  {deviceActivity.warmloop.warmModel ? ` · ${deviceActivity.warmloop.warmModel.split('/').pop()}` : ''}
                 </p>
-              </div>
-              <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
-                <p className="text-[9px] text-white/30 uppercase mb-0.5">Model</p>
-                <p className={`text-[11px] font-medium ${stats.npu.modelLoaded ? 'text-cyan-400' : 'text-white/30'}`}>
-                  {stats.npu.modelLoaded ? 'Loaded' : 'None'}
-                </p>
-              </div>
-              <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
-                <p className="text-[9px] text-white/30 uppercase mb-0.5">Device</p>
-                <p className="text-[11px] text-white/50 font-medium">{stats.npu.device || 'NPU'}</p>
-              </div>
+              )}
             </div>
           )}
         </div>

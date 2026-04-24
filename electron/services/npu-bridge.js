@@ -16,10 +16,19 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 
+// Phase 1: ordered for Intel NPU 3 (~13 TOPS) on the target Copilot+ hardware.
+// Small models fit the compute budget and leave iGPU/RTX free for heavier work.
+// Anything >3B is deprioritized; users who explicitly want a bigger NPU model
+// can still set it via Settings, this list only drives auto-configure.
 const DEFAULT_NPU_MODEL_CANDIDATES = [
+  // Pre-converted OpenVINO IRs (fastest: no runtime conversion step)
+  'OpenVINO/Qwen2.5-1.5B-Instruct-int4-ov',
+  'OpenVINO/Qwen2.5-0.5B-Instruct-int4-ov',
+  'OpenVINO/TinyLlama-1.1B-Chat-v1.0-int4-ov',
+  'OpenVINO/SmolLM2-1.7B-Instruct-int4-ov',
+  // Hub repos that optimum-intel can convert on first load
   'Qwen/Qwen2.5-0.5B-Instruct',
   'Qwen/Qwen2.5-1.5B-Instruct',
-  'Qwen/Qwen2-0.5B-Instruct',
   'HuggingFaceTB/SmolLM2-1.7B-Instruct',
   'TinyLlama/TinyLlama-1.1B-Chat-v1.0',
   'microsoft/phi-2',
@@ -91,6 +100,8 @@ class NpuBridge {
 
   /** @private */
   async _doCheckOpenVinoInstallation() {
+    console.log('[NpuBridge] Checking OpenVINO installation (platform:', process.platform, ')');
+
     if (process.platform !== 'win32') {
       return { installed: false, reason: 'Not Windows' };
     }
@@ -99,11 +110,9 @@ class NpuBridge {
     const envPath = this._findBundledOpenVinoEnv();
     if (envPath) {
       this._setDetectedOpenVinoEnv(envPath);
-      return {
-        installed: true,
-        path: envPath,
-        version: this.extractVersionFromEnv(envPath) || 'env',
-      };
+      const version = this.extractVersionFromEnv(envPath) || 'env';
+      console.log('[NpuBridge] OpenVINO detected via bundled venv:', envPath, 'version:', version);
+      return { installed: true, path: envPath, version };
     }
 
     // 2) Check common global OpenVINO toolkit paths.
@@ -112,6 +121,8 @@ class NpuBridge {
       'C:\\Program Files (x86)\\Intel\\openvino_2023',
       'C:\\Program Files\\Intel\\openvino_2024',
       'C:\\Program Files\\Intel\\openvino_2023',
+      'C:\\Program Files (x86)\\Intel\\openvino_2025',
+      'C:\\Program Files\\Intel\\openvino_2025',
       process.env.INTEL_OPENVINO_DIR,
       process.env.OPENVINO_DIR,
     ].filter(Boolean);
@@ -123,6 +134,7 @@ class NpuBridge {
         this.openvinoPath = basePath;
         this.openvinoInstalled = true;
         this._setPythonCommand('python');
+        console.log('[NpuBridge] OpenVINO detected via global toolkit:', basePath);
         return {
           installed: true,
           path: basePath,
@@ -134,7 +146,10 @@ class NpuBridge {
     }
 
     // 3) Probe Python for import openvino (covers pip-only installs).
+    // Also probe the venv python explicitly even if directory check missed it.
+    const venvPythonCandidates = this._getVenvPythonCandidates();
     const pythonCandidates = [
+      ...venvPythonCandidates.map((exe) => ({ executable: exe, args: [] })),
       { executable: process.env.OPENVINO_PYTHON, args: [] },
       { executable: process.env.PYTHON, args: [] },
       { executable: 'python', args: [] },
@@ -148,6 +163,8 @@ class NpuBridge {
       this.openvinoInstalled = true;
       this.openvinoPath = probe.location || this.openvinoPath || null;
       this._setPythonCommand(candidate.executable, candidate.args);
+      console.log('[NpuBridge] OpenVINO detected via Python probe:', candidate.executable,
+        'version:', probe.version);
       return {
         installed: true,
         path: this.openvinoPath || candidate.executable,
@@ -169,8 +186,34 @@ class NpuBridge {
       // No-op.
     }
 
+    console.warn('[NpuBridge] OpenVINO not found by any detection method');
     this.openvinoInstalled = false;
     return { installed: false, reason: 'OpenVINO not found' };
+  }
+
+  _getVenvPythonCandidates() {
+    const results = [];
+    try {
+      const projectRoot = path.join(__dirname, '..', '..');
+      const cwd = process.cwd();
+      let appPath = null;
+      try { appPath = require('electron')?.app?.getAppPath?.() || null; } catch { /* noop */ }
+
+      const dirs = [
+        process.env.OPENVINO_ENV_DIR,
+        appPath ? path.join(appPath, 'openvino-env') : null,
+        path.join(projectRoot, 'openvino-env'),
+        path.join(cwd, 'openvino-env'),
+      ].filter(Boolean);
+
+      for (const dir of dirs) {
+        const py = path.join(dir, 'Scripts', 'python.exe');
+        if (fs.existsSync(py) && !results.includes(py)) {
+          results.push(py);
+        }
+      }
+    } catch { /* noop */ }
+    return results;
   }
 
   _setPythonCommand(executable, args = []) {
@@ -187,26 +230,65 @@ class NpuBridge {
   _findBundledOpenVinoEnv() {
     try {
       const projectRoot = path.join(__dirname, '..', '..');
+      const projectRootUnpacked = String(projectRoot).includes('app.asar')
+        ? String(projectRoot).replace('app.asar', 'app.asar.unpacked')
+        : null;
+      const resourcesPath = process.resourcesPath || null;
+      const execDir = path.dirname(process.execPath || '');
       const cwd = process.cwd();
       const parentOfCwd = path.dirname(cwd);
       const explicit = process.env.OPENVINO_ENV_DIR;
+      const explicitPython = process.env.OPENVINO_PYTHON;
+      let appPath = null;
+      try { appPath = require('electron')?.app?.getAppPath?.() || null; } catch { /* noop */ }
+
+      const fromExplicitPython = explicitPython
+        ? path.dirname(path.dirname(String(explicitPython)))
+        : null;
 
       const candidates = [
         explicit,
+        fromExplicitPython,
+        appPath ? path.join(appPath, 'openvino-env') : null,
+        appPath && String(appPath).includes('app.asar')
+          ? path.join(String(appPath).replace('app.asar', 'app.asar.unpacked'), 'openvino-env')
+          : null,
+        resourcesPath ? path.join(resourcesPath, 'openvino-env') : null,
+        resourcesPath ? path.join(resourcesPath, 'app.asar.unpacked', 'openvino-env') : null,
+        execDir ? path.join(execDir, 'openvino-env') : null,
+        execDir ? path.join(execDir, 'resources', 'openvino-env') : null,
+        execDir ? path.join(execDir, 'resources', 'app.asar.unpacked', 'openvino-env') : null,
         path.join(projectRoot, 'openvino-env'),
+        projectRootUnpacked ? path.join(projectRootUnpacked, 'openvino-env') : null,
         path.join(cwd, 'openvino-env'),
         path.join(parentOfCwd, 'openvino-env'),
       ].filter(Boolean);
 
-      for (const envPath of candidates) {
+      const dedupedCandidates = [];
+      const seen = new Set();
+      for (const candidate of candidates) {
+        const normalized = path.normalize(String(candidate));
+        if (seen.has(normalized)) continue;
+        seen.add(normalized);
+        dedupedCandidates.push(normalized);
+      }
+
+      console.log('[NpuBridge] Searching for openvino-env in', dedupedCandidates.length, 'locations');
+
+      for (const envPath of dedupedCandidates) {
         const envPython = path.join(envPath, 'Scripts', 'python.exe');
         const openvinoPackageDir = path.join(envPath, 'Lib', 'site-packages', 'openvino');
-        if (fs.existsSync(envPython) && fs.existsSync(openvinoPackageDir)) {
+        const hasPython = fs.existsSync(envPython);
+        const hasOpenvino = fs.existsSync(openvinoPackageDir);
+        if (hasPython && hasOpenvino) {
+          console.log('[NpuBridge] Found openvino-env at:', envPath);
           return envPath;
         }
       }
-    } catch {
-      // Ignore and continue.
+
+      console.warn('[NpuBridge] openvino-env not found in any candidate location');
+    } catch (err) {
+      console.error('[NpuBridge] _findBundledOpenVinoEnv error:', err?.message);
     }
     return null;
   }
@@ -409,7 +491,7 @@ except Exception as e:
           });
 
         this.devices = devices;
-        this.npuAvailable = devices.some(d => d.id === 'NPU');
+        this.npuAvailable = devices.some((d) => /^NPU(\.|$)/i.test(String(d.id || '').trim()));
 
         resolve({ devices, npuAvailable: this.npuAvailable });
       });
@@ -469,6 +551,13 @@ except Exception as e:
 
     const devices = await this.queryDevices({ force });
     const serverRunning = await this.checkServerHealth({ force });
+    const config = this._readConfig();
+    const configuredModel = String(config.model_path || config.model_id || '').trim() || null;
+    const configuredTokenizer = String(config.tokenizer || configuredModel || '').trim() || null;
+    const serverStatus = serverRunning ? await this.getServerStatus() : null;
+    const loadedModelPath = String(serverStatus?.model_path || '').trim() || null;
+    const configuredDevice = String(config.device || '').trim() || null;
+    const serverDevice = String(serverStatus?.device || '').trim() || null;
 
     const value = {
       openvinoInstalled: true,
@@ -477,12 +566,25 @@ except Exception as e:
       npuAvailable: devices.npuAvailable || false,
       devices: devices.devices || [],
       serverRunning,
+      modelConfigured: Boolean(configuredModel),
+      model: configuredModel || loadedModelPath,
+      modelPath: configuredModel || loadedModelPath,
+      tokenizer: configuredTokenizer,
+      device: configuredDevice || serverDevice || (devices.npuAvailable ? 'NPU' : 'AUTO'),
+      precision: String(config.precision || '').trim() || 'fp16',
+      autoStart: Boolean(config.auto_start),
+      hybridEnabled: Boolean(config.hybrid_enabled),
+      hybridMode: config.hybrid_mode || null,
+      modelLoaded: Boolean(serverStatus?.model_loaded),
+      loadedModelPath,
+      serverDevice: serverDevice || null,
       error: devices.error || null,
       setupRequired: false,
       diagnostics: {
         pythonExecutable: this.pythonExecutable,
         pythonArgs: this.pythonArgs,
         openvinoPath: this.openvinoPath,
+        configPath: this._getConfigPath(),
       },
     };
     this._statusCache = { at: now, value };
@@ -528,6 +630,31 @@ except Exception as e:
         req.on('timeout', () => { req.destroy(); resolve(false); });
       } catch {
         resolve(false);
+      }
+    });
+  }
+
+  /**
+   * Fetch full server status (model path, loaded state) for skip-if-already-loaded optimization.
+   */
+  async getServerStatus() {
+    return new Promise((resolve) => {
+      try {
+        const req = http.get(`${this.serverEndpoint}/status`, { timeout: 3000 }, (res) => {
+          let data = '';
+          res.on('data', (chunk) => { data += chunk; });
+          res.on('end', () => {
+            try {
+              resolve(JSON.parse(data));
+            } catch {
+              resolve(null);
+            }
+          });
+        });
+        req.on('error', () => resolve(null));
+        req.on('timeout', () => { req.destroy(); resolve(null); });
+      } catch {
+        resolve(null);
       }
     });
   }
@@ -733,17 +860,52 @@ except Exception as e:
   // Model configuration
   // ------------------------------------------------------------------
 
+  _getConfigPath() {
+    const resPath = process.resourcesPath;
+    if (resPath && __dirname.includes('app.asar')) {
+      return path.join(resPath, 'scripts', 'openvino-model.json');
+    }
+    return path.join(__dirname, '../../scripts/openvino-model.json');
+  }
+
+  _readConfig() {
+    const configPath = this._getConfigPath();
+    try {
+      if (!fs.existsSync(configPath)) return {};
+      const parsed = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch (error) {
+      console.warn('[NpuBridge] Failed to read config:', error?.message || error);
+      return {};
+    }
+  }
+
   async configureModel(modelPath, options = {}) {
-    const configPath = path.join(__dirname, '../../scripts/openvino-model.json');
+    const configPath = this._getConfigPath();
+    const existingConfig = this._readConfig();
+    const device = String(options.device || existingConfig.device || 'NPU').trim() || 'NPU';
     const config = {
+      ...existingConfig,
       model_path: modelPath,
       tokenizer: options.tokenizer || modelPath,
-      device: options.device || 'NPU',
-      precision: options.precision || 'fp16'
+      device,
+      precision: options.precision || existingConfig.precision || 'fp16',
+      selected_by: options.selectedBy || 'manual',
+      selected_at: new Date().toISOString(),
     };
+    if (options.enableAutoStart !== undefined) {
+      config.auto_start = Boolean(options.enableAutoStart);
+    }
+
+    const isHybridDevice = /^(HETERO|MULTI|AUTO:)/i.test(device) || device.includes(',');
+    if (!isHybridDevice) {
+      config.hybrid_enabled = false;
+      config.hybrid_mode = null;
+    }
 
     try {
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+      this.invalidateStatusCache();
       console.log('[NpuBridge] Model configured:', config);
       return { success: true, config };
     } catch (error) {
@@ -758,7 +920,7 @@ except Exception as e:
   async autoConfigureModel(options = {}) {
     console.log('[NpuBridge] Auto-configuring NPU model...');
 
-    const configPath = path.join(__dirname, '../../scripts/openvino-model.json');
+    const configPath = this._getConfigPath();
     const forceReconfigure = Boolean(options.forceReconfigure);
     const context = this._buildSelectionContext(options);
 
@@ -773,6 +935,7 @@ except Exception as e:
           if (options.enableAutoStart !== undefined) {
             existing.auto_start = options.enableAutoStart;
             fs.writeFileSync(configPath, JSON.stringify(existing, null, 2));
+            this.invalidateStatusCache();
           }
 
           return {
@@ -832,6 +995,7 @@ except Exception as e:
 
     try {
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+      this.invalidateStatusCache();
       console.log('[NpuBridge] Auto-configured model:', selectedModel);
       return {
         configured: true,
@@ -855,7 +1019,7 @@ except Exception as e:
    * Set whether NPU server should auto-start on app launch
    */
   async setAutoStart(enabled) {
-    const configPath = path.join(__dirname, '../../scripts/openvino-model.json');
+    const configPath = this._getConfigPath();
 
     try {
       let config = { auto_start: enabled };
@@ -864,6 +1028,7 @@ except Exception as e:
         config.auto_start = enabled;
       }
       fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+      this.invalidateStatusCache();
       console.log('[NpuBridge] Auto-start set to:', enabled);
       return { success: true, autoStart: enabled };
     } catch (error) {
@@ -892,13 +1057,20 @@ except Exception as e:
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(postData)
           },
-          timeout: 120000
+          timeout: 300000
         }, (res) => {
           let data = '';
           res.on('data', chunk => data += chunk);
           res.on('end', () => {
             try {
-              resolve({ success: res.statusCode === 200, data: JSON.parse(data) });
+              const parsed = JSON.parse(data);
+              const ok = res.statusCode === 200 && parsed.status !== 'error';
+              this.invalidateStatusCache();
+              resolve({
+                success: ok,
+                data: parsed,
+                error: ok ? null : (parsed.error || `Server returned status ${res.statusCode}`),
+              });
             } catch {
               resolve({ success: false, error: data });
             }
@@ -908,10 +1080,50 @@ except Exception as e:
         req.on('error', (error) => resolve({ success: false, error: error.message }));
         req.on('timeout', () => {
           req.destroy();
-          resolve({ success: false, error: 'Model load timeout' });
+          resolve({ success: false, error: 'Model load timeout (5 min) — model may be downloading' });
         });
 
         req.write(postData);
+        req.end();
+      } catch (error) {
+        resolve({ success: false, error: error.message });
+      }
+    });
+  }
+
+  async unloadModel() {
+    return new Promise((resolve) => {
+      try {
+        const req = http.request(`${this.serverEndpoint}/models/unload`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': 0,
+          },
+          timeout: 20000,
+        }, (res) => {
+          let data = '';
+          res.on('data', (chunk) => { data += chunk; });
+          res.on('end', () => {
+            try {
+              const parsed = data ? JSON.parse(data) : {};
+              const ok = res.statusCode === 200 && parsed.status !== 'error';
+              this.invalidateStatusCache();
+              resolve({
+                success: ok,
+                data: parsed,
+                error: ok ? null : (parsed.error || `Server returned status ${res.statusCode}`),
+              });
+            } catch {
+              resolve({ success: false, error: data || `Server returned status ${res.statusCode}` });
+            }
+          });
+        });
+        req.on('error', (error) => resolve({ success: false, error: error.message }));
+        req.on('timeout', () => {
+          req.destroy();
+          resolve({ success: false, error: 'Model unload timeout' });
+        });
         req.end();
       } catch (error) {
         resolve({ success: false, error: error.message });
@@ -930,12 +1142,23 @@ except Exception as e:
     console.log('[NpuBridge] startServer called');
 
     if (this.serverProcess) {
-      const healthy = await this.checkServerHealth({ force: true });
-      if (healthy) {
-        console.log('[NpuBridge] Server already running');
-        return { success: true, message: 'Server already running' };
+      // Check if the managed process is still alive.
+      const processAlive = !this.serverProcess.killed && this.serverProcess.exitCode === null;
+      if (processAlive) {
+        // Process is still initializing — check health with a brief retry.
+        for (let attempt = 0; attempt < 3; attempt++) {
+          const healthy = await this.checkServerHealth({ force: true });
+          if (healthy) {
+            console.log('[NpuBridge] Server already running');
+            return { success: true, message: 'Server already running' };
+          }
+          await new Promise((r) => setTimeout(r, 2000));
+        }
+        // Process is alive but not healthy yet — don't spawn a duplicate.
+        console.log('[NpuBridge] Server process alive but not yet healthy; waiting...');
+        return { success: true, message: 'Server starting (process alive)' };
       }
-      // Stale process handle; clear it and continue with a fresh spawn.
+      // Process exited — stale handle.
       this.serverProcess = null;
     }
 
@@ -944,6 +1167,42 @@ except Exception as e:
       this.invalidateStatusCache();
       console.log('[NpuBridge] Detected external OpenVINO server');
       return { success: true, message: 'Server already running (external process)' };
+    }
+
+    // If health check failed but port is in use (zombie process), clear it aggressively.
+    if (process.platform === 'win32') {
+      try {
+        console.log('[NpuBridge] Checking for port 8081 conflicts...');
+        const { stdout } = await this._runCommand('netstat -ano | findstr :8081');
+        const lines = String(stdout || '').split(/\r?\n/).filter(Boolean);
+        const pids = new Set();
+        for (const line of lines) {
+          if (!line.includes('LISTENING') && !line.includes('ESTABLISHED')) continue;
+          const parts = line.trim().split(/\s+/);
+          const pid = parts[parts.length - 1];
+          if (pid && pid !== '0' && /^\d+$/.test(pid)) {
+            pids.add(pid);
+          }
+        }
+
+        for (const pid of pids) {
+          try {
+            console.log(`[NpuBridge] Killing conflicting process ${pid} on port 8081`);
+            await this._runCommand(`taskkill /F /PID ${pid}`);
+          } catch (killErr) {
+            console.warn(`[NpuBridge] Failed to kill PID ${pid}:`, killErr?.message);
+          }
+        }
+
+        if (pids.size > 0) {
+          await new Promise((r) => setTimeout(r, 600));
+        }
+      } catch (e) {
+        // Ignore "no match" cases, but keep visibility for unexpected errors.
+        if (!String(e?.message || '').includes('findstr')) {
+          console.warn('[NpuBridge] Port conflict check failed:', e?.message || e);
+        }
+      }
     }
 
     // Ensure installation is detected (sets pythonExecutable)
@@ -959,10 +1218,13 @@ except Exception as e:
 
     let serverScript = options.scriptPath || null;
 
+    const resPath = process.resourcesPath || null;
     const candidates = [
       path.join(__dirname, '../../scripts/start-npu-server.py'),
+      resPath ? path.join(resPath, 'scripts', 'start-npu-server.py') : null,
+      resPath ? path.join(resPath, 'app.asar.unpacked', 'scripts', 'start-npu-server.py') : null,
       path.join(__dirname, '../../python/openvino-server.py'),
-    ];
+    ].filter(Boolean);
 
     if (!serverScript) {
       serverScript = candidates.find((p) => fs.existsSync(p)) || candidates[0];
@@ -986,11 +1248,25 @@ except Exception as e:
     return new Promise((resolve) => {
       console.log('[NpuBridge] Spawning server process...');
 
+      let resolvedDevice = options.device;
+      if (!resolvedDevice) {
+        try {
+          const cfgPath = this._getConfigPath();
+          if (fs.existsSync(cfgPath)) {
+            const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf-8'));
+            if (cfg.hybrid_enabled && cfg.device) {
+              resolvedDevice = cfg.device;
+            }
+          }
+        } catch { /* ignore config read errors */ }
+        resolvedDevice = resolvedDevice || 'NPU';
+      }
+
       try {
         this.serverProcess = spawn(pythonCmd, [...pythonArgs, '-u', serverScript], {
           env: {
             ...process.env,
-            OPENVINO_DEVICE: options.device || 'NPU',
+            OPENVINO_DEVICE: resolvedDevice,
             PYTHONUNBUFFERED: '1'
           },
           stdio: ['pipe', 'pipe', 'pipe'],
@@ -1022,18 +1298,34 @@ except Exception as e:
         resolve({ success: true, pid: this.serverProcess?.pid });
       };
 
+      // Cap captured stdout/stderr so a long-lived NPU server doesn't leak
+      // memory through the `allOutput` / `allErrors` closure buffers. We keep
+      // the most recent MAX_OUTPUT_BUFFER_BYTES bytes, which is plenty for
+      // post-mortem diagnostics after a crash.
+      const MAX_OUTPUT_BUFFER_BYTES = 8 * 1024;
+      const MAX_LINE_LEN = 500;
+      const appendBounded = (existing, incoming) => {
+        const combined = existing + incoming;
+        if (combined.length <= MAX_OUTPUT_BUFFER_BYTES) return combined;
+        return combined.slice(combined.length - MAX_OUTPUT_BUFFER_BYTES);
+      };
+      const truncateLine = (line) => {
+        if (line.length <= MAX_LINE_LEN) return line;
+        return `${line.slice(0, MAX_LINE_LEN)} …[+${line.length - MAX_LINE_LEN} chars]`;
+      };
+
       this.serverProcess.stdout.on('data', (data) => {
         const output = data.toString();
-        allOutput += output;
-        console.log('[OpenVINO Server stdout]', output.trim());
+        allOutput = appendBounded(allOutput, output);
+        console.log('[OpenVINO Server stdout]', truncateLine(output.trim()));
         if (checkStarted(output)) onStarted();
       });
 
       this.serverProcess.stderr.on('data', (data) => {
         const errOutput = data.toString();
-        allErrors += errOutput;
+        allErrors = appendBounded(allErrors, errOutput);
         // uvicorn logs to stderr
-        console.log('[OpenVINO Server stderr]', errOutput.trim());
+        console.log('[OpenVINO Server stderr]', truncateLine(errOutput.trim()));
         if (checkStarted(errOutput)) onStarted();
       });
 
@@ -1053,14 +1345,22 @@ except Exception as e:
         }
       });
 
-      // Timeout
+      // Timeout: give the server enough time for first-run model load
+      // (OpenVINO can take 60-90s to compile / load a model on first start).
+      // Allow override via env var for power users / CI.
+      const timeoutMs = Number.parseInt(process.env.DEVFORGE_NPU_START_TIMEOUT_MS || '', 10) || 120000;
       setTimeout(() => {
         if (!started) {
-          console.error('[NpuBridge] Server start timeout');
+          const tailOut = (allOutput || '').trim().split(/\r?\n/).slice(-5).join(' | ');
+          const tailErr = (allErrors || '').trim().split(/\r?\n/).slice(-5).join(' | ');
+          console.error(`[NpuBridge] Server start timeout after ${timeoutMs}ms. stdout-tail: ${tailOut || '(empty)'} | stderr-tail: ${tailErr || '(empty)'}`);
           this.stopServer();
-          resolve({ success: false, error: 'Server start timeout - check if all dependencies are installed' });
+          resolve({
+            success: false,
+            error: `Server start timeout after ${Math.round(timeoutMs / 1000)}s - model may be loading for the first time, or dependencies are missing. Last output: ${(tailErr || tailOut || '(no output)').substring(0, 300)}`,
+          });
         }
-      }, 30000);
+      }, timeoutMs);
     });
   }
 
@@ -1102,8 +1402,8 @@ except Exception as e:
         {
           step: 3,
           title: 'Install Python bindings',
-          description: 'Run: pip install openvino',
-          command: 'pip install openvino'
+          description: 'Run DevForge setup script (installs OpenVINO + server deps).',
+          command: 'powershell -ExecutionPolicy Bypass -File .\\scripts\\setup-openvino.ps1'
         },
         {
           step: 4,
@@ -1119,6 +1419,232 @@ except Exception as e:
       ],
       driverUrl: 'https://www.intel.com/content/www/us/en/download/794734/intel-npu-driver-windows.html'
     };
+  }
+
+  // ------------------------------------------------------------------
+  // Hybrid GPU+NPU unified inference
+  // ------------------------------------------------------------------
+
+  _getHybridCapabilitiesSync() {
+    const hasNpu = this.devices.some(d => /^NPU/i.test(d.id));
+    const hasGpu = this.devices.some(d => /^GPU/i.test(d.id));
+    const hasCpu = this.devices.some(d => /^CPU/i.test(d.id));
+
+    const canHetero = hasNpu && hasGpu;
+    const canAuto = hasNpu || hasGpu;
+
+    const modes = [];
+    if (canHetero) {
+      modes.push({
+        id: 'hetero-gpu-npu',
+        device: 'HETERO:GPU,NPU',
+        label: 'Unified Brain',
+        description: 'One model split across GPU + NPU as a single pipeline. The GPU handles heavy attention/matmul layers, the NPU handles lighter normalization/activation layers. Two chips, one brain.',
+        recommended: true,
+      });
+      modes.push({
+        id: 'multi-gpu-npu',
+        device: 'MULTI:GPU,NPU',
+        label: 'Throughput Mode',
+        description: 'Distributes separate requests across GPU and NPU for higher parallel throughput on batched workloads.',
+        recommended: false,
+      });
+    }
+    if (canAuto) {
+      const autoDevices = [hasGpu ? 'GPU' : null, hasNpu ? 'NPU' : null, 'CPU'].filter(Boolean);
+      modes.push({
+        id: 'auto-all',
+        device: `AUTO:${autoDevices.join(',')}`,
+        label: 'Smart Routing',
+        description: 'OpenVINO picks the best device per-layer based on runtime profiling data collected on first run.',
+        recommended: !canHetero,
+      });
+    }
+    if (hasNpu) {
+      modes.push({ id: 'npu-only', device: 'NPU', label: 'NPU Only', description: 'Dedicated NPU inference.', recommended: false });
+    }
+    if (hasGpu) {
+      modes.push({ id: 'gpu-only', device: 'GPU', label: 'Intel GPU Only', description: 'Intel integrated/discrete GPU inference.', recommended: false });
+    }
+
+    return {
+      available: canHetero || canAuto,
+      canHetero,
+      canAuto,
+      devices: this.devices,
+      modes,
+      recommended: modes.find(m => m.recommended) || modes[0] || null,
+    };
+  }
+
+  async getHybridCapabilities() {
+    await this.queryDevices();
+    return this._getHybridCapabilitiesSync();
+  }
+
+  async enableHybridMode(modeId) {
+    // --- Step 1: Verify hardware ---
+    const caps = await this.getHybridCapabilities();
+    if (!caps.available) {
+      return { success: false, error: 'No hybrid-capable devices detected. Need at least Intel GPU + NPU.', setupRequired: false };
+    }
+
+    const mode = caps.modes.find(m => m.id === modeId) || caps.recommended;
+    if (!mode) {
+      return { success: false, error: `Unknown hybrid mode: ${modeId}` };
+    }
+
+    console.log(`[NpuBridge] Enabling hybrid mode: ${mode.id} (${mode.device})`);
+
+    // --- Step 2: Ensure OpenVINO is installed (auto-fix) ---
+    await this.checkOpenVinoInstallation({ force: true });
+    if (!this.openvinoInstalled) {
+      console.log('[NpuBridge] OpenVINO not installed — attempting auto-setup...');
+      try {
+        const appPath = require('electron')?.app?.getAppPath?.() || path.join(__dirname, '../..');
+        const { runOpenVinoSetup } = require('./npu-setup');
+        const setupResult = await runOpenVinoSetup(appPath);
+        if (setupResult?.success) {
+          this.clearAllCaches();
+          await this.checkOpenVinoInstallation({ force: true });
+        }
+      } catch (setupErr) {
+        console.warn('[NpuBridge] Auto-setup failed:', setupErr?.message);
+      }
+      if (!this.openvinoInstalled) {
+        return { success: false, error: 'OpenVINO is not installed. Please run OpenVINO Setup first.', setupRequired: true };
+      }
+    }
+
+    // --- Step 3: Read/create config and ensure a model is configured ---
+    const configPath = this._getConfigPath();
+    let config = {};
+    try {
+      if (fs.existsSync(configPath)) {
+        config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      }
+    } catch { /* start fresh */ }
+
+    const hasModel = this._looksLikeModelIdentifier(String(config.model_path || config.model_id || '').trim());
+    if (!hasModel) {
+      console.log('[NpuBridge] No model configured — running autoConfigureModel...');
+      try {
+        const autoResult = await this.autoConfigureModel({ device: mode.device });
+        if (autoResult?.configured && autoResult.model) {
+          config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+          console.log('[NpuBridge] Auto-configured model:', autoResult.model);
+        } else {
+          console.warn('[NpuBridge] Auto-configure found no model:', autoResult?.error);
+        }
+      } catch (autoErr) {
+        console.warn('[NpuBridge] autoConfigureModel failed:', autoErr?.message);
+      }
+    }
+
+    // --- Step 4: Write hybrid config ---
+    config.device = mode.device;
+    config.hybrid_mode = mode.id;
+    config.hybrid_enabled = true;
+    config.auto_start = true;
+
+    try {
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    } catch (err) {
+      return { success: false, error: `Failed to write config: ${err.message}` };
+    }
+
+    // --- Step 5: Restart server with hybrid device ---
+    const wasRunning = await this.checkServerHealth({ force: true });
+    if (wasRunning) {
+      console.log('[NpuBridge] Restarting server with hybrid device:', mode.device);
+      await this.stopServer();
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
+    const startResult = await this.startServer({ device: mode.device });
+    this.invalidateStatusCache();
+
+    // --- Step 6: Load model and report real status ---
+    let modelLoaded = false;
+    let modelError = null;
+    const modelPath = String(config.model_path || config.model_id || '').trim();
+
+    if (startResult.success && modelPath) {
+      try {
+        const loadResult = await this.loadModel(modelPath, {
+          device: mode.device,
+          tokenizer: config.tokenizer || modelPath,
+          precision: config.precision || 'fp16',
+        });
+        modelLoaded = loadResult?.success === true;
+        if (!modelLoaded) {
+          modelError = loadResult?.error || 'Model failed to load';
+          console.warn('[NpuBridge] Model load after hybrid switch failed:', modelError);
+        }
+      } catch (loadErr) {
+        modelError = loadErr?.message || 'Model load exception';
+        console.warn('[NpuBridge] Model load exception after hybrid switch:', modelError);
+      }
+    } else if (startResult.success && !modelPath) {
+      modelError = 'No model configured. Download an OpenVINO-compatible model first.';
+    }
+
+    return {
+      success: startResult.success,
+      mode,
+      device: mode.device,
+      modelLoaded,
+      modelError,
+      error: startResult.success ? null : startResult.error,
+    };
+  }
+
+  async disableHybridMode() {
+    const configPath = this._getConfigPath();
+    let config = {};
+    try {
+      if (fs.existsSync(configPath)) {
+        config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+      }
+    } catch { /* start fresh */ }
+
+    const previousDevice = config.device;
+    config.device = this.npuAvailable ? 'NPU' : 'AUTO';
+    config.hybrid_mode = null;
+    config.hybrid_enabled = false;
+
+    try {
+      fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+    } catch (err) {
+      return { success: false, error: `Failed to write config: ${err.message}` };
+    }
+
+    if (previousDevice !== config.device) {
+      const wasRunning = await this.checkServerHealth({ force: true });
+      if (wasRunning) {
+        await this.stopServer();
+        await new Promise(r => setTimeout(r, 1000));
+        await this.startServer({ device: config.device });
+      }
+    }
+
+    this.invalidateStatusCache();
+    return { success: true, device: config.device };
+  }
+
+  getHybridStatus() {
+    const configPath = this._getConfigPath();
+    try {
+      if (fs.existsSync(configPath)) {
+        const config = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+        return {
+          enabled: Boolean(config.hybrid_enabled),
+          mode: config.hybrid_mode || null,
+          device: config.device || 'NPU',
+        };
+      }
+    } catch { /* noop */ }
+    return { enabled: false, mode: null, device: 'NPU' };
   }
 
   // ------------------------------------------------------------------
@@ -1138,9 +1664,17 @@ except Exception as e:
     this.openvinoInstalled = false;
     this.npuAvailable = false;
     this.openvinoPath = null;
-    this.pythonExecutable = 'python';
-    this.pythonArgs = [];
     this.devices = [];
+
+    // Preserve pinned python if set via env var (setup pins these).
+    const pinnedPython = process.env.OPENVINO_PYTHON;
+    if (pinnedPython && fs.existsSync(pinnedPython)) {
+      this.pythonExecutable = pinnedPython;
+      this.pythonArgs = [];
+    } else {
+      this.pythonExecutable = 'python';
+      this.pythonArgs = [];
+    }
   }
 }
 

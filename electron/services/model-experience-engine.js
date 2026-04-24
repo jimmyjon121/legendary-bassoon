@@ -400,6 +400,51 @@ class ModelExperienceEngine {
   setAntiHallucinationMode(enabled) {
     this.antiHallucinationMode = enabled;
   }
+
+  /**
+   * Apply character evolution to a system prompt and inference options.
+   *
+   * The evolution service provides a per-character trait delta versioned
+   * and reversible by the user. We compose the "current" trait state into
+   * an additive hint that sits after the base system prompt so it never
+   * replaces the author's voice, only nudges it.
+   *
+   * This method is side-effect free: it reads the DB via the provided
+   * `getDb` and returns a new object. The caller decides whether to use
+   * the result (we keep the feature opt-in by default).
+   */
+  applyCharacterEvolution({ getDb, characterId, systemPrompt = '', options = {} } = {}) {
+    if (!characterId || typeof getDb !== 'function') {
+      return { systemPrompt, options, applied: false };
+    }
+    let evolution;
+    try {
+      evolution = require('./character-evolution');
+    } catch (_) {
+      return { systemPrompt, options, applied: false };
+    }
+    let state;
+    try { state = evolution.getCurrentTraitState({ getDb, characterId }); }
+    catch (_) { return { systemPrompt, options, applied: false }; }
+    if (!state?.success || !state.version) {
+      return { systemPrompt, options, applied: false };
+    }
+    const traits = state.traitState || {};
+    const hintLines = [];
+    if (state.summary) hintLines.push(`[Character evolution v${state.version}] ${state.summary}`);
+    if (Array.isArray(traits.added) && traits.added.length) {
+      hintLines.push(`Recent growth: ${traits.added.slice(0, 8).join('; ')}`);
+    }
+    if (Array.isArray(traits.removed) && traits.removed.length) {
+      hintLines.push(`No longer: ${traits.removed.slice(0, 8).join('; ')}`);
+    }
+    if (traits.voiceShift) hintLines.push(`Voice shift: ${String(traits.voiceShift).slice(0, 400)}`);
+    const hint = hintLines.join('\n');
+    const nextPrompt = hint
+      ? `${systemPrompt ? `${systemPrompt}\n\n` : ''}${hint}`
+      : systemPrompt;
+    return { systemPrompt: nextPrompt, options: { ...options }, applied: Boolean(hint), version: state.version };
+  }
 }
 
 // Singleton instance

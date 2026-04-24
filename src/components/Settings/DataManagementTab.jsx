@@ -10,10 +10,8 @@ import {
   Image, Zap, Clock, Archive, Shield, ChevronRight, ExternalLink
 } from 'lucide-react';
 import { safeCall, isElectron } from '../../utils/electronAPI';
-import { useSoulStore } from '../../stores/soulStore';
 
 export function DataManagementTab() {
-  const { ledgerStats } = useSoulStore();
   const [storageStats, setStorageStats] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
   const [isClearing, setIsClearing] = useState(false);
@@ -263,6 +261,9 @@ export function DataManagementTab() {
         </div>
       </div>
 
+      {/* Vault Dead Switch */}
+      <VaultDeadSwitchSection />
+
       {/* Privacy Note */}
       <div className="p-4 rounded-xl bg-forge-bg border border-forge-border">
         <div className="flex items-start gap-3">
@@ -274,6 +275,144 @@ export function DataManagementTab() {
               Your conversations, analytics, and learning data remain completely private.
             </p>
           </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * VaultDeadSwitchSection
+ *
+ * User-controlled "nuclear option" for the vault workspace.
+ * Two-step confirmation: request code → type it back → execute.
+ * Securely overwrites vault files and wipes the vault password hash.
+ */
+function VaultDeadSwitchSection() {
+  const [code, setCode] = useState(null);
+  const [input, setInput] = useState('');
+  const [expiresAt, setExpiresAt] = useState(null);
+  const [isRunning, setIsRunning] = useState(false);
+  const [lastReport, setLastReport] = useState(null);
+  const [error, setError] = useState(null);
+
+  const handlePrepare = async () => {
+    setError(null);
+    setLastReport(null);
+    try {
+      const res = await safeCall('vaultDeadSwitchPrepare', [], null);
+      if (!res?.success || !res.code) {
+        setError(res?.error || 'Failed to prepare dead switch');
+        return;
+      }
+      setCode(res.code);
+      setExpiresAt(res.expiresAt);
+      setInput('');
+    } catch (e) {
+      setError(e?.message || 'Unavailable');
+    }
+  };
+
+  const handleCancel = async () => {
+    try { await safeCall('vaultDeadSwitchCancel', [], null); } catch (_) { /* noop */ }
+    setCode(null);
+    setInput('');
+    setExpiresAt(null);
+  };
+
+  const handleExecute = async () => {
+    if (!input || input.trim().length === 0) return;
+    setIsRunning(true);
+    setError(null);
+    try {
+      const res = await safeCall('vaultDeadSwitchExecute', [input.trim()], null);
+      if (!res?.success) {
+        setError(res?.error || 'Dead switch failed');
+        setIsRunning(false);
+        return;
+      }
+      setLastReport(res.report || { timestamp: new Date().toISOString() });
+      setCode(null);
+      setInput('');
+      setExpiresAt(null);
+    } catch (e) {
+      setError(e?.message || 'Dead switch failed');
+    } finally {
+      setIsRunning(false);
+    }
+  };
+
+  if (!isElectron()) return null;
+
+  return (
+    <div className="p-4 rounded-xl bg-forge-bg border border-status-error/40">
+      <div className="flex items-start gap-3">
+        <AlertTriangle size={20} className="text-status-error flex-shrink-0 mt-0.5" />
+        <div className="flex-1 min-w-0">
+          <h4 className="text-sm font-medium text-text-primary">Vault Dead Switch</h4>
+          <p className="text-xs text-text-muted mt-1">
+            Securely overwrites and deletes all vault conversations, vault attachments, private model files, and the vault password hash on this machine.
+            This action is immediate, irreversible, and leaves non-vault data untouched.
+          </p>
+          {lastReport && (
+            <div className="mt-3 p-3 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-xs text-emerald-300">
+              Vault wipe completed at {new Date(lastReport.timestamp).toLocaleString()}.
+              {Array.isArray(lastReport.wiped) && ` ${lastReport.wiped.length} file(s) overwritten.`}
+            </div>
+          )}
+          {error && (
+            <div className="mt-3 p-3 rounded-lg bg-status-error/10 border border-status-error/30 text-xs text-status-error">
+              {error}
+            </div>
+          )}
+          {!code && (
+            <button
+              onClick={handlePrepare}
+              className="mt-3 flex items-center gap-2 px-3 py-1.5 rounded-lg bg-status-error/20 text-status-error text-xs hover:bg-status-error/30 transition-colors"
+            >
+              <Trash2 size={12} />
+              Request Dead Switch Code
+            </button>
+          )}
+          {code && (
+            <div className="mt-3 space-y-2">
+              <p className="text-xs text-text-secondary">
+                Confirmation code (valid 5 min):
+              </p>
+              <code className="block p-2 rounded bg-black/40 text-status-error font-mono tracking-widest text-center select-all">
+                {code}
+              </code>
+              <p className="text-xs text-text-muted">
+                Type the code above to confirm. Click Cancel to abort.
+              </p>
+              <input
+                type="text"
+                value={input}
+                onChange={(e) => setInput(e.target.value.toUpperCase())}
+                placeholder="Type confirmation code"
+                autoComplete="off"
+                spellCheck={false}
+                className="w-full px-3 py-2 rounded-lg bg-forge-surface border border-forge-border text-text-primary text-sm font-mono tracking-widest"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={handleCancel}
+                  disabled={isRunning}
+                  className="px-3 py-1.5 rounded-lg bg-forge-surface border border-forge-border text-text-secondary text-xs hover:bg-forge-hover transition-colors disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleExecute}
+                  disabled={isRunning || !input || input.trim().length === 0}
+                  className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-status-error text-white text-xs hover:bg-status-error/80 transition-colors disabled:opacity-50"
+                >
+                  <AlertTriangle size={12} />
+                  {isRunning ? 'Wiping...' : 'Execute Dead Switch'}
+                </button>
+              </div>
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -341,6 +480,5 @@ function DataCategory({ icon: Icon, title, description, count, onExport, onClear
 }
 
 export default DataManagementTab;
-
 
 

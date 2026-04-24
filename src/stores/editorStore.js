@@ -301,6 +301,7 @@ export const useEditorStore = create((set, get) => ({
   async scanProject(rootPath) {
     set({ isScanning: true, error: null });
     try {
+      await api.grantFsRoot(rootPath, 'editor-project-root');
       const result = await api.scanProject(rootPath, { maxDepth: 6 });
       set({
         rootPath: result?.root || rootPath,
@@ -325,7 +326,7 @@ export const useEditorStore = create((set, get) => ({
     
     const filePath = `${rootPath}/${fileName}`.replace(/\\/g, '/');
     try {
-      await api.writeFile(filePath, '');
+      await api.writeFileScoped(filePath, '', rootPath);
       // Rescan to pick up new file
       await get().scanProject(rootPath);
       // Open the new file
@@ -344,7 +345,7 @@ export const useEditorStore = create((set, get) => ({
     
     const folderPath = `${rootPath}/${folderName}`.replace(/\\/g, '/');
     try {
-      await api.createFolder(folderPath);
+      await api.createFolderScoped(folderPath, rootPath);
       // Rescan to pick up new folder
       await get().scanProject(rootPath);
       return folderPath;
@@ -362,7 +363,7 @@ export const useEditorStore = create((set, get) => ({
       return;
     }
     try {
-      const content = await api.readFile(path);
+      const content = await api.readFileScoped(path, get().rootPath || null);
       set((state) => ({
         activeFilePath: path,
         openFiles: {
@@ -509,10 +510,10 @@ export const useEditorStore = create((set, get) => ({
   },
 
   async saveActiveFile() {
-    const { activeFilePath, openFiles } = get();
+    const { activeFilePath, openFiles, rootPath } = get();
     if (!activeFilePath || !openFiles[activeFilePath]) return;
     try {
-      await api.writeFile(activeFilePath, openFiles[activeFilePath].content);
+      await api.writeFileScoped(activeFilePath, openFiles[activeFilePath].content, rootPath || null);
       set({
         openFiles: {
           ...openFiles,
@@ -555,4 +556,3 @@ export const useEditorStore = create((set, get) => ({
 }));
 
 export default useEditorStore;
-

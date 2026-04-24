@@ -2,11 +2,12 @@ import React, { useEffect, useState } from 'react';
 import { GitBranch, RefreshCw, AlertTriangle } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore';
 import gitService from '../../services/gitService';
+import { shallow } from 'zustand/shallow';
 
 export function GitPanel() {
   const { rootPath } = useEditorStore((state) => ({
     rootPath: state.rootPath,
-  }));
+  }), shallow);
   const [status, setStatus] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
 

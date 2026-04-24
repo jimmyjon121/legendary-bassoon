@@ -124,7 +124,7 @@ export function CharacterChat({ character, isOpen, onClose }) {
                 Chat with {character.display_name || character.name}
               </h2>
               <p className="text-[11px] text-text-muted">
-                Private, local-only character conversation (uses current LLM model).
+                Local, vault-only character conversation (uses current LLM model).
               </p>
             </div>
             <button

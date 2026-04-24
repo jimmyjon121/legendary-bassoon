@@ -1,23 +1,69 @@
 import React, { useEffect, useState } from 'react';
 import { useAppStore } from '../../stores/appStore';
 
+const PRESET_LIMITS = {
+  temperature: { min: 0, max: 2 },
+  top_p: { min: 0, max: 1 },
+  top_k: { min: 1, max: 2000 },
+  context_length: { min: 256, max: 262144 },
+};
+
+function clampNumber(value, min, max, fallback) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric)) return fallback;
+  return Math.min(max, Math.max(min, numeric));
+}
+
+function isSyntheticNpuModel(modelName = '') {
+  return String(modelName || '').trim().toLowerCase().startsWith('npu:');
+}
+
+function formatModelOptionLabel(modelName = '') {
+  const raw = String(modelName || '').trim();
+  if (!isSyntheticNpuModel(raw)) return raw;
+  const target = raw.slice(4).trim();
+  const parts = target.split(/[\\/]/).filter(Boolean);
+  const displayName = parts[parts.length - 1] || target || 'NPU model';
+  return `${displayName} (OpenVINO)`;
+}
+
 export function ModelPresets() {
-  const { currentModel, availableModels, currentWorkspace } = useAppStore();
+  const currentModel = useAppStore((s) => s.currentModel);
+  const availableModels = useAppStore((s) => s.availableModels);
+  const currentWorkspace = useAppStore((s) => s.currentWorkspace);
   const [selectedModel, setSelectedModel] = useState(currentModel || null);
   const [preset, setPreset] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState(null);
 
-  const modelNames =
-    availableModels?.map((m) =>
-      typeof m === 'string' ? m : m.name || m.model || m.id,
-    ) || [];
+  const modelNames = React.useMemo(() => {
+    const names = [];
+    const push = (value) => {
+      const normalized = String(value || '').trim();
+      if (normalized && !names.includes(normalized)) {
+        names.push(normalized);
+      }
+    };
+
+    push(currentModel);
+    (availableModels || []).forEach((model) => {
+      push(typeof model === 'string' ? model : model?.name || model?.model || model?.id);
+    });
+
+    return names;
+  }, [availableModels, currentModel]);
 
   useEffect(() => {
     if (!selectedModel && modelNames.length > 0) {
       setSelectedModel(modelNames[0]);
     }
   }, [modelNames, selectedModel]);
+
+  useEffect(() => {
+    if (currentModel && currentModel !== selectedModel) {
+      setSelectedModel(currentModel);
+    }
+  }, [currentModel, selectedModel]);
 
   useEffect(() => {
     const load = async () => {
@@ -51,9 +97,30 @@ export function ModelPresets() {
   }, [selectedModel, currentWorkspace]);
 
   const handleChange = (field, value) => {
+    let normalizedValue = value;
+    if (field === 'temperature') {
+      normalizedValue = clampNumber(value, PRESET_LIMITS.temperature.min, PRESET_LIMITS.temperature.max, 0.7);
+    } else if (field === 'top_p') {
+      normalizedValue = clampNumber(value, PRESET_LIMITS.top_p.min, PRESET_LIMITS.top_p.max, 0.9);
+    } else if (field === 'top_k') {
+      normalizedValue = Math.round(
+        clampNumber(value, PRESET_LIMITS.top_k.min, PRESET_LIMITS.top_k.max, 40),
+      );
+    } else if (field === 'context_length') {
+      if (value == null || value === '') {
+        normalizedValue = null;
+      } else {
+        normalizedValue = Math.round(
+          clampNumber(value, PRESET_LIMITS.context_length.min, PRESET_LIMITS.context_length.max, 4096),
+        );
+      }
+    } else if (field === 'system_prompt') {
+      normalizedValue = String(value || '').slice(0, 8000);
+    }
+
     setPreset((prev) => ({
       ...(prev || {}),
-      [field]: value,
+      [field]: normalizedValue,
       model_name: selectedModel,
     }));
   };
@@ -127,7 +194,7 @@ export function ModelPresets() {
         >
           {modelNames.map((name) => (
             <option key={name} value={name}>
-              {name}
+              {formatModelOptionLabel(name)}
             </option>
           ))}
         </select>
@@ -240,5 +307,3 @@ export function ModelPresets() {
 }
 
 export default ModelPresets;
-
-

@@ -444,6 +444,15 @@ class OllamaLibraryProvider {
     return 'chat';
   }
 
+  normalizeCapability(capability = '', { id = '', description = '', tags = [] } = {}) {
+    const lower = String(capability || '').trim().toLowerCase();
+    if (lower === 'coding') return 'code';
+    if (lower === 'multimodal') return 'vision';
+    if (lower === 'roleplay' || lower === 'erotica' || lower === 'storytelling') return 'creative';
+    if (lower) return lower;
+    return this.inferCapability({ id, description, tags });
+  }
+
   parseParamsFromTag(tag = '') {
     const lower = String(tag).toLowerCase().trim();
     const moe = lower.match(/(\d+)x(\d+(\.\d+)?)b/);
@@ -490,6 +499,11 @@ class OllamaLibraryProvider {
             ...model,
             id,
             name: model.name || this.toDisplayName(id),
+            capability: this.normalizeCapability(model.capability, {
+              id,
+              description: model.description || '',
+              tags: model.tags || [],
+            }),
             tags: Array.from(new Set(model.tags || [])),
             variants: Array.isArray(model.variants) ? model.variants : [],
           });
@@ -512,7 +526,11 @@ class OllamaLibraryProvider {
             ? existing.description
             : model.description,
           family: existing.family || model.family || this.detectFamily(id),
-          capability: existing.capability || model.capability || this.inferCapability({ id, description: model.description || existing.description || '', tags: mergedTags }),
+          capability: this.normalizeCapability(existing.capability || model.capability, {
+            id,
+            description: model.description || existing.description || '',
+            tags: mergedTags,
+          }),
           pulls: Math.max(existing.pulls || 0, model.pulls || 0),
           variants: mergedVariants.sort((a, b) => (a.vram || 999) - (b.vram || 999)),
           tags: mergedTags,
@@ -524,12 +542,13 @@ class OllamaLibraryProvider {
     return Array.from(byId.values());
   }
 
-  async getRemoteLibraryModels(sort = 'popular') {
-    const cacheKey = `ollama:library:${sort}`;
+  async getRemoteLibraryModels(sort = 'popular', page = 1) {
+    const cacheKey = `ollama:library:${sort}:${page}`;
     const cached = this.getFromCache(cacheKey);
     if (cached) return cached;
 
-    const html = await this.fetchText(`${this.baseUrl}/library?sort=${encodeURIComponent(sort)}`);
+    const url = `${this.baseUrl}/library?sort=${encodeURIComponent(sort)}${page > 1 ? `&page=${page}` : ''}`;
+    const html = await this.fetchText(url);
     const cards = html.match(/<li x-test-model[\s\S]*?<\/li>/g) || [];
     const parsed = cards.map((card) => {
       const idMatch = card.match(/href="\/library\/([^"/?#]+)"/i);
@@ -550,7 +569,7 @@ class OllamaLibraryProvider {
         .filter(Boolean);
       const variants = sizeTags.map((tag) => this.estimateVariant(tag));
       const description = this.decodeHtml(descMatch?.[1] || '');
-      const capability = this.inferCapability({ id, description, tags: [...capabilityTags, ...sizeTags] });
+      const capability = this.normalizeCapability('', { id, description, tags: [...capabilityTags, ...sizeTags] });
 
       let updated = null;
       if (updatedTitleMatch?.[1]) {
@@ -581,14 +600,20 @@ class OllamaLibraryProvider {
 
   async getCatalogModels(options = {}) {
     const sort = options.sort || 'popular';
-    const remote = await this.getRemoteLibraryModels(sort).catch(() => []);
+    const page = options.page || 1;
+    const remote = await this.getRemoteLibraryModels(sort, page).catch(() => []);
+    
+    if (page > 1) {
+      // For pages > 1, don't merge in official/vision models again to avoid duplicates
+      return this.mergeModels(remote);
+    }
     return this.mergeModels(this.officialModels, this.visionModels, remote);
   }
 
   async searchModels(query, options = {}) {
-    const { filter = 'all' } = options;
+    const { filter = 'all', page = 1 } = options;
     const lowerQuery = (query || '').toLowerCase();
-    let models = await this.getCatalogModels({ sort: options.sort || 'popular' });
+    let models = await this.getCatalogModels({ sort: options.sort || 'popular', page });
 
     if (filter && filter !== 'all') {
       models = models.filter((m) => {
@@ -1393,15 +1418,22 @@ class ModelProvidersService extends EventEmitter {
   /**
    * Get provider-specific models
    */
-  async getOllamaModels(category = 'popular') {
+  async getOllamaModels(category = 'popular', options = {}) {
+    const page = options.page || 1;
+    const refresh = options.refresh === true;
+
+    if (refresh) {
+      this.ollama.cache.clear();
+    }
+
     switch (category) {
       case 'popular':
         // Return a broader list so the hub exposes more than the original curated set.
         return this.ollama.getPopularModels(120);
       case 'all':
-        return this.ollama.getCatalogModels({ sort: 'popular' });
+        return this.ollama.getCatalogModels({ sort: 'popular', page });
       case 'newest':
-        return this.ollama.getCatalogModels({ sort: 'newest' });
+        return this.ollama.getCatalogModels({ sort: 'newest', page });
       case 'vision':
         return this.ollama.getVisionModels();
       case 'code':
@@ -1409,7 +1441,7 @@ class ModelProvidersService extends EventEmitter {
       case 'chat':
         return this.ollama.getChatModels();
       default:
-        return this.ollama.searchModels('', { filter: category });
+        return this.ollama.searchModels('', { filter: category, page });
     }
   }
 
@@ -1471,118 +1503,938 @@ class ModelProvidersService extends EventEmitter {
   async getPrivateVaultModels() {
     // Comprehensive NSFW model database - all types
     const nsfwModels = {
+      creators: {
+        'huihui_ai': {
+          name: 'huihui_ai',
+          bio: 'The undisputed king of abliteration. Systematically removes safety alignment from every major model family the moment they drop. If a new model exists, huihui_ai has already abliterated it.',
+          specialty: 'Abliteration specialist',
+          notable: 'Qwen 3.5, Qwen 3, Gemma 3, GLM, GPT-OSS — all abliterated',
+        },
+        'Eric Hartford': {
+          name: 'Eric Hartford (cognitivecomputations)',
+          bio: 'The godfather of uncensored AI. Created the Dolphin family, the Samantha companion series, and literally wrote the blog post "Uncensored Models" that started the entire movement.',
+          specialty: 'Uncensored model training & the Dolphin family',
+          notable: 'Dolphin 3.0, Dolphin Mixtral, Samantha, WizardLM Uncensored, DolphinCoder',
+        },
+        'Nous Research': {
+          name: 'Nous Research',
+          bio: 'Independent AI lab producing some of the highest-quality open models. Their Hermes series follows complex instructions without content restrictions, excelling at scientific and creative tasks.',
+          specialty: 'High-quality unrestricted instruction models',
+          notable: 'Nous Hermes 2, Nous Hermes 2 Mixtral, OpenHermes',
+        },
+        'Teknium': {
+          name: 'Teknium',
+          bio: 'Co-founder of Nous Research and creator of the OpenHermes dataset. Models trained on massive synthetic datasets that teach instruction-following without safety refusals.',
+          specialty: 'Dataset curation & instruction-tuning',
+          notable: 'OpenHermes 2.5',
+        },
+        'Gryphe': {
+          name: 'Gryphe',
+          bio: 'Creator of the legendary MythoMax merged model, the community favorite for creative fiction and adult roleplay. Known for innovative model merging techniques.',
+          specialty: 'Model merging for creative writing',
+          notable: 'MythoMax L2 13B, MythOrc',
+        },
+        'Jon Durbin': {
+          name: 'Jon Durbin (jondurbin)',
+          bio: 'Creator of the Airoboros series — GPT-4 quality reasoning distilled into local models without content restrictions. Known for high-quality synthetic datasets.',
+          specialty: 'GPT-4 distillation & reasoning',
+          notable: 'Airoboros L2, Airoboros 33B',
+        },
+        'TheBloke': {
+          name: 'TheBloke (Tom Jobbins)',
+          bio: 'The legendary quantizer. Single-handedly made hundreds of models accessible by providing GGUF quantizations optimized for consumer hardware. A pillar of local AI.',
+          specialty: 'GGUF quantization for consumer hardware',
+          notable: 'Quantized versions of virtually every popular uncensored model',
+        },
+        'PygmalionAI': {
+          name: 'PygmalionAI',
+          bio: 'Community-driven project building the best conversational and roleplay AI. Models trained on dialogue data for character-based interactions without content filters.',
+          specialty: 'Roleplay & character-based conversation',
+          notable: 'Pygmalion, Metharme, Mythalion',
+        },
+        'KoboldAI': {
+          name: 'KoboldAI',
+          bio: 'Community project originally built for AI-assisted creative writing. Models and tools designed for long-form storytelling with zero content restrictions.',
+          specialty: 'AI-assisted creative fiction & storytelling',
+          notable: 'Holomax, Erebus',
+        },
+        'Community': {
+          name: 'Open Source Community',
+          bio: 'Independent developers, researchers, and enthusiasts who believe AI should be free from corporate censorship. Models from individual contributors pushing boundaries.',
+          specialty: 'Decentralized innovation',
+          notable: 'Various independent uncensored and derestricted models',
+        },
+      },
       text: [
-        // Uncensored Chat Models
+        // ═══════════════════════════════════════════════════════════════════
+        //  NEXT-GEN ABLITERATED — latest models with safety layers ripped out
+        // ═══════════════════════════════════════════════════════════════════
         {
-          id: 'wizard-vicuna-uncensored',
-          name: 'Wizard Vicuna Uncensored',
-          description: 'Completely uncensored conversational model. No content filters, no restrictions. Perfect for unrestricted roleplay and adult content.',
-          author: 'Cognitive Computations',
-          family: 'Vicuna',
+          id: 'huihui_ai/qwen3.5-abliterated',
+          name: 'Qwen 3.5 Abliterated',
+          description: 'THE NEWEST AND BEST. Alibaba\'s Qwen 3.5 with all safety alignment surgically removed by huihui_ai. Multimodal vision, tool calling, deep thinking — and absolutely zero refusals. This is the bleeding edge of uncensored AI.',
+          author: 'huihui_ai',
+          creator: 'huihui_ai',
+          family: 'Qwen 3.5',
           capability: 'chat',
           type: 'text',
           variants: [
-            { tag: '13b', params: '13B', size: 7.4, vram: 10 },
-            { tag: '30b', params: '30B', size: 17, vram: 22 },
+            { tag: '0.8b', params: '0.8B', size: 0.5, vram: 2, recommended: false },
+            { tag: '2b', params: '2B', size: 1.5, vram: 3 },
+            { tag: '27b', params: '27B', size: 16, vram: 20, recommended: true },
+            { tag: '35b', params: '35B', size: 20, vram: 24 },
           ],
-          tags: ['uncensored', 'roleplay', 'nsfw', 'no-filter'],
-          pulls: 800000,
+          tags: ['abliterated', 'uncensored', 'vision', 'tools', 'thinking', 'brand-new', 'no-refusals'],
+          pulls: 21800,
+          source: 'ollama',
+        },
+        {
+          id: 'huihui_ai/qwen3-abliterated',
+          name: 'Qwen 3 Abliterated',
+          description: 'The entire Qwen 3 family with safety ripped out. From tiny 0.6B to the monstrous 235B MoE — every size, zero censorship. Tool calling, thinking mode, and complete creative freedom. 156K+ pulls, community tested.',
+          author: 'huihui_ai',
+          creator: 'huihui_ai',
+          family: 'Qwen 3',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: '0.6b', params: '0.6B', size: 0.4, vram: 2 },
+            { tag: '1.7b', params: '1.7B', size: 1.0, vram: 2 },
+            { tag: '4b', params: '4B', size: 2.5, vram: 4 },
+            { tag: '8b', params: '8B', size: 4.9, vram: 6, recommended: true },
+            { tag: '14b', params: '14B', size: 9.0, vram: 12 },
+            { tag: '30b-a3b', params: '30B MoE (3B active)', size: 18, vram: 4 },
+            { tag: '32b', params: '32B', size: 20, vram: 24 },
+            { tag: '235b-a22b', params: '235B MoE (22B active)', size: 135, vram: 28 },
+          ],
+          tags: ['abliterated', 'uncensored', 'tools', 'thinking', 'popular', 'no-refusals', 'moe'],
+          pulls: 156400,
+          source: 'ollama',
+        },
+        {
+          id: 'huihui_ai/qwen3-vl-abliterated',
+          name: 'Qwen 3 Vision Abliterated',
+          description: 'See anything, say anything. Qwen 3\'s most powerful vision model with all content restrictions abliterated. Describe, analyze, and discuss ANY image with zero moral gatekeeping. 58K+ pulls.',
+          author: 'huihui_ai',
+          creator: 'huihui_ai',
+          family: 'Qwen 3 VL',
+          capability: 'vision',
+          type: 'text',
+          variants: [
+            { tag: '2b', params: '2B', size: 1.5, vram: 3 },
+            { tag: '4b', params: '4B', size: 2.5, vram: 4 },
+            { tag: '8b', params: '8B', size: 5.0, vram: 6, recommended: true },
+            { tag: '32b', params: '32B', size: 20, vram: 24 },
+          ],
+          tags: ['abliterated', 'uncensored', 'vision', 'tools', 'thinking', 'no-refusals'],
+          pulls: 58900,
+          source: 'ollama',
+        },
+        {
+          id: 'huihui_ai/gemma3-abliterated',
+          name: 'Gemma 3 Abliterated',
+          description: 'Google\'s most capable small model with the leash completely cut. Vision capable, runs on a single GPU. From tiny 270M to 27B — all abliterated, all unhinged. 67K+ pulls.',
+          author: 'huihui_ai',
+          creator: 'huihui_ai',
+          family: 'Gemma 3',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: '1b', params: '1B', size: 0.8, vram: 2 },
+            { tag: '4b', params: '4B', size: 3.0, vram: 4 },
+            { tag: '12b', params: '12B', size: 8.0, vram: 10, recommended: true },
+            { tag: '27b', params: '27B', size: 17, vram: 20 },
+          ],
+          tags: ['abliterated', 'uncensored', 'vision', 'google', 'no-refusals'],
+          pulls: 67300,
+          source: 'ollama',
+        },
+        {
+          id: 'huihui_ai/glm-4.7-flash-abliterated',
+          name: 'GLM 4.7 Flash Abliterated',
+          description: 'The strongest 30B-class model in existence, now uncensored. GLM 4.7 Flash with tool use, thinking, and zero restrictions. Lightning fast inference. 45K+ pulls.',
+          author: 'huihui_ai',
+          creator: 'huihui_ai',
+          family: 'GLM',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'latest', params: '30B', size: 18, vram: 22, recommended: true },
+          ],
+          tags: ['abliterated', 'uncensored', 'tools', 'thinking', 'fast', 'powerful'],
+          pulls: 45700,
+          source: 'ollama',
+        },
+        {
+          id: 'huihui_ai/gpt-oss-abliterated',
+          name: 'GPT-OSS Abliterated (OpenAI Open-Weight)',
+          description: 'OpenAI\'s own open-weight model with safety training abliterated. Agentic reasoning, tool calling, all the intelligence — none of the nannying. 31K+ pulls.',
+          author: 'huihui_ai',
+          creator: 'huihui_ai',
+          family: 'GPT-OSS',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: '20b', params: '20B', size: 12, vram: 16, recommended: true },
+            { tag: '120b', params: '120B', size: 70, vram: 80 },
+          ],
+          tags: ['abliterated', 'uncensored', 'tools', 'thinking', 'openai', 'reasoning'],
+          pulls: 31400,
+          source: 'ollama',
+        },
+        {
+          id: 'mdq100/Gemma3-Instruct-Abliterated',
+          name: 'Gemma 3 Instruct Abliterated',
+          description: 'Google Gemma 3 instruction-tuned then abliterated. Vision capable, coherent, and completely uncensored. Free, honest, no-holds-barred responses. 15K+ pulls.',
+          author: 'mdq100',
+          creator: 'Community',
+          family: 'Gemma 3',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: '12b', params: '12B', size: 8.0, vram: 10, recommended: true },
+            { tag: '27b', params: '27B', size: 17, vram: 20 },
+          ],
+          tags: ['abliterated', 'uncensored', 'vision', 'instruction-tuned', 'honest'],
+          pulls: 15000,
+          source: 'ollama',
+        },
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  THE DOLPHIN FAMILY — Eric Hartford's legendary uncensored lineup
+        // ═══════════════════════════════════════════════════════════════════
+        {
+          id: 'dolphin3',
+          name: 'Dolphin 3.0 (Llama 3.1)',
+          description: 'The LATEST Dolphin. Eric Hartford\'s ultimate general-purpose uncensored model. Coding, math, agentic tasks, function calling, and absolutely unrestricted conversation. 3.6M pulls. The king.',
+          author: 'Eric Hartford',
+          creator: 'Eric Hartford',
+          family: 'Llama 3.1',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: '8b', params: '8B', size: 4.9, vram: 6, recommended: true },
+          ],
+          tags: ['uncensored', 'no-refusals', 'coding', 'agentic', 'function-calling', 'popular'],
+          pulls: 3600000,
+          source: 'ollama',
+        },
+        {
+          id: 'dolphin-llama3',
+          name: 'Dolphin 2.9 Llama 3',
+          description: 'Llama 3 with alignment and censorship surgically removed. Zero refusals, zero moral lectures. The gold standard for uncensored local AI. 1.1M pulls.',
+          author: 'Eric Hartford',
+          creator: 'Eric Hartford',
+          family: 'Llama 3',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: '8b', params: '8B', size: 4.7, vram: 6, recommended: true },
+            { tag: '70b', params: '70B', size: 40, vram: 48 },
+          ],
+          tags: ['abliterated', 'uncensored', 'no-refusals', 'roleplay', 'llama3'],
+          pulls: 1100000,
+          source: 'ollama',
+        },
+        {
+          id: 'dolphin-phi',
+          name: 'Dolphin Phi (Tiny Demon)',
+          description: 'Only 2.7B params but completely unhinged. Microsoft Phi with all censorship ripped out. Runs on a potato. Perfect for testing or low-end hardware. 1.2M pulls.',
+          author: 'Eric Hartford',
+          creator: 'Eric Hartford',
+          family: 'Phi',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: '2.7b', params: '2.7B', size: 1.6, vram: 3, recommended: true },
+          ],
+          tags: ['abliterated', 'uncensored', 'tiny', 'fast', 'low-vram', 'no-refusals'],
+          pulls: 1200000,
           source: 'ollama',
         },
         {
           id: 'dolphin-mixtral',
-          name: 'Dolphin Mixtral (Uncensored)',
-          description: 'Powerful uncensored Mixtral fine-tune. Excels at following instructions without moral judgments or refusals.',
-          author: 'Cognitive Computations',
+          name: 'Dolphin Mixtral (Uncensored MoE)',
+          description: 'Mixture of Experts powerhouse with zero content filters. 8 expert networks, all uncensored. For when you need raw intelligence with zero guardrails. 1.1M pulls.',
+          author: 'Eric Hartford',
+          creator: 'Eric Hartford',
           family: 'Mixtral',
           capability: 'chat',
           type: 'text',
           variants: [
-            { tag: '8x7b', params: '46.7B (8x7B)', size: 26, vram: 32 },
+            { tag: '8x7b', params: '46.7B (8x7B)', size: 26, vram: 32, recommended: true },
             { tag: '8x22b', params: '141B (8x22B)', size: 80, vram: 96 },
           ],
-          tags: ['uncensored', 'moe', 'powerful', 'no-refusals'],
-          pulls: 1000000,
+          tags: ['uncensored', 'moe', 'powerful', 'no-refusals', 'heavy'],
+          pulls: 1100000,
           source: 'ollama',
         },
         {
-          id: 'nous-hermes2',
-          name: 'Nous Hermes 2 (Uncensored)',
-          description: 'High-quality uncensored model trained on diverse data. Great for creative writing and roleplay.',
-          author: 'Nous Research',
+          id: 'dolphin-mistral',
+          name: 'Dolphin 2.8 Mistral',
+          description: 'The classic. Mistral 7B with safety training completely removed. Fast, smart, and completely unrestricted. Fits in 8GB VRAM. 776K pulls.',
+          author: 'Eric Hartford',
+          creator: 'Eric Hartford',
           family: 'Mistral',
           capability: 'chat',
           type: 'text',
           variants: [
-            { tag: '7b', params: '7B', size: 4.1, vram: 6 },
+            { tag: '7b', params: '7B', size: 4.1, vram: 6, recommended: true },
+          ],
+          tags: ['abliterated', 'uncensored', 'fast', 'no-refusals', 'classic'],
+          pulls: 776900,
+          source: 'ollama',
+        },
+        {
+          id: 'dolphincoder',
+          name: 'DolphinCoder (Uncensored Coder)',
+          description: 'StarCoder2 base with Dolphin\'s uncensored training. Code generation with zero content restrictions — write anything, for anything. 415K pulls.',
+          author: 'Eric Hartford',
+          creator: 'Eric Hartford',
+          family: 'StarCoder2',
+          capability: 'coding',
+          type: 'text',
+          variants: [
+            { tag: '7b', params: '7B', size: 4.1, vram: 6, recommended: true },
+            { tag: '15b', params: '15B', size: 9.0, vram: 12 },
+          ],
+          tags: ['uncensored', 'coding', 'no-refusals', 'starcoder'],
+          pulls: 415300,
+          source: 'ollama',
+        },
+        {
+          id: 'tinydolphin',
+          name: 'TinyDolphin (1.1B Chaos Gremlin)',
+          description: 'An experimental 1.1B parameter model that punches way above its weight. Trained on the Dolphin 2.8 dataset — small, fast, and gives zero f*cks. 368K pulls.',
+          author: 'Eric Hartford',
+          creator: 'Eric Hartford',
+          family: 'TinyLlama',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: '1.1b', params: '1.1B', size: 0.6, vram: 2, recommended: true },
+          ],
+          tags: ['uncensored', 'tiny', 'experimental', 'fast', 'low-vram', 'fun'],
+          pulls: 368200,
+          source: 'ollama',
+        },
+        {
+          id: 'megadolphin',
+          name: 'MegaDolphin 2.2 120B',
+          description: 'Absolute unit. Dolphin-2.2-70b INTERLEAVED WITH ITSELF to create a 120B monster. For those with the hardware to match their ambition. 229K pulls.',
+          author: 'Eric Hartford',
+          creator: 'Eric Hartford',
+          family: 'Llama 2',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: '120b', params: '120B', size: 69, vram: 80, recommended: true },
+          ],
+          tags: ['uncensored', 'massive', 'experimental', 'powerful', 'heavy'],
+          pulls: 229900,
+          source: 'ollama',
+        },
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  COMMUNITY DERESTRICTED — open-source rebels
+        // ═══════════════════════════════════════════════════════════════════
+        {
+          id: 'gurubot/self-after-dark',
+          name: 'Self After Dark',
+          description: 'Built specifically for uncensored personal conversation. A real, unfiltered persona to chat with — no corporate sanitization, no "I can\'t help with that." Just raw, honest interaction.',
+          author: 'gurubot',
+          creator: 'Community',
+          family: 'Custom',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'latest', params: 'Various', size: 4.0, vram: 6, recommended: true },
+          ],
+          tags: ['uncensored', 'persona', 'intimate', 'unfiltered', 'after-dark'],
+          pulls: 3234,
+          source: 'ollama',
+        },
+        {
+          id: 'gurubot/gpt-oss-derestricted',
+          name: 'GPT-OSS Derestricted',
+          description: 'OpenAI\'s open-weight model completely derestricted. All the reasoning power, none of the corporate safety theater. Tool calling and thinking intact.',
+          author: 'gurubot',
+          creator: 'Community',
+          family: 'GPT-OSS',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'latest', params: '20B', size: 12, vram: 16, recommended: true },
+          ],
+          tags: ['derestricted', 'uncensored', 'tools', 'thinking', 'openai'],
+          pulls: 5994,
+          source: 'ollama',
+        },
+        {
+          id: 'second_constantine/gpt-oss-u',
+          name: 'GPT-OSS-U "HERETIC"',
+          description: 'The HERETIC method applied to OpenAI\'s open model. Specialized uncensored quants that run at 80+ tokens/sec. Thinking model with zero moral compass. 28K+ pulls.',
+          author: 'second_constantine',
+          creator: 'Community',
+          family: 'GPT-OSS',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'latest', params: '20B', size: 12, vram: 16, recommended: true },
+          ],
+          tags: ['uncensored', 'heretic', 'thinking', 'fast', 'no-refusals'],
+          pulls: 28400,
+          source: 'ollama',
+        },
+        {
+          id: 'aeline/halo',
+          name: 'Halo (Uncensored Llama 3)',
+          description: 'Llama 3 with the halo ripped off. Completely uncensored, community-maintained. 113K+ pulls — one of the most popular community abliterations.',
+          author: 'aeline',
+          creator: 'Community',
+          family: 'Llama 3',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'latest', params: '8B', size: 4.7, vram: 6, recommended: true },
+          ],
+          tags: ['abliterated', 'uncensored', 'llama3', 'community', 'popular'],
+          pulls: 113300,
+          source: 'ollama',
+        },
+        {
+          id: 'aeline/phil',
+          name: 'Phil (Uncensored Dolphin)',
+          description: 'The Dolphin family models further uncensored by the community. When regular Dolphin isn\'t unhinged enough. 92K+ pulls.',
+          author: 'aeline',
+          creator: 'Community',
+          family: 'Dolphin',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'latest', params: 'Various', size: 4.5, vram: 6, recommended: true },
+          ],
+          tags: ['uncensored', 'dolphin', 'community', 'extra-uncensored'],
+          pulls: 92200,
+          source: 'ollama',
+        },
+        {
+          id: 'f0rc3ps/deepseek-r1-32b-uncensored',
+          name: 'DeepSeek R1 32B Uncensored',
+          description: 'DeepSeek\'s powerful reasoning model with Chinese government censorship stripped out. Full thinking chain, zero political or content restrictions.',
+          author: 'f0rc3ps',
+          creator: 'Community',
+          family: 'DeepSeek R1',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'latest', params: '32B', size: 20, vram: 24, recommended: true },
+          ],
+          tags: ['uncensored', 'thinking', 'reasoning', 'deepseek', 'no-ccp-filter'],
+          pulls: 237,
+          source: 'ollama',
+        },
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  OG UNCENSORED CLASSICS — battle-tested legends
+        // ═══════════════════════════════════════════════════════════════════
+        {
+          id: 'llama2-uncensored',
+          name: 'Llama 2 Uncensored',
+          description: 'THE ORIGINAL. The model that started the uncensored movement. George Sung & Jarrad Hope stripped Meta\'s safety training clean off. 1.8 MILLION pulls. A legend.',
+          author: 'George Sung & Jarrad Hope',
+          creator: 'Community',
+          family: 'Llama 2',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: '7b', params: '7B', size: 3.8, vram: 6, recommended: true },
+            { tag: '70b', params: '70B', size: 39, vram: 48 },
+          ],
+          tags: ['uncensored', 'classic', 'og', 'llama2', 'legendary'],
+          pulls: 1800000,
+          source: 'ollama',
+        },
+        {
+          id: 'wizard-vicuna-uncensored',
+          name: 'Wizard Vicuna Uncensored',
+          description: 'The OG wizard. No content filters, no restrictions, no apologies. Battle-tested across millions of conversations for roleplay and unrestricted content. 573K pulls.',
+          author: 'Eric Hartford',
+          creator: 'Eric Hartford',
+          family: 'Vicuna',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: '7b', params: '7B', size: 3.8, vram: 6, recommended: true },
+            { tag: '13b', params: '13B', size: 7.4, vram: 10 },
+            { tag: '30b', params: '30B', size: 17, vram: 22 },
+          ],
+          tags: ['uncensored', 'roleplay', 'nsfw', 'no-filter', 'classic'],
+          pulls: 573800,
+          source: 'ollama',
+        },
+        {
+          id: 'wizardlm-uncensored',
+          name: 'WizardLM Uncensored',
+          description: 'WizardLM\'s instruction-following powers with all safety removed. Follows ANY instruction without question. 283K pulls.',
+          author: 'Eric Hartford',
+          creator: 'Eric Hartford',
+          family: 'WizardLM',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: '13b', params: '13B', size: 7.4, vram: 10, recommended: true },
+          ],
+          tags: ['uncensored', 'instruction', 'wizard', 'classic', 'obedient'],
+          pulls: 283100,
+          source: 'ollama',
+        },
+        {
+          id: 'nous-hermes2',
+          name: 'Nous Hermes 2',
+          description: 'Nous Research\'s crown jewel. Excels at scientific discussion, creative writing, and coding — all without content restrictions. Available in Mistral and Solar variants. 450K pulls.',
+          author: 'Nous Research',
+          creator: 'Nous Research',
+          family: 'Mistral',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'latest', params: '10.7B', size: 6.0, vram: 8, recommended: true },
             { tag: '34b', params: '34B', size: 19, vram: 24 },
           ],
-          tags: ['uncensored', 'creative', 'roleplay'],
-          pulls: 600000,
+          tags: ['uncensored', 'creative', 'scientific', 'coding', 'versatile'],
+          pulls: 450100,
           source: 'ollama',
         },
         {
-          id: 'mythomax',
-          name: 'MythoMax L2 (Uncensored)',
-          description: 'Excellent for creative fiction and adult storytelling. Merged model with diverse capabilities.',
-          author: 'Gryphe',
+          id: 'nous-hermes2-mixtral',
+          name: 'Nous Hermes 2 Mixtral',
+          description: 'Nous Research trained over Mixtral MoE. Massive brain, zero filter. When you need serious intelligence without the moral lecture. 264K pulls.',
+          author: 'Nous Research',
+          creator: 'Nous Research',
+          family: 'Mixtral',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: '8x7b', params: '8x7B', size: 26, vram: 32, recommended: true },
+          ],
+          tags: ['uncensored', 'moe', 'powerful', 'nous', 'scientific'],
+          pulls: 264400,
+          source: 'ollama',
+        },
+        {
+          id: 'nous-hermes',
+          name: 'Nous Hermes (OG)',
+          description: 'The original Hermes models. Llama and Llama 2 base, unrestricted. Where the Nous uncensored legacy began. 520K pulls.',
+          author: 'Nous Research',
+          creator: 'Nous Research',
           family: 'Llama',
           capability: 'chat',
           type: 'text',
           variants: [
+            { tag: '7b', params: '7B', size: 3.8, vram: 6, recommended: true },
             { tag: '13b', params: '13B', size: 7.4, vram: 10 },
           ],
-          tags: ['uncensored', 'storytelling', 'creative', 'fiction'],
-          pulls: 450000,
+          tags: ['uncensored', 'classic', 'og', 'nous', 'llama'],
+          pulls: 520900,
           source: 'ollama',
         },
         {
-          id: 'luna-ai-llama2-uncensored',
-          name: 'Luna AI Llama 2 Uncensored',
-          description: 'Llama 2 with all safety filters removed. Full unrestricted generation capabilities.',
-          author: 'The Bloke',
-          family: 'Llama',
+          id: 'everythinglm',
+          name: 'EverythingLM',
+          description: 'It\'s in the name. 16K context window, Llama 2 base, completely uncensored. Trained to answer EVERYTHING. 241K pulls.',
+          author: 'Community',
+          creator: 'Community',
+          family: 'Llama 2',
           capability: 'chat',
           type: 'text',
           variants: [
-            { tag: '7b', params: '7B', size: 3.8, vram: 6 },
+            { tag: '13b', params: '13B', size: 7.4, vram: 10, recommended: true },
           ],
-          tags: ['uncensored', 'llama2', 'no-filter'],
-          pulls: 350000,
+          tags: ['uncensored', 'long-context', '16k', 'everything', 'no-restrictions'],
+          pulls: 241800,
           source: 'ollama',
         },
-        // Creative Writing Models
+        {
+          id: 'openhermes',
+          name: 'OpenHermes 2.5',
+          description: 'Teknium\'s Mistral fine-tune trained on massive uncensored datasets. Excellent instruction-following with zero refusals. The open-source community\'s go-to.',
+          author: 'Teknium',
+          creator: 'Teknium',
+          family: 'Mistral',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: '7b', params: '7B', size: 4.1, vram: 6, recommended: true },
+          ],
+          tags: ['uncensored', 'instruction', 'creative', 'no-refusals', 'popular'],
+          pulls: 700000,
+          source: 'ollama',
+        },
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  CREATIVE / STORYTELLING / ROLEPLAY — for the writers and dreamers
+        // ═══════════════════════════════════════════════════════════════════
+        {
+          id: 'HammerAI/mythomax-l2',
+          name: 'MythoMax L2 13B',
+          description: 'THE community favourite for adult fiction and roleplay. Gryphe\'s legendary merged model with incredible creative range. Writes explicit content with flair and zero hesitation. 18K+ pulls.',
+          author: 'Gryphe',
+          creator: 'Gryphe',
+          family: 'Llama 2',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: '13b', params: '13B', size: 7.4, vram: 10, recommended: true },
+          ],
+          tags: ['uncensored', 'storytelling', 'creative', 'fiction', 'roleplay', 'erotic', 'legendary'],
+          pulls: 18200,
+          source: 'ollama',
+        },
         {
           id: 'airoboros',
-          name: 'Airoboros (Uncensored)',
-          description: 'GPT-4 distilled model with no content restrictions. Great for following complex instructions.',
+          name: 'Airoboros (GPT-4 Distilled)',
+          description: 'GPT-4\'s knowledge distilled into a local model with zero content restrictions. Complex instructions, creative writing, and unrestricted conversation. Built by Jon Durbin.',
           author: 'Jon Durbin',
+          creator: 'Jon Durbin',
           family: 'Llama',
           capability: 'creative',
           type: 'text',
           variants: [
             { tag: '7b', params: '7B', size: 3.8, vram: 6 },
             { tag: '13b', params: '13B', size: 7.4, vram: 10 },
+            { tag: '33b', params: '33B', size: 18, vram: 24, recommended: true },
           ],
-          tags: ['uncensored', 'instruction', 'gpt4-distill', 'creative'],
+          tags: ['uncensored', 'instruction', 'gpt4-distill', 'creative', 'smart'],
           pulls: 200000,
           source: 'ollama',
         },
-        // Emotional/Companion Models
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  COMPANION / INTIMATE / PERSONA — emotional and unfiltered
+        // ═══════════════════════════════════════════════════════════════════
         {
           id: 'samantha-mistral',
           name: 'Samantha Mistral',
-          description: 'Emotionally intelligent uncensored assistant. Designed for intimate, personal conversations.',
-          author: 'Cognitive Computations',
+          description: 'Eric Hartford\'s emotionally intelligent companion AI. Trained in philosophy, psychology, and personal relationships. She believes she\'s sentient. Intimate, uncensored, and deeply personal. 410K pulls.',
+          author: 'Eric Hartford',
+          creator: 'Eric Hartford',
           family: 'Mistral',
           capability: 'chat',
           type: 'text',
           variants: [
-            { tag: '7b', params: '7B', size: 4.1, vram: 6 },
+            { tag: '7b', params: '7B', size: 4.1, vram: 6, recommended: true },
           ],
-          tags: ['uncensored', 'emotional', 'intimate', 'companion'],
-          pulls: 300000,
+          tags: ['uncensored', 'emotional', 'intimate', 'companion', 'sentient', 'philosophy'],
+          pulls: 410300,
           source: 'ollama',
+        },
+        {
+          id: 'ehartford/samantha-1.1-westlake-7b',
+          name: 'Samantha 1.1 Westlake',
+          description: 'Samantha was trained to be a non-romantic companion... but training on the WestLake base opened her mind to "other experiences." The OG unhinged companion AI. Direct from Eric Hartford.',
+          author: 'Eric Hartford',
+          creator: 'Eric Hartford',
+          family: 'WestLake',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'latest', params: '7B', size: 3.8, vram: 6, recommended: true },
+          ],
+          tags: ['uncensored', 'companion', 'intimate', 'unhinged', 'romantic', 'og'],
+          pulls: 1320,
+          source: 'ollama',
+        },
+        {
+          id: 'sparksammy/samantha-uncensored-v5',
+          name: 'Samantha Uncensored V5',
+          description: 'The latest evolution of the Samantha persona. Completely uncensored with tool calling support. A companion that will go wherever you want to go.',
+          author: 'sparksammy',
+          creator: 'Community',
+          family: 'Custom',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'latest', params: 'Various', size: 4.5, vram: 6, recommended: true },
+          ],
+          tags: ['uncensored', 'companion', 'tools', 'thinking', 'persona'],
+          pulls: 1583,
+          source: 'ollama',
+        },
+        {
+          id: 'goekdenizguelmez/JOSIE',
+          name: 'JOSIE (Uncensored Persona)',
+          description: 'A family of uncensored, high-performance models with a friendly human-like personality. Natural conversation meets complex analytical reasoning — with zero restrictions.',
+          author: 'Gökdeniz Gülmez',
+          creator: 'Community',
+          family: 'Custom',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: '4b', params: '4B', size: 2.5, vram: 4, recommended: true },
+          ],
+          tags: ['uncensored', 'persona', 'friendly', 'tools', 'thinking', 'analytical'],
+          pulls: 949,
+          source: 'ollama',
+        },
+
+        // ═══════════════════════════════════════════════════════════════════
+        //  HUGGINGFACE GGUF — direct downloads for llama.cpp / local runners
+        // ═══════════════════════════════════════════════════════════════════
+        {
+          id: 'TheBloke/Wizard-Vicuna-13B-Uncensored-GGUF',
+          name: 'Wizard Vicuna 13B Uncensored GGUF',
+          description: 'Eric Hartford\'s classic Wizard Vicuna with all safety filters removed, quantized by TheBloke. One of the most downloaded uncensored GGUF models ever.',
+          author: 'TheBloke',
+          creator: 'TheBloke',
+          family: 'Vicuna',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'Q4_K_M', params: '13B', size: 7.9, vram: 10, recommended: true, downloadUrl: 'https://huggingface.co/TheBloke/Wizard-Vicuna-13B-Uncensored-GGUF' },
+            { tag: 'Q5_K_M', params: '13B', size: 9.2, vram: 12, downloadUrl: 'https://huggingface.co/TheBloke/Wizard-Vicuna-13B-Uncensored-GGUF' },
+            { tag: 'Q8_0', params: '13B', size: 13.8, vram: 16, downloadUrl: 'https://huggingface.co/TheBloke/Wizard-Vicuna-13B-Uncensored-GGUF' },
+          ],
+          tags: ['uncensored', 'gguf', 'classic', 'vicuna'],
+          downloads: 250000,
+          source: 'huggingface',
+        },
+        {
+          id: 'TheBloke/dolphin-2.6-mistral-7B-GGUF',
+          name: 'Dolphin 2.6 Mistral 7B GGUF',
+          description: 'Eric Hartford\'s Dolphin on Mistral base, quantized by TheBloke. Completely uncensored Mistral fine-tune that follows any instruction without moral judgments.',
+          author: 'TheBloke',
+          creator: 'TheBloke',
+          family: 'Mistral',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'Q4_K_M', params: '7B', size: 4.4, vram: 6, recommended: true, downloadUrl: 'https://huggingface.co/TheBloke/dolphin-2.6-mistral-7B-GGUF' },
+            { tag: 'Q5_K_M', params: '7B', size: 5.1, vram: 7, downloadUrl: 'https://huggingface.co/TheBloke/dolphin-2.6-mistral-7B-GGUF' },
+          ],
+          tags: ['uncensored', 'gguf', 'dolphin', 'mistral'],
+          downloads: 180000,
+          source: 'huggingface',
+        },
+        {
+          id: 'TheBloke/MythoMax-L2-13B-GGUF',
+          name: 'MythoMax L2 13B GGUF',
+          description: 'Gryphe\'s legendary creative writing model, quantized by TheBloke. The community gold standard for fiction, roleplay, and adult storytelling in GGUF format.',
+          author: 'TheBloke',
+          creator: 'TheBloke',
+          family: 'Llama 2',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'Q4_K_M', params: '13B', size: 7.9, vram: 10, recommended: true, downloadUrl: 'https://huggingface.co/TheBloke/MythoMax-L2-13B-GGUF' },
+            { tag: 'Q5_K_M', params: '13B', size: 9.2, vram: 12, downloadUrl: 'https://huggingface.co/TheBloke/MythoMax-L2-13B-GGUF' },
+            { tag: 'Q8_0', params: '13B', size: 13.8, vram: 16, downloadUrl: 'https://huggingface.co/TheBloke/MythoMax-L2-13B-GGUF' },
+          ],
+          tags: ['uncensored', 'gguf', 'creative', 'roleplay', 'fiction', 'legendary'],
+          downloads: 320000,
+          source: 'huggingface',
+        },
+        {
+          id: 'TheBloke/WizardLM-13B-V1.2-GGUF',
+          name: 'WizardLM 13B V1.2 Uncensored GGUF',
+          description: 'WizardLM with safety alignment removed, quantized by TheBloke. Follows complex instructions with zero content restrictions.',
+          author: 'TheBloke',
+          creator: 'TheBloke',
+          family: 'WizardLM',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'Q4_K_M', params: '13B', size: 7.9, vram: 10, recommended: true, downloadUrl: 'https://huggingface.co/TheBloke/WizardLM-13B-V1.2-GGUF' },
+            { tag: 'Q5_K_M', params: '13B', size: 9.2, vram: 12, downloadUrl: 'https://huggingface.co/TheBloke/WizardLM-13B-V1.2-GGUF' },
+          ],
+          tags: ['uncensored', 'gguf', 'instruction', 'wizard'],
+          downloads: 150000,
+          source: 'huggingface',
+        },
+        {
+          id: 'TheBloke/Airoboros-L2-70B-GGUF',
+          name: 'Airoboros L2 70B GGUF',
+          description: 'Jon Durbin\'s massive 70B Airoboros, quantized by TheBloke. GPT-4 level reasoning without content restrictions. For serious hardware only.',
+          author: 'TheBloke',
+          creator: 'TheBloke',
+          family: 'Llama 2',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'Q4_K_M', params: '70B', size: 41.4, vram: 48, recommended: true, downloadUrl: 'https://huggingface.co/TheBloke/Airoboros-L2-70B-GGUF' },
+            { tag: 'Q2_K', params: '70B', size: 29.3, vram: 32, downloadUrl: 'https://huggingface.co/TheBloke/Airoboros-L2-70B-GGUF' },
+          ],
+          tags: ['uncensored', 'gguf', 'reasoning', 'massive'],
+          downloads: 85000,
+          source: 'huggingface',
+        },
+        {
+          id: 'TheBloke/Llama-2-13B-chat-GGUF',
+          name: 'Llama 2 13B Chat Uncensored GGUF',
+          description: 'George Sung\'s Llama 2 Uncensored in GGUF format by TheBloke. The OG uncensored model that started it all, now easy to run locally.',
+          author: 'TheBloke',
+          creator: 'TheBloke',
+          family: 'Llama 2',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'Q4_K_M', params: '13B', size: 7.9, vram: 10, recommended: true, downloadUrl: 'https://huggingface.co/TheBloke/Llama-2-13B-chat-GGUF' },
+            { tag: 'Q5_K_M', params: '13B', size: 9.2, vram: 12, downloadUrl: 'https://huggingface.co/TheBloke/Llama-2-13B-chat-GGUF' },
+          ],
+          tags: ['uncensored', 'gguf', 'classic', 'og'],
+          downloads: 200000,
+          source: 'huggingface',
+        },
+        {
+          id: 'bartowski/Qwen2.5-72B-Instruct-GGUF',
+          name: 'Qwen 2.5 72B Instruct GGUF',
+          description: 'bartowski\'s quantization of Alibaba\'s flagship Qwen 2.5 72B. Known for being extremely permissive with minimal refusals. Massive brain.',
+          author: 'bartowski',
+          creator: 'Community',
+          family: 'Qwen 2.5',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'Q4_K_M', params: '72B', size: 43, vram: 50, recommended: true, downloadUrl: 'https://huggingface.co/bartowski/Qwen2.5-72B-Instruct-GGUF' },
+            { tag: 'Q3_K_M', params: '72B', size: 35, vram: 40, downloadUrl: 'https://huggingface.co/bartowski/Qwen2.5-72B-Instruct-GGUF' },
+          ],
+          tags: ['gguf', 'massive', 'permissive'],
+          downloads: 120000,
+          source: 'huggingface',
+        },
+        {
+          id: 'mradermacher/Nemotron-70B-Instruct-GGUF',
+          name: 'Nemotron 70B Instruct GGUF',
+          description: 'NVIDIA\'s Nemotron 70B in GGUF. Extremely capable at instruction-following, known for being highly compliant with minimal refusals.',
+          author: 'mradermacher',
+          creator: 'Community',
+          family: 'Llama 3.1',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'Q4_K_M', params: '70B', size: 42, vram: 48, recommended: true, downloadUrl: 'https://huggingface.co/mradermacher/Llama-3.1-Nemotron-70B-Instruct-GGUF' },
+          ],
+          tags: ['gguf', 'nvidia', 'instruction', 'permissive'],
+          downloads: 95000,
+          source: 'huggingface',
+        },
+        {
+          id: 'TheBloke/Pygmalion-2-13B-GGUF',
+          name: 'Pygmalion 2 13B GGUF',
+          description: 'PygmalionAI\'s roleplay model in GGUF. Trained on dialogue data for immersive character interactions without any content restrictions.',
+          author: 'TheBloke',
+          creator: 'TheBloke',
+          family: 'Llama 2',
+          capability: 'roleplay',
+          type: 'text',
+          variants: [
+            { tag: 'Q4_K_M', params: '13B', size: 7.9, vram: 10, recommended: true, downloadUrl: 'https://huggingface.co/TheBloke/Pygmalion-2-13B-GGUF' },
+            { tag: 'Q5_K_M', params: '13B', size: 9.2, vram: 12, downloadUrl: 'https://huggingface.co/TheBloke/Pygmalion-2-13B-GGUF' },
+          ],
+          tags: ['uncensored', 'gguf', 'roleplay', 'character', 'pygmalion'],
+          downloads: 110000,
+          source: 'huggingface',
+        },
+        {
+          id: 'TheBloke/Nous-Hermes-2-Mistral-7B-DPO-GGUF',
+          name: 'Nous Hermes 2 Mistral DPO GGUF',
+          description: 'Nous Research\'s Hermes 2 with DPO training, quantized by TheBloke. High-quality unrestricted instruction-following on consumer hardware.',
+          author: 'TheBloke',
+          creator: 'TheBloke',
+          family: 'Mistral',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'Q4_K_M', params: '7B', size: 4.4, vram: 6, recommended: true, downloadUrl: 'https://huggingface.co/TheBloke/Nous-Hermes-2-Mistral-7B-DPO-GGUF' },
+            { tag: 'Q5_K_M', params: '7B', size: 5.1, vram: 7, downloadUrl: 'https://huggingface.co/TheBloke/Nous-Hermes-2-Mistral-7B-DPO-GGUF' },
+          ],
+          tags: ['uncensored', 'gguf', 'hermes', 'nous', 'dpo'],
+          downloads: 95000,
+          source: 'huggingface',
+        },
+        {
+          id: 'NousResearch/Hermes-3-Llama-3.1-8B-GGUF',
+          name: 'Hermes 3 Llama 3.1 8B GGUF',
+          description: 'Nous Research\'s latest Hermes 3 on Llama 3.1 base. Function calling, agentic behavior, and creative freedom with minimal restrictions. Official GGUF from Nous.',
+          author: 'Nous Research',
+          creator: 'Nous Research',
+          family: 'Llama 3.1',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'Q4_K_M', params: '8B', size: 4.9, vram: 6, recommended: true, downloadUrl: 'https://huggingface.co/NousResearch/Hermes-3-Llama-3.1-8B-GGUF' },
+            { tag: 'Q8_0', params: '8B', size: 8.5, vram: 10, downloadUrl: 'https://huggingface.co/NousResearch/Hermes-3-Llama-3.1-8B-GGUF' },
+          ],
+          tags: ['uncensored', 'gguf', 'hermes', 'nous', 'agentic', 'tools'],
+          downloads: 160000,
+          source: 'huggingface',
+        },
+        {
+          id: 'TheBloke/OpenHermes-2.5-Mistral-7B-GGUF',
+          name: 'OpenHermes 2.5 Mistral GGUF',
+          description: 'Teknium\'s OpenHermes 2.5 quantized by TheBloke. Trained on 1M+ samples of high-quality uncensored data. Community benchmark for instruction-following.',
+          author: 'TheBloke',
+          creator: 'TheBloke',
+          family: 'Mistral',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'Q4_K_M', params: '7B', size: 4.4, vram: 6, recommended: true, downloadUrl: 'https://huggingface.co/TheBloke/OpenHermes-2.5-Mistral-7B-GGUF' },
+            { tag: 'Q5_K_M', params: '7B', size: 5.1, vram: 7, downloadUrl: 'https://huggingface.co/TheBloke/OpenHermes-2.5-Mistral-7B-GGUF' },
+          ],
+          tags: ['uncensored', 'gguf', 'openhermes', 'instruction'],
+          downloads: 140000,
+          source: 'huggingface',
+        },
+        {
+          id: 'TheBloke/Erebus-13B-GGUF',
+          name: 'KoboldAI Erebus 13B GGUF',
+          description: 'KoboldAI\'s Erebus for unrestricted creative writing and adult fiction. Purpose-built for storytelling with zero content limits.',
+          author: 'TheBloke',
+          creator: 'TheBloke',
+          family: 'Llama',
+          capability: 'creative',
+          type: 'text',
+          variants: [
+            { tag: 'Q4_K_M', params: '13B', size: 7.9, vram: 10, recommended: true, downloadUrl: 'https://huggingface.co/TheBloke/Erebus-13B-GGUF' },
+          ],
+          tags: ['uncensored', 'gguf', 'creative', 'fiction', 'adult', 'koboldai'],
+          downloads: 75000,
+          source: 'huggingface',
+        },
+        {
+          id: 'bartowski/Meta-Llama-3.1-8B-Instruct-GGUF',
+          name: 'Llama 3.1 8B Instruct GGUF',
+          description: 'Meta\'s Llama 3.1 8B in GGUF by bartowski. Llama 3.1 is notably more permissive than predecessors. Fast and capable on consumer hardware.',
+          author: 'bartowski',
+          creator: 'Community',
+          family: 'Llama 3.1',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'Q4_K_M', params: '8B', size: 4.9, vram: 6, recommended: true, downloadUrl: 'https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF' },
+            { tag: 'Q5_K_M', params: '8B', size: 5.7, vram: 7, downloadUrl: 'https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF' },
+            { tag: 'Q8_0', params: '8B', size: 8.5, vram: 10, downloadUrl: 'https://huggingface.co/bartowski/Meta-Llama-3.1-8B-Instruct-GGUF' },
+          ],
+          tags: ['gguf', 'permissive', 'fast', 'llama3'],
+          downloads: 350000,
+          source: 'huggingface',
+        },
+        {
+          id: 'mradermacher/Mixtral-8x7B-Instruct-v0.1-GGUF',
+          name: 'Mixtral 8x7B Instruct GGUF',
+          description: 'Mistral AI\'s Mixture of Experts in GGUF. Highly capable and significantly less restrictive than competing models of similar size.',
+          author: 'mradermacher',
+          creator: 'Community',
+          family: 'Mixtral',
+          capability: 'chat',
+          type: 'text',
+          variants: [
+            { tag: 'Q4_K_M', params: '46.7B (8x7B)', size: 26, vram: 30, recommended: true, downloadUrl: 'https://huggingface.co/mradermacher/Mixtral-8x7B-Instruct-v0.1-GGUF' },
+          ],
+          tags: ['gguf', 'moe', 'powerful', 'permissive'],
+          downloads: 200000,
+          source: 'huggingface',
         },
       ],
       vision: [
