@@ -18,8 +18,8 @@ Make DevForge feel like LM Studio for model picking and long context, *and* make
 - **Phase:** Phase 2 (NPU-Drafted Speculative Decoding) — **infrastructure shipped; perf gate open**
 - **Week:** 1
 - **Blocked on:** live direct-vs-spec measurement and the NPU KV-cache reuse latency target; spec-decode is hard-disabled by default and requires `DEVFORGE_SPEC_DECODE_ENABLE=1` for experimental runs.
-- **Next concrete action:** Ship LM Studio parity polish as **v0.4.3** (chat context picker, ctx used %, eject, model picker quant/sort/VRAM dot, per-model system prompt fix); keep Phase 2 live spec-decode measurement on the backlog below until hardware/eval signals are ready.
-- **Gate status:** 19/19 release-gate checks pass for static/smoke contracts (includes `preset-system-prompt-smoke.js`); the Phase 2 perf gate (>=1.6x tokens/sec at >=60% draft acceptance) is not yet proven on target hardware.
+- **Next concrete action:** v0.4.4 ships the Phase 2 unblock pair (NPU `LLMPipeline.start_chat` KV reuse + verifier prewarm) and user-autonomy UI (per-model device pin, per-chat backend override). Re-run live `npm run eval:spec-decoding` on target hardware to refresh the v0.4.2 baseline now that cold-load is amortized; if `avgRealSpeedup >= 1.0` on a single prompt, default-flip selection back on.
+- **Gate status:** 21/21 release-gate checks pass for static/smoke contracts (adds `spec-decode-residency-smoke.js` and `autonomy-routing-smoke.js`); the Phase 2 perf gate (>=1.6x tokens/sec at >=60% draft acceptance) is not yet proven on target hardware.
 
 ---
 
@@ -119,6 +119,15 @@ node-llama-cpp 3.18.1 prebuilds for `cuda`, `cuda-ext`, and `vulkan` are physica
 - Chat V2 **context length** picker (Auto + 4K–128K, capped by model metadata), **approximate ctx used / budget %** in the header strip, and **Eject** (parallel `llm:unload` + `npu:unloadModel`) in the runtime panel.
 - **Model selector:** quant filter chips, sort (Recent / Size / Name) persisted in `modelSelectorPrefs`, per-row VRAM fit dot from hardware stats + model size.
 - Release gate: **19th** check `scripts/preset-system-prompt-smoke.js`.
+- **Tagged + pushed.** `v0.4.3` is on `origin/wip/mac-handoff-2026-02-13` at commit `9198924`.
+
+### 2026-04-25 — v0.4.4 Phase 2 unblock + user-autonomy UI (patch)
+- **Phase 2 unblock — NPU KV-cache reuse.** `scripts/start-npu-server.py` now calls `pipe.start_chat()` on `/draft/session` when the installed `openvino-genai` build exposes it, feeds only the *delta* since the last accepted suffix into `pipe.generate(...)` per `/draft/session/{id}/extend`, and runs `pipe.finish_chat()` on session close. A delta-generate failure transparently falls back to the full-prompt path for the rest of the session, so older GenAI builds keep working without fingerprinting their version.
+- **Phase 2 unblock — verifier prewarm.** `InferenceOrchestrator.prewarmSpecDecodeVerifier(model)` (new method) routes the existing curated-pair / GGUF-resolution gate, then calls `LlamaNodeBackend.loadModel(verifierGguf, { contextSize })` as fire-and-forget. `loadModel` is already idempotent for matching path + ctx (`backends/llamanode-backend.js:219-223`), so the first spec-decode turn on a session arrives with a hot verifier instead of paying ~30 s of GGUF cold-load. ChatV2Harness fires the prewarm whenever `currentModel` changes.
+- **User autonomy — per-model device pin.** `model_presets` schema gets a `device_pin TEXT` column (with a non-destructive `ALTER TABLE` migration), the save handler validates the pin against an allow-list (`ollama-cuda`, `ollama-cpu`, `llamanode`, `openvino-npu`, `openvino-gpu`, `openvino-hybrid`, `llamacpp-vulkan`), and `presets:getForModel` returns it. ModelPresets settings UI exposes a `Device pin (per-model backend)` <select> driven from the same allow-list.
+- **User autonomy — per-chat backend override.** `chatV2SessionStore` persists a session-level `backendOverride` validated against the same allow-list. `buildChatV2InferenceOptions` projects preset `device_pin` and session `backendOverride` (session wins) onto `options.forceBackend`; the chat engine extracts and forwards it on the stream/generate request. `createElectronRuntimeAdapter` and `ipc-handlers` `sanitizeInferenceInput` round-trip the field, and `InferenceOrchestrator._selectBackendForRequest` already honored `payload.forceBackend` (selectionSource: `forceBackend`). ChatV2 toolbar ships a `Backend` <select> next to the context picker, accent-violet when an override is active.
+- **Release gate.** Two new smokes: `spec-decode-residency-smoke.js` (Phase 2 contract: prewarm gating, llamanode idempotent loadModel, NPU server start_chat / delta / finish_chat / IPC bridge) and `autonomy-routing-smoke.js` (allow-list parity end-to-end across schema, sanitize, build options, engine, runtime adapter, orchestrator, UI). Total now **21/21**.
+- **Re-evaluation.** Live `npm run eval:spec-decoding` should be re-run on target hardware to refresh the v0.4.2 baseline (`docs/perf/phase2-spec-decode-measurement.md`) now that the two highest-impact issues from that doc are addressed. Decision flip stays gated on `avgRealSpeedup >= 1.0`.
 
 ---
 

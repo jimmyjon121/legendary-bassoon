@@ -397,6 +397,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   recordSpecDecodeOutcome: (payload) => ipcRenderer.invoke('orchestrator:recordSpecDecodeOutcome', payload || {}),
   getSpecDecodeStats: (payload) => ipcRenderer.invoke('orchestrator:getSpecDecodeStats', payload || {}),
   isSpecDecodeDisabled: (payload) => ipcRenderer.invoke('orchestrator:isSpecDecodeDisabled', payload || {}),
+  prewarmSpecDecodeVerifier: (payload) => ipcRenderer.invoke('orchestrator:prewarmSpecDecodeVerifier', payload || {}),
 
   // ============================================
   // Model Manager

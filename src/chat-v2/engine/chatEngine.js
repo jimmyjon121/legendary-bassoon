@@ -1306,8 +1306,10 @@ export class ChatV2Engine {
     }
 
     const presetSystemPrompt = String(inferenceOptions?.systemPrompt ?? '').trim();
+    const forceBackend = String(inferenceOptions?.forceBackend ?? '').trim();
     inferenceOptions = { ...inferenceOptions };
     delete inferenceOptions.systemPrompt;
+    delete inferenceOptions.forceBackend;
 
     const thinkLongerEnabled = userMessage?.meta?.thinkLonger === true;
     if (thinkLongerEnabled) {
@@ -1377,6 +1379,7 @@ export class ChatV2Engine {
       system: promptContext.systemPrompt,
       streamMessages: promptContext.streamMessages,
       promptContext,
+      ...(forceBackend ? { forceBackend } : {}),
     };
 
     this.lastFailedRequest = null;

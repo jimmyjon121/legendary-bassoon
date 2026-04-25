@@ -774,6 +774,7 @@ async function initDatabase(userDataPath, store = null) {
       system_prompt TEXT,
       workspace TEXT,
       is_default INTEGER DEFAULT 0,
+      device_pin TEXT,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -782,15 +783,24 @@ async function initDatabase(userDataPath, store = null) {
   // Some SQLite builds reject ADD COLUMN with non-constant defaults, so keep this resilient.
   try {
     const presetInfo = db.exec('PRAGMA table_info(model_presets)');
-    const hasCreatedAt = Array.isArray(presetInfo?.[0]?.values)
-      ? presetInfo[0].values.some((row) => row?.[1] === 'created_at')
-      : false;
+    const columns = Array.isArray(presetInfo?.[0]?.values)
+      ? presetInfo[0].values.map((row) => row?.[1])
+      : [];
+    const hasCreatedAt = columns.includes('created_at');
+    const hasDevicePin = columns.includes('device_pin');
 
     if (!hasCreatedAt) {
       try {
         db.run(`ALTER TABLE model_presets ADD COLUMN created_at DATETIME`);
       } catch (migrationErr) {
         console.warn('[DB] model_presets.created_at migration skipped:', migrationErr.message);
+      }
+    }
+    if (!hasDevicePin) {
+      try {
+        db.run(`ALTER TABLE model_presets ADD COLUMN device_pin TEXT`);
+      } catch (migrationErr) {
+        console.warn('[DB] model_presets.device_pin migration skipped:', migrationErr.message);
       }
     }
   } catch (migrationErr) {
@@ -1834,6 +1844,18 @@ function sanitizeInferenceInput(rawPayload = {}) {
   const priority = Number.isFinite(Number(rawPayload.priority)) ? Number(rawPayload.priority) : undefined;
   const workspace = typeof rawPayload.workspace === 'string' ? rawPayload.workspace.slice(0, 40) : null;
 
+  const ALLOWED_FORCE_BACKENDS = new Set([
+    'ollama-cuda',
+    'ollama-cpu',
+    'llamanode',
+    'openvino-npu',
+    'openvino-gpu',
+    'openvino-hybrid',
+    'llamacpp-vulkan',
+  ]);
+  const rawForceBackend = typeof rawPayload.forceBackend === 'string' ? rawPayload.forceBackend.trim() : '';
+  const forceBackend = rawForceBackend && ALLOWED_FORCE_BACKENDS.has(rawForceBackend) ? rawForceBackend : null;
+
   return {
     model,
     prompt: sanitizeText(rawPayload.prompt, INFERENCE_LIMITS.promptMaxChars),
@@ -1850,6 +1872,7 @@ function sanitizeInferenceInput(rawPayload = {}) {
     preferNativeChat: rawPayload.preferNativeChat !== false,
     forceCompatMode: rawPayload.forceCompatMode === true,
     forceModelFallback: rawPayload.forceModelFallback === true,
+    forceBackend,
     tools,
   };
 }
@@ -2403,6 +2426,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         ...(executionPlan.requestBody.system ? { system: executionPlan.requestBody.system } : {}),
         ...(executionPlan.requestBody.images ? { images: executionPlan.requestBody.images } : {}),
         ...(Array.isArray(safePayload.tools) ? { tools: safePayload.tools } : {}),
+        ...(safePayload.forceBackend ? { forceBackend: safePayload.forceBackend } : {}),
       };
 
       const invokeBackend = async () => {
@@ -2586,6 +2610,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
             ...(executionPlan.requestBody.system ? { system: executionPlan.requestBody.system } : {}),
             ...(executionPlan.requestBody.images ? { images: executionPlan.requestBody.images } : {}),
             ...(Array.isArray(safePayload.tools) ? { tools: safePayload.tools } : {}),
+            ...(safePayload.forceBackend ? { forceBackend: safePayload.forceBackend } : {}),
           };
 
           const streamResult = await orchestrator.stream(inferencePayload, (chunk) => {
@@ -5604,6 +5629,20 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     }
   });
 
+  ipcMain.handle('orchestrator:prewarmSpecDecodeVerifier', async (_, payload = {}) => {
+    if (!orchestrator || typeof orchestrator.prewarmSpecDecodeVerifier !== 'function') {
+      return { warmed: false, skipped: 'orchestrator_unavailable' };
+    }
+    try {
+      const result = await orchestrator.prewarmSpecDecodeVerifier(payload?.model || '', {
+        contextSize: payload?.contextSize,
+      });
+      return result || { warmed: false, skipped: 'no_result' };
+    } catch (error) {
+      return { warmed: false, skipped: 'prewarm_threw', error: error?.message || String(error) };
+    }
+  });
+
   ipcMain.handle('llm:setProfile', (_, profile) => {
     if (!orchestrator) {
       return { success: false, error: 'Orchestrator not available' };
@@ -5825,17 +5864,23 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     if (!db) return [];
     try {
       const presetInfo = db.exec('PRAGMA table_info(model_presets)');
-      const hasCreatedAt = Array.isArray(presetInfo?.[0]?.values)
-        ? presetInfo[0].values.some((row) => row?.[1] === 'created_at')
-        : false;
+      const columns = Array.isArray(presetInfo?.[0]?.values)
+        ? presetInfo[0].values.map((row) => row?.[1])
+        : [];
+      const hasCreatedAt = columns.includes('created_at');
+      const hasDevicePin = columns.includes('device_pin');
 
       const orderBy = hasCreatedAt
         ? 'ORDER BY is_default DESC, created_at DESC'
         : 'ORDER BY is_default DESC';
 
+      const selectCols = hasDevicePin
+        ? 'id, model_name, temperature, top_p, top_k, context_length, system_prompt, workspace, is_default, device_pin'
+        : 'id, model_name, temperature, top_p, top_k, context_length, system_prompt, workspace, is_default';
+
       const result = db.exec(
         `
-        SELECT id, model_name, temperature, top_p, top_k, context_length, system_prompt, workspace, is_default
+        SELECT ${selectCols}
         FROM model_presets
         WHERE model_name = ?
           AND (workspace IS NULL OR workspace = '' OR workspace = ?)
@@ -5844,8 +5889,8 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         [modelName, workspace || null],
       );
       if (!result.length) return [];
-      return result[0].values.map(
-        ([
+      return result[0].values.map((row) => {
+        const [
           id,
           model_name,
           temperature,
@@ -5855,7 +5900,9 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
           system_prompt,
           ws,
           is_default,
-        ]) => ({
+          device_pin = null,
+        ] = row;
+        return {
           id,
           model_name,
           temperature,
@@ -5865,8 +5912,9 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
           system_prompt,
           workspace: ws,
           is_default: !!is_default,
-        }),
-      );
+          device_pin: hasDevicePin ? (device_pin || null) : null,
+        };
+      });
     } catch (error) {
       console.error('Failed to load model presets:', error);
       return [];
@@ -5896,6 +5944,17 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       const safeWorkspace = typeof preset?.workspace === 'string'
         ? preset.workspace.trim().slice(0, 64) || null
         : null;
+      const ALLOWED_DEVICE_PINS = new Set([
+        'ollama-cuda',
+        'ollama-cpu',
+        'llamanode',
+        'openvino-npu',
+        'openvino-gpu',
+        'openvino-hybrid',
+        'llamacpp-vulkan',
+      ]);
+      const rawDevicePin = typeof preset?.device_pin === 'string' ? preset.device_pin.trim() : '';
+      const safeDevicePin = rawDevicePin && ALLOWED_DEVICE_PINS.has(rawDevicePin) ? rawDevicePin : null;
 
       const values = [
         id,
@@ -5907,12 +5966,13 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         safeSystemPrompt,
         safeWorkspace,
         preset.is_default ? 1 : 0,
+        safeDevicePin,
       ];
 
       db.run(
         `
-        INSERT INTO model_presets (id, model_name, temperature, top_p, top_k, context_length, system_prompt, workspace, is_default)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO model_presets (id, model_name, temperature, top_p, top_k, context_length, system_prompt, workspace, is_default, device_pin)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           model_name = excluded.model_name,
           temperature = excluded.temperature,
@@ -5921,7 +5981,8 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
           context_length = excluded.context_length,
           system_prompt = excluded.system_prompt,
           workspace = excluded.workspace,
-          is_default = excluded.is_default
+          is_default = excluded.is_default,
+          device_pin = excluded.device_pin
       `,
         values,
       );

@@ -23,6 +23,8 @@ const checks = [
   { id: 'spec-dashboard', command: 'node scripts/spec-dashboard-smoke.js' },
   { id: 'spec-decoding', command: 'node scripts/speculative-decoding-eval.js' },
   { id: 'preset-system-prompt', command: 'node scripts/preset-system-prompt-smoke.js' },
+  { id: 'spec-decode-residency', command: 'node scripts/spec-decode-residency-smoke.js' },
+  { id: 'autonomy-routing', command: 'node scripts/autonomy-routing-smoke.js' },
 ];
 
 function runCheck(check) {

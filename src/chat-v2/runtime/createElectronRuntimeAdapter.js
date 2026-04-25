@@ -448,6 +448,7 @@ export function createElectronRuntimeAdapter(deps = {}) {
         forceCompatMode: request.forceCompatMode === true,
         forceModelFallback: request.forceModelFallback === true,
         priority: Number.isFinite(Number(request.priority)) ? Number(request.priority) : -20,
+        ...(request.forceBackend ? { forceBackend: String(request.forceBackend).trim() } : {}),
       });
       return result;
     },
@@ -477,6 +478,7 @@ export function createElectronRuntimeAdapter(deps = {}) {
           forceCompatMode: request.forceCompatMode === true,
           forceModelFallback: request.forceModelFallback === true,
           priority: Number.isFinite(Number(request.priority)) ? Number(request.priority) : -20,
+          ...(request.forceBackend ? { forceBackend: String(request.forceBackend).trim() } : {}),
         },
         (chunk) => {
           if (chunk?.error || chunk?.status === 'error') {

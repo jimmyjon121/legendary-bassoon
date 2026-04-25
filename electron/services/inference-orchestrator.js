@@ -1138,6 +1138,69 @@ class InferenceOrchestrator {
     return false;
   }
 
+  // Phase 2 unblock (v0.4.4): proactively warm the llamanode verifier
+  // GGUF when a chat session begins on a model with a curated draft pair
+  // and `DEVFORGE_SPEC_DECODE_ENABLE=1`. `loadModel` is idempotent for
+  // matching path + ctx, so the first spec-decode turn arrives with a
+  // hot verifier instead of paying ~30 s of GGUF cold-load. Safe to call
+  // even when spec-decode is disabled — returns `{ skipped: <reason> }`
+  // in every short-circuit branch and never throws.
+  async prewarmSpecDecodeVerifier(mainModel, options = {}) {
+    if (process.env.DEVFORGE_SPEC_DECODE_ENABLE !== '1') {
+      return { warmed: false, skipped: 'spec_decode_disabled_by_default' };
+    }
+    if (process.env.DEVFORGE_SPEC_DECODE_DISABLE === '1') {
+      return { warmed: false, skipped: 'spec_decode_disabled_env' };
+    }
+
+    const requestedModel = String(mainModel || '').trim();
+    if (!requestedModel) {
+      return { warmed: false, skipped: 'no_model' };
+    }
+
+    const pair = draftSelector.getDraftFor(requestedModel);
+    if (!pair || !pair.draftModelId || !(Number(pair.score) >= 0.7)) {
+      return { warmed: false, skipped: 'no_pair', model: requestedModel };
+    }
+    const pairKey = `${requestedModel}|${pair.draftModelId}`;
+    if (this.isSpecDecodeDisabled(pairKey)) {
+      return { warmed: false, skipped: 'pair_auto_disabled', pairKey };
+    }
+
+    const verifierModel = this._resolveLocalGgufForModel(requestedModel);
+    if (!verifierModel) {
+      return { warmed: false, skipped: 'verifier_gguf_unavailable', model: requestedModel };
+    }
+
+    const backend = this.backends.get('llamanode');
+    if (!backend || typeof backend.loadModel !== 'function') {
+      return { warmed: false, skipped: 'llamanode_unavailable' };
+    }
+
+    const contextSize = Number.isFinite(Number(options.contextSize)) && Number(options.contextSize) > 0
+      ? Number(options.contextSize)
+      : 4096;
+
+    try {
+      const result = await backend.loadModel(verifierModel, { contextSize });
+      return {
+        warmed: true,
+        already: Boolean(result?.already),
+        model: verifierModel,
+        pairKey,
+        contextSize,
+      };
+    } catch (err) {
+      return {
+        warmed: false,
+        skipped: 'load_failed',
+        error: err?.message || String(err),
+        model: verifierModel,
+        contextSize,
+      };
+    }
+  }
+
   async _trySelectSpecDecodeBackend(payload = {}, buildDecision, rejectedCandidates = []) {
     if (process.env.DEVFORGE_SPEC_DECODE_ENABLE !== '1') {
       rejectedCandidates.push({ backendId: 'llamanode', reason: 'spec_decode_disabled_by_default' });

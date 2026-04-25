@@ -27,6 +27,27 @@ function formatModelOptionLabel(modelName = '') {
   return `${displayName} (OpenVINO)`;
 }
 
+const ALLOWED_DEVICE_PINS = new Set([
+  'ollama-cuda',
+  'ollama-cpu',
+  'llamanode',
+  'openvino-npu',
+  'openvino-gpu',
+  'openvino-hybrid',
+  'llamacpp-vulkan',
+]);
+
+const DEVICE_PIN_OPTIONS = [
+  { value: '', label: 'Auto (orchestrator picks)' },
+  { value: 'ollama-cuda', label: 'NVIDIA GPU (Ollama CUDA)' },
+  { value: 'ollama-cpu', label: 'CPU (Ollama)' },
+  { value: 'llamanode', label: 'In-process llama.cpp' },
+  { value: 'openvino-npu', label: 'Intel NPU (OpenVINO)' },
+  { value: 'openvino-gpu', label: 'Intel iGPU (OpenVINO)' },
+  { value: 'openvino-hybrid', label: 'Unified Brain (NPU + iGPU)' },
+  { value: 'llamacpp-vulkan', label: 'Intel Arc (Vulkan)' },
+];
+
 export function ModelPresets() {
   const currentModel = useAppStore((s) => s.currentModel);
   const availableModels = useAppStore((s) => s.availableModels);
@@ -116,6 +137,9 @@ export function ModelPresets() {
       }
     } else if (field === 'system_prompt') {
       normalizedValue = String(value || '').slice(0, 8000);
+    } else if (field === 'device_pin') {
+      const trimmed = typeof value === 'string' ? value.trim() : '';
+      normalizedValue = trimmed && ALLOWED_DEVICE_PINS.has(trimmed) ? trimmed : null;
     }
 
     setPreset((prev) => ({
@@ -276,6 +300,24 @@ export function ModelPresets() {
           className="input text-xs resize-none h-20"
           placeholder="Optional override for the default workspace system prompt."
         />
+      </div>
+
+      <div>
+        <label className="block text-xs text-text-secondary mb-1">
+          Device pin (per-model backend)
+        </label>
+        <select
+          value={preset?.device_pin || ''}
+          onChange={(e) => handleChange('device_pin', e.target.value)}
+          className="input text-xs"
+        >
+          {DEVICE_PIN_OPTIONS.map((opt) => (
+            <option key={opt.value || 'auto'} value={opt.value}>{opt.label}</option>
+          ))}
+        </select>
+        <p className="mt-1 text-[10px] text-text-muted">
+          Forces this model to a specific backend. Per-chat overrides in the chat composer still win for the current conversation.
+        </p>
       </div>
 
       {error && (

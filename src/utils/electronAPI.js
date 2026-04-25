@@ -231,6 +231,8 @@ export const api = {
     safeCall('recordSpecDecodeOutcome', [payload], { success: false }),
   getSpecDecodeStats: (payload = {}) =>
     safeCall('getSpecDecodeStats', [payload], { available: false, lastAcceptanceRate: 0, pairs: [] }),
+  prewarmSpecDecodeVerifier: (payload = {}) =>
+    safeCall('prewarmSpecDecodeVerifier', [payload], { warmed: false, skipped: 'unavailable' }),
   isSpecDecodeDisabled: (payload = {}) =>
     safeCall('isSpecDecodeDisabled', [payload], { available: false, disabled: false }),
 

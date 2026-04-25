@@ -127,3 +127,27 @@ node scripts/speculative-decoding-eval.js 1>scripts/.spec-eval-ramp1.json 2>&1
 The eval enforces a per-turn timeout and a free-RAM watchdog; if either
 trips, the script exits non-zero with a clear message rather than
 hanging.
+
+## 2026-04-25 — v0.4.3 ship + Phase 2 unblock landed
+
+- v0.4.3 (LM Studio parity polish) shipped without changing any spec-decode
+  inputs, so the v0.4.2 baseline above stayed authoritative.
+- v0.4.4 lands the two re-evaluation triggers from this doc:
+  1. **NPU KV-cache reuse** — `scripts/start-npu-server.py` now calls
+     `pipe.start_chat()` on `/draft/session` and feeds only the accepted
+     delta into `pipe.generate(...)` on each `/draft/session/{id}/extend`.
+     `pipe.finish_chat()` runs on session close. The path falls back to
+     the full-prompt generate when the installed `openvino-genai` build
+     does not expose `start_chat`, so older environments keep working.
+  2. **Verifier prewarm across turns** —
+     `InferenceOrchestrator.prewarmSpecDecodeVerifier(mainModel)` loads the
+     llamanode verifier GGUF as a fire-and-forget on chat session start
+     when the model has a curated draft pair. `loadModel` is already
+     idempotent (`backends/llamanode-backend.js:219-223`), so first-turn
+     cold-load is amortized into session warmup instead of stream latency.
+- The next live measurement run should be done after v0.4.4 ships,
+  reusing the same `SPEC_EVAL_LIMIT=1` reproduction recipe above. The
+  `paused` decision stays in place until that run shows
+  `avgRealSpeedup >= 1.0` on at least one prompt — at which point the
+  ramp 1 / 3 / 10 in the recovery plan resumes and the orchestrator's
+  selection-site flip flips back to default-on.

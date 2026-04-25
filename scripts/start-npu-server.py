@@ -1114,7 +1114,13 @@ class DraftSessionExtendRequest(BaseModel):
 def create_draft_session(req: DraftSessionInitRequest):
     """Create a new server-side draft session. The session anchors a
     prompt + running accepted-suffix; subsequent extend calls only need
-    to ship the newly-accepted tokens."""
+    to ship the newly-accepted tokens.
+
+    v0.4.4 (Phase 2 unblock): when the installed openvino-genai build
+    exposes ``LLMPipeline.start_chat()`` we engage chat-mode so each
+    ``extend`` only re-prefills the *delta* since the last accepted
+    suffix instead of the full running prompt. Older builds fall back
+    transparently to the full-prompt generate path."""
     ensure_model_loaded()
     if state.genai_pipe is None:
         return {
@@ -1136,6 +1142,18 @@ def create_draft_session(req: DraftSessionInitRequest):
         except Exception:  # noqa: BLE001
             prompt_text = ''
 
+    chat_mode_active = False
+    chat_mode_skip_reason = None
+    if hasattr(state.genai_pipe, 'start_chat'):
+        try:
+            state.genai_pipe.start_chat()
+            chat_mode_active = True
+        except Exception as exc:  # noqa: BLE001
+            chat_mode_skip_reason = f'start_chat raised: {exc}'
+            print(f'[DevForge][NPU] start_chat unavailable for session: {exc}', flush=True)
+    else:
+        chat_mode_skip_reason = 'start_chat not exposed by installed openvino-genai build'
+
     session_id = f'sess-{uuid.uuid4().hex}'
     with _draft_sessions_lock:
         _draft_sessions[session_id] = {
@@ -1144,6 +1162,9 @@ def create_draft_session(req: DraftSessionInitRequest):
             'created_at': time.time(),
             'last_used_at': time.time(),
             'extend_count': 0,
+            'chat_mode_active': chat_mode_active,
+            'chat_mode_skip_reason': chat_mode_skip_reason,
+            'last_full_text_len': 0,
         }
     return {
         'success': True,
@@ -1151,6 +1172,8 @@ def create_draft_session(req: DraftSessionInitRequest):
         'prompt_chars': len(prompt_text),
         'engine': 'genai',
         'device': state.genai_device or state.config.get('device'),
+        'chat_mode_active': chat_mode_active,
+        'chat_mode_skip_reason': chat_mode_skip_reason,
     }
 
 
@@ -1194,9 +1217,22 @@ def extend_draft_session(session_id: str, req: DraftSessionExtendRequest):
             full_text = (sess.get('prompt_text') or '') + sess['committed_text']
             sess['last_used_at'] = time.time()
             sess['extend_count'] = int(sess.get('extend_count', 0)) + 1
+            chat_mode_active = bool(sess.get('chat_mode_active'))
+            last_full_text_len = int(sess.get('last_full_text_len', 0))
+
+        # KV-cache reuse path (v0.4.4): in chat mode, the GenAI pipeline
+        # retains its KV state across generate() calls. We feed only the
+        # newly-extended text since the last call, so the pipe only
+        # prefills the delta instead of the full running prompt.
+        if chat_mode_active and last_full_text_len > 0 and len(full_text) >= last_full_text_len:
+            generate_input = full_text[last_full_text_len:]
+            generate_mode = 'delta'
+        else:
+            generate_input = full_text
+            generate_mode = 'full'
 
         cfg = _build_draft_config(DraftRequest(
-            prompt=full_text,
+            prompt=generate_input,
             lookahead=req.lookahead,
             temperature=req.temperature,
             top_k=req.top_k,
@@ -1216,7 +1252,34 @@ def extend_draft_session(session_id: str, req: DraftSessionExtendRequest):
                 'latency_ms': int((time.perf_counter() - started_at) * 1000),
             }
 
-        result = pipe.generate(full_text, cfg)
+        try:
+            result = pipe.generate(generate_input, cfg)
+        except Exception as exc:  # noqa: BLE001
+            # If chat-mode generate fails (e.g. the build accepts start_chat
+            # but rejects delta-only inputs on this device), fall back to
+            # the full-text path for the rest of this session and try once
+            # more so the round still produces useful tokens.
+            if chat_mode_active and generate_mode == 'delta':
+                print(
+                    f'[DevForge][NPU] chat-mode delta generate failed ({exc}); falling back to full-prompt for this session.',
+                    flush=True,
+                )
+                with _draft_sessions_lock:
+                    sess_after = _draft_sessions.get(session_id)
+                    if sess_after is not None:
+                        sess_after['chat_mode_active'] = False
+                        sess_after['chat_mode_skip_reason'] = f'delta generate raised: {exc}'
+                generate_input = full_text
+                generate_mode = 'full-fallback'
+                result = pipe.generate(generate_input, cfg)
+            else:
+                raise
+
+        with _draft_sessions_lock:
+            sess_now = _draft_sessions.get(session_id)
+            if sess_now is not None:
+                sess_now['last_full_text_len'] = len(full_text)
+
         if hasattr(result, 'texts') and result.texts:
             generated_text = str(result.texts[0])
         else:
@@ -1241,6 +1304,8 @@ def extend_draft_session(session_id: str, req: DraftSessionExtendRequest):
             'engine': 'genai',
             'device': state.genai_device or state.config.get('device'),
             'extend_count': int(sess.get('extend_count', 0)),
+            'generate_mode': generate_mode,
+            'chat_mode_active': bool(sess.get('chat_mode_active')),
         }
     except Exception as exc:  # noqa: BLE001
         return {
@@ -1261,11 +1326,17 @@ def close_draft_session(session_id: str):
         sess = _draft_sessions.pop(session_id, None)
     if sess is None:
         return {'success': False, 'session_id': session_id, 'reason': 'unknown-or-already-closed'}
+    if sess.get('chat_mode_active') and state.genai_pipe is not None and hasattr(state.genai_pipe, 'finish_chat'):
+        try:
+            state.genai_pipe.finish_chat()
+        except Exception as exc:  # noqa: BLE001
+            print(f'[DevForge][NPU] finish_chat raised on session close: {exc}', flush=True)
     return {
         'success': True,
         'session_id': session_id,
         'closed_at': time.time(),
         'extend_count': int(sess.get('extend_count', 0)),
+        'chat_mode_active': bool(sess.get('chat_mode_active')),
     }
 
 

@@ -92,6 +92,18 @@ export function ChatV2Harness({ forceMode = null, title = null }) {
   }, [engine, mode, currentModel]);
 
   useEffect(() => {
+    if (mode !== 'live' || !currentModel) return;
+    const api = window.electronAPI;
+    if (!api || typeof api.prewarmSpecDecodeVerifier !== 'function') return;
+    let cancelled = false;
+    Promise.resolve(api.prewarmSpecDecodeVerifier({ model: currentModel })).then((result) => {
+      if (cancelled || !result?.warmed) return;
+      // Verifier is hot for the first spec-decode turn on this session.
+    }).catch(() => { /* non-blocking */ });
+    return () => { cancelled = true; };
+  }, [mode, currentModel]);
+
+  useEffect(() => {
     if (mode !== 'live') return;
     void engine.refreshRuntimeState(true);
     const unsub = pollingCoordinator.subscribe('chatV2:runtimeRefresh', {

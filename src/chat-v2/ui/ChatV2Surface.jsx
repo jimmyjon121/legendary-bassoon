@@ -42,6 +42,17 @@ const CTX_LENGTH_CHOICES = [
   { label: '128K', tokens: 131072 },
 ];
 
+const BACKEND_OVERRIDE_CHOICES = [
+  { value: '', label: 'Backend: auto' },
+  { value: 'ollama-cuda', label: 'NVIDIA GPU' },
+  { value: 'ollama-cpu', label: 'CPU' },
+  { value: 'llamanode', label: 'llama.cpp' },
+  { value: 'openvino-npu', label: 'Intel NPU' },
+  { value: 'openvino-gpu', label: 'Intel iGPU' },
+  { value: 'openvino-hybrid', label: 'Unified Brain' },
+  { value: 'llamacpp-vulkan', label: 'Intel Arc (Vulkan)' },
+];
+
 const WORKSPACE_CHROME = {
   casual: {
     label: 'Casual',
@@ -402,6 +413,8 @@ export function ChatV2Surface({ engine, title = 'Chat V2 (Standalone)' }) {
   const [input, setInput] = useState('');
   const contextLengthTokens = useChatV2SessionStore((s) => s.contextLengthTokens);
   const setContextLengthTokens = useChatV2SessionStore((s) => s.setContextLengthTokens);
+  const backendOverride = useChatV2SessionStore((s) => s.backendOverride);
+  const setBackendOverride = useChatV2SessionStore((s) => s.setBackendOverride);
   const currentModelInfo = useAppStore((s) => s.currentModelInfo);
   const [webSearchEnabled, setWebSearchEnabled] = useState(() => {
     if (typeof window === 'undefined') return false;
@@ -1077,6 +1090,29 @@ export function ChatV2Surface({ engine, title = 'Chat V2 (Standalone)' }) {
                     </option>
                   );
                 })}
+              </select>
+            </label>
+
+            <label
+              className={`inline-flex h-7 items-center gap-1.5 rounded-lg border px-2 text-[11px] transition-colors ${
+                backendOverride
+                  ? 'border-violet-400/30 bg-violet-500/15 text-violet-200'
+                  : 'border-white/[0.08] bg-white/[0.03] text-zinc-400'
+              }`}
+            >
+              <span className="shrink-0">Backend</span>
+              <select
+                className="max-w-[8.5rem] bg-transparent text-[11px] outline-none"
+                value={backendOverride || ''}
+                onChange={(e) => setBackendOverride(e.target.value)}
+                aria-label="Per-chat backend override"
+                title="Force the orchestrator to route this conversation to a specific backend"
+              >
+                {BACKEND_OVERRIDE_CHOICES.map((opt) => (
+                  <option key={opt.value || 'auto'} value={opt.value}>
+                    {opt.label}
+                  </option>
+                ))}
               </select>
             </label>
 
