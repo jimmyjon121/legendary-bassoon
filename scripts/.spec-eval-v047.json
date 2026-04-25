@@ -1,0 +1,62 @@
+{
+  "mode": "live",
+  "mainModel": "qwen2.5:1.5b",
+  "requireAcceptance": 0.6,
+  "requireSpeedup": 1.6,
+  "requirePass": false,
+  "note": "Live mode uses orchestrator direct-vs-spec runs and reads real accepted/total telemetry from recordSpecDecodeOutcome.",
+  "model": "qwen2.5:1.5b",
+  "lookahead": 4,
+  "promptsTotal": 3,
+  "promptsMeasured": 2,
+  "failures": 1,
+  "avgAcceptance": 0,
+  "avgDirectTokensPerSecond": 47.50924931652934,
+  "avgSpecTokensPerSecond": 0.06674353965426508,
+  "avgRealSpeedup": 0.0014094731140232998,
+  "perPrompt": [
+    {
+      "kind": "coding",
+      "lookahead": 4,
+      "error": "orchestrator.stream(spec) timeout after 90000ms"
+    },
+    {
+      "kind": "coding",
+      "lookahead": 4,
+      "directTokensPerSecond": 45.60525007638879,
+      "specTokensPerSecond": 0.06953619358876295,
+      "directFirstTokenMs": 10378,
+      "specFirstTokenMs": 28762,
+      "directTokens": 8,
+      "specTokens": 2,
+      "directTokenSource": "ollama-eval-count",
+      "specTokenSource": "spec-meta-committed",
+      "realSpeedup": 0.001524740977678882,
+      "acceptance": 0,
+      "accepted": 0,
+      "drafted": 4,
+      "specPathTaken": true,
+      "directSelectionSource": "auto",
+      "specSelectionSource": "spec-decode"
+    },
+    {
+      "kind": "coding",
+      "lookahead": 4,
+      "directTokensPerSecond": 49.41324855666989,
+      "specTokensPerSecond": 0.06395088571976722,
+      "directFirstTokenMs": 215,
+      "specFirstTokenMs": 31274,
+      "directTokens": 8,
+      "specTokens": 2,
+      "directTokenSource": "ollama-eval-count",
+      "specTokenSource": "spec-meta-committed",
+      "realSpeedup": 0.0012942052503677175,
+      "acceptance": 0,
+      "accepted": 0,
+      "drafted": 4,
+      "specPathTaken": true,
+      "directSelectionSource": "auto",
+      "specSelectionSource": "spec-decode"
+    }
+  ]
+}

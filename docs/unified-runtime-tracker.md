@@ -18,8 +18,8 @@ Make DevForge feel like LM Studio for model picking and long context, *and* make
 - **Phase:** Phase 2 (NPU-Drafted Speculative Decoding) — **infrastructure shipped; perf gate open**
 - **Week:** 1
 - **Blocked on:** live direct-vs-spec measurement and the NPU KV-cache reuse latency target; spec-decode is hard-disabled by default and requires `DEVFORGE_SPEC_DECODE_ENABLE=1` for experimental runs.
-- **Next concrete action:** Mosaic is cancelled after Gate 1 failed; keep the classic v0.4 runtime line stable and only revisit Phase 2 perf if a future draft/verifier pairing can beat the measured baseline.
-- **Gate status:** 25/25 release-gate checks pass for static/smoke contracts (adds `mosaic-gate1-smoke.js`); Phase 3 Gate 1 failed honestly and the Phase 2 perf gate (>=1.6x tokens/sec at >=60% draft acceptance) remains unproven.
+- **Next concrete action:** v0.4.7 settles Phase 2: spec-decode remains opt-in and the classic v0.4 runtime line stays stable; only revisit Phase 2 perf if a future draft/verifier pairing can beat the measured baseline.
+- **Gate status:** 25/25 release-gate checks pass for static/smoke contracts; Phase 3 Gate 1 failed honestly and the Phase 2 perf gate (>=1.6x tokens/sec at >=60% draft acceptance) is now measured failed (`avgRealSpeedup=0.0014x`, `avgAcceptance=0.000`).
 
 ---
 
@@ -149,6 +149,12 @@ Earlier Phase 2 notes assumed node-llama-cpp 3.18.1 fell back to CPU because the
 - **Artifacts.** `docs/perf/mosaic-gate1.md`, `docs/perf/mosaic/decision.json`, `docs/perf/mosaic/sim-14b.json`, `docs/perf/mosaic/sim-30b.json`, and per-device profile JSONs under `docs/perf/mosaic/`.
 - **Shipped scaffolding retained.** `docs/mosaic-architecture.md`, the pure-JS simulator/decision scripts, safety-guarded profilers, and hidden `MosaicLab` dev panel remain useful research/debug assets, but Mosaic runtime build work is cancelled unless a future hardware/runtime change warrants a new gate.
 - **Release gate.** `mosaic-gate1-smoke.js` is the 25th release-gate check; total **25/25**.
+
+### 2026-04-25 — v0.4.7 Phase 2 perf gate FAILED; opt-in only
+- **Live settlement.** Re-ran `scripts/speculative-decoding-eval.js` in live mode with `DEVFORGE_SPEC_DECODE_ENABLE=1`, `SPEC_EVAL_LIMIT=3`, `SPEC_EVAL_MAIN_MODEL=qwen2.5:1.5b`, `DEVFORGE_SPEC_LOOKAHEAD=4`, and the v0.4.4/v0.4.5 verified NPU/CUDA prerequisites.
+- **Result.** `avgAcceptance=0.000`, `avgDirectTokensPerSecond=47.51`, `avgSpecTokensPerSecond=0.067`, `avgRealSpeedup=0.0014x`, `failures=1/3` (first spec turn timed out at 90s). Gate threshold was `avgAcceptance >= 0.6` and `avgRealSpeedup >= 1.6x`; both fail decisively.
+- **Debug hardening retained.** Added `draft_text` to the OpenVINO draft responses, verifier-tokenized draft text in the orchestrator instead of trusting OpenVINO token IDs, fixed accepted-text delta handling for server-side draft sessions, and aligned Qwen spec prompts to the `<|im_start|>` chat template. These are correctness improvements, but the measured pair still accepts 0 drafted tokens and remains much slower than direct Ollama-CUDA.
+- **Decision.** Spec-decode remains experimental and opt-in via `DEVFORGE_SPEC_DECODE_ENABLE=1`; no default-on flip. The current Qwen2.5 OpenVINO INT4 drafter + GGUF verifier pair is documented as a blocker in `NOTES.md`.
 
 ---
 

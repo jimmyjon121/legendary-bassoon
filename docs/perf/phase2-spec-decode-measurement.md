@@ -155,3 +155,45 @@ hanging.
 ## 2026-04-25 — v0.4.5 hardening live verification
 
 Live verification reached /draft/session and two /extend calls. chat_mode_active=true, second generate_mode=delta. See [phase2-unblock-live.md](phase2-unblock-live.md).
+
+## 2026-04-25 — v0.4.7 Phase 2 perf gate FAILED (settlement)
+
+Live re-run of `npm run eval:spec-decoding` against the v0.4.4 NPU `start_chat` delta path and v0.4.6-verified CUDA verifier prewarm.
+
+- **Reproduction recipe** (PowerShell):
+
+```powershell
+$env:DEVFORGE_SPEC_DECODE_ENABLE='1'
+$env:DEVFORGE_SPEC_EVAL_MODE='live'
+$env:SPEC_EVAL_LIMIT='3'
+$env:SPEC_EVAL_NUM_PREDICT='8'
+$env:DEVFORGE_SPEC_LOOKAHEAD='4'
+$env:DEVFORGE_SPEC_MAX_BATCHES='2'
+$env:SPEC_EVAL_MAIN_MODEL='qwen2.5:1.5b'
+$env:DEVFORGE_NPU_GENAI_ONLY='1'
+$env:SPEC_EVAL_TURN_TIMEOUT_MS='90000'
+$env:SPEC_EVAL_MIN_FREE_RAM_GB='3.5'
+node scripts/speculative-decoding-eval.js
+```
+
+- **Measurement artifact:** [`scripts/.spec-eval-v047.json`](../../scripts/.spec-eval-v047.json) (committed for traceability).
+- **Aggregates:**
+  - `promptsTotal=3`, `promptsMeasured=2`, `failures=1`.
+  - `avgAcceptance=0.000` (gate `>= 0.60`).
+  - `avgDirectTokensPerSecond=47.51`.
+  - `avgSpecTokensPerSecond=0.067`.
+  - `avgRealSpeedup=0.0014x` (gate `>= 1.6x`).
+- **Per-prompt notes:**
+  - Prompt 1: `orchestrator.stream(spec) timeout after 90000ms` while loading the verifier on the first spec turn.
+  - Prompts 2 and 3: spec path returned only the verifier's bonus tokens; 0 of 4 drafted tokens accepted in either batch. Spec first-token cost was 28.7 s and 31.3 s respectively, dominated by NPU draft latency plus per-call verifier evaluation overhead.
+- **Honest read:**
+  - The v0.4.4 unblock and v0.4.5/.6 CUDA verifier prewarm did move the needle vs the v0.4.2 baseline (cold-load 42 s to warm 28 s on the first surviving turn), but the dominant cost has shifted from cold-load to per-token round-trips: the JS-side verifier loop plus NPU `pipe.generate` per batch costs more wall time than Ollama-CUDA spends generating the same 8 tokens directly.
+  - Acceptance stayed at 0% with the curated `qwen2.5:1.5b -> qwen2.5:1.5b` pair. Empirically the Ollama GGUF main model and the OpenVINO INT4 NPU drafter diverge often enough at greedy temperature that no draft tokens match the verifier's argmax over short batches. Improving acceptance would require either (a) a same-format draft/main pair where weights are bit-exact, or (b) a stochastic verifier with shared sampling state.
+- **Decision:**
+  - Phase 2 perf gate (`avgRealSpeedup >= 1.6x` at `avgAcceptance >= 0.6`) is **NOT MET**.
+  - Spec-decode stays opt-in via `DEVFORGE_SPEC_DECODE_ENABLE=1`. No default-on flip.
+  - Phase 2 is recorded as `infrastructure shipped, perf gate failed`. The contract gates remain green; the experimental path remains available for users who want to investigate alternative pairs or future hardware.
+- **Re-evaluation triggers:**
+  1. A draft/main pair that shares weights bit-exact (e.g., a Qwen2.5 1.5B Q4 GGUF drafter loaded via llamanode against the same GGUF used as the verifier).
+  2. A native shmem spec-bus transport that removes JS-side per-call latency.
+  3. Faster hardware where NPU `pipe.generate` for a 4-8 token batch costs <100 ms instead of ~2.5 s.

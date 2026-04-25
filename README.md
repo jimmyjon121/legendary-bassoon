@@ -15,7 +15,7 @@ The cloud AI providers keep raising prices. APIs get deprecated. Terms change ov
 
 [Why Local?](#why-local-ai) • [Features](#features) • [Quick Start](#quick-start) • [For Agents](#-for-agents--developers) • [Documentation](#documentation)
 
-*Last Updated: February 18, 2026*
+*Last Updated: April 25, 2026*
 
 </div>
 
@@ -98,6 +98,12 @@ The default chat experience keeps the conversation front and center while preser
 - **Hot-swap models:** Switch between models instantly.
 - **Any GGUF model:** Use models from Hugging Face, Ollama, or anywhere.
 - **Full parameter control:** Temperature, context length, and more.
+
+### 🧪 Local Runtime R&D Status
+- **LM Studio parity polish shipped:** Chat V2 now has context controls, model eject, approximate context-used percentage, per-model system prompts, model-picker quant filters, sort, and VRAM fit dots.
+- **User autonomy shipped:** Per-model device pins and per-chat backend overrides let advanced users force a route when the automatic orchestrator makes the wrong call.
+- **Speculative decoding remains opt-in:** Phase 2 infrastructure is present for experimentation, but the live perf gate failed on current hardware (`avgRealSpeedup=0.0014x`, `avgAcceptance=0`). It is intentionally gated behind `DEVFORGE_SPEC_DECODE_ENABLE=1`.
+- **Mosaic runtime cancelled after Gate 1:** The simulator/profiler artifacts remain in `docs/perf/mosaic/`, but the mandatory 14B Gate 1 target reached only `1.143x` capacity vs the required `1.3x`, so no native cross-device coordinator will be built in this line.
 
 ### 🎨 Local Image Generation
 - **ComfyUI integration:** Professional image generation workflow.
@@ -195,6 +201,9 @@ devforge/
 - [Wireless Brain API Spec](docs/wireless-brain-api-spec.md)
 - [Wireless Brain Auth Model](docs/wireless-brain-auth-model.md)
 - [Wireless Brain Threat Model](docs/wireless-brain-threat-model.md)
+- [Unified Runtime Tracker](docs/unified-runtime-tracker.md)
+- [Phase 2 Spec Decode Measurement](docs/perf/phase2-spec-decode-measurement.md)
+- [Mosaic Gate 1 Decision](docs/perf/mosaic-gate1.md)
 - [Performance Baseline](docs/perf/baseline-2026-02.md)
 - [Architecture Guide](docs/architecture.md)
 - [IPC API Reference](docs/ipc-api.md)

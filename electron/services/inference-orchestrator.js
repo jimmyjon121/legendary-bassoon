@@ -2151,6 +2151,7 @@ class InferenceOrchestrator {
     let acceptedTotal = 0;
     let draftTotal = 0;
     let lastEmittedText = '';
+    let lastAcceptedTextDelta = '';
     let batchCount = 0;
     const maxSpecBatches = Math.max(1, Number(process.env.DEVFORGE_SPEC_MAX_BATCHES) || 64);
 
@@ -2178,7 +2179,7 @@ class InferenceOrchestrator {
       if (serverSessionId) {
         draft = await bus.extendSession({
           sessionId: serverSessionId,
-          acceptedText: committedTokens === 0 ? null : (lastEmittedText.length > 0 ? lastEmittedText.slice(lastEmittedText.lastIndexOf('\n') + 1) : ''),
+          acceptedText: committedTokens === 0 ? null : lastAcceptedTextDelta,
           // We pass the cumulative text via the session's server-side state;
           // the orchestrator's per-round delta is whatever the verifier just
           // accepted. The session keeps prompt + committed_text so the pipe
@@ -2218,7 +2219,13 @@ class InferenceOrchestrator {
         err.code = 'SPEC_DECODE_RUNTIME_ERROR';
         throw err;
       }
-      const draftTokens = Array.isArray(draft.draft_tokens) ? draft.draft_tokens : [];
+      const draftText = typeof draft.draft_text === 'string' ? draft.draft_text : '';
+      const verifierDraftTokens = draftText && typeof model?.tokenize === 'function'
+        ? model.tokenize(draftText).slice(0, lookahead)
+        : null;
+      const draftTokens = Array.isArray(verifierDraftTokens) && verifierDraftTokens.length > 0
+        ? verifierDraftTokens
+        : (Array.isArray(draft.draft_tokens) ? draft.draft_tokens : []);
       if (draftTokens.length === 0) break;
 
       let verify;
@@ -2282,6 +2289,7 @@ class InferenceOrchestrator {
         onChunk({ response: delta, done: false });
       }
       lastEmittedText = fullText;
+      lastAcceptedTextDelta = delta;
 
       promptTokens.push(...committedThisBatch);
       committedTokens += committedThisBatch.length;
@@ -2352,6 +2360,21 @@ class InferenceOrchestrator {
 
   _buildSpecDecodePrompt(payload = {}) {
     if (Array.isArray(payload?.messages) && payload.messages.length > 0) {
+      const modelName = String(payload?._specDecode?.requestedModel || payload?.model || '').toLowerCase();
+      if (modelName.includes('qwen')) {
+        const parts = [];
+        const system = payload?.system && String(payload.system).trim();
+        if (system) parts.push(`<|im_start|>system\n${system}<|im_end|>`);
+        for (const m of payload.messages) {
+          const role = String(m?.role || 'user').toLowerCase();
+          const content = String(m?.content || '').trim();
+          if (!content) continue;
+          const qwenRole = role === 'assistant' ? 'assistant' : (role === 'system' ? 'system' : 'user');
+          parts.push(`<|im_start|>${qwenRole}\n${content}<|im_end|>`);
+        }
+        parts.push('<|im_start|>assistant\n');
+        return parts.join('\n');
+      }
       const lines = [];
       const system = payload?.system && String(payload.system).trim();
       if (system) lines.push(`System: ${system}`);
