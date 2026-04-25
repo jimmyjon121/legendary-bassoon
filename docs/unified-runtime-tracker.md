@@ -15,11 +15,11 @@ Make DevForge feel like LM Studio for model picking and long context, *and* make
 
 ## Current Status
 
-- **Phase:** Phase 2 (NPU-Drafted Speculative Decoding) — **LIVE on v0.4.1**
+- **Phase:** Phase 2 (NPU-Drafted Speculative Decoding) — **infrastructure shipped; perf gate open**
 - **Week:** 1
-- **Blocked on:** nothing for v0.4.1 ship; KV-cache reuse on the NPU drafter (`OpenVINO GenAI LLMPipeline.generate` re-prefills every call) is the next perf win and is tracked as a risk register entry.
-- **Next concrete action:** Phase 3 Mosaic R&D Gate 1 (per-layer profiling simulator). Sprint plan to be drafted separately once v0.4.1 is tagged.
-- **Gate status:** 18/18 release-gate checks pass; CUDA prebuild loads cleanly in-process via `LlamaNodeBackend` auto-injecting CUDA 12.9 toolkit path; tree speculation reactivated and verified via `verifyTreeBatch` smoke.
+- **Blocked on:** live direct-vs-spec measurement and the NPU KV-cache reuse latency target; spec-decode is hard-disabled by default and requires `DEVFORGE_SPEC_DECODE_ENABLE=1` for experimental runs.
+- **Next concrete action:** Measure direct-vs-spec on a small model via live `eval:spec-decoding`, record the decision in `docs/perf/phase2-spec-decode-measurement.md`, then tag v0.4.2.
+- **Gate status:** 18/18 release-gate checks pass for static/smoke contracts; the Phase 2 perf gate (>=1.6x tokens/sec at >=60% draft acceptance) is not yet proven on target hardware.
 
 ---
 
@@ -72,10 +72,10 @@ Status legend: `planned` / `in-progress` / `shipped` / `deferred` / `cancelled`
     - Result: `eval:live-smoke` now passes on target machine (`stream-cold-load-smoke` + `npu-genai-smoke` both green).
 
 ### Phase 2 — NPU-Drafted Speculative Decoding
-- **Status:** **shipped (live)** (2026-04-24) — verifier loop runs end-to-end with CUDA-loaded llamanode
+- **Status:** **infrastructure shipped** (2026-04-24), **perf gate open** — spec-decode is disabled by default and requires `DEVFORGE_SPEC_DECODE_ENABLE=1`
 - **Target window:** Weeks 5-9 — **contract completed in 1 day**
 - **Ships as:** v0.4.0
-- **Gate:** ≥1.6× tokens/sec at ≥60% draft acceptance across 10-prompt eval. Static contract gates (18/18) green; live measurement deferred — see "Next concrete action" above.
+- **Gate:** >=1.6x tokens/sec at >=60% draft acceptance across 10-prompt eval. Static contract gates (18/18) are green; live measurement is pending in the v0.4.2 recovery closeout.
 - **Key files touched:** `package.json` (Electron 32, electron-builder 25, node-llama-cpp 3.18), `electron/services/backends/llamanode-backend.js` (full v3 API rewrite), `electron/services/draft-selector.js` (new), `electron/services/spec-decode-verifier.js` (new), `electron/services/spec-decode-bus.js` (new), `electron/services/inference-orchestrator.js` (spec-decode telemetry + auto-disable), `scripts/start-npu-server.py` (POST /draft + DELETE /draft/{id} + DraftRequest pydantic model), `electron/services/npu-bridge.js` (draftTokens + cancelDraft), `electron/ipc-handlers.js` (8 new IPC handlers), `electron/preload.js`, `src/utils/electronAPI.js`, `src/components/ModelSelector/ModelSelector.jsx` (Spec chip), `src/components/HardwareMonitor/HardwareMonitor.jsx` (Spec decode panel), `scripts/draft-pairs.json` (new override template), `scripts/draft-selector-smoke.js` (new), `scripts/npu-draft-smoke.js` (new), `scripts/spec-verifier-smoke.js` (new), `scripts/spec-bus-smoke.js` (new), `scripts/spec-dashboard-smoke.js` (new), `scripts/speculative-decoding-eval.js` (new, two-mode), `scripts/release-gate.js`, `scripts/ensure-deps.js` (GPU prebuild diagnostics).
 - **Actual start:** 2026-04-24
 - **Actual ship:** 2026-04-24
@@ -236,8 +236,8 @@ Active risks to track as phases progress. See plan Risk Register for full mitiga
 - [ ] NPU + Python subprocess memory leak over long sessions
 - [x] OpenVINO GenAI NPU-3 support for Qwen2.5 family — verified on target machine during v0.3 stabilization (`npu-genai-smoke` reports `engine=genai`, `device=NPU`).
 - [ ] Warm-loop flap when free RAM hovers near the 4 GB gate (Phase 1 introduced a 60s cold-window but should be monitored)
-- [ ] Draft acceptance rate <40% on real user chat distribution — measurable via `eval:spec-decoding` once verifier loop is live; auto-disable already wired (WS-P2-6).
-- [ ] Spec-decode KV-cache reuse — current draft endpoint does a full prefill on every call (~2.5s for 4-8 tokens on NPU 3); the orchestrator-driven verify→commit→continue loop is what makes the cache reuseable. Becomes hot the moment the verifier loop is wired.
+- [ ] Draft acceptance rate <40% on real user chat distribution — measurable via live `eval:spec-decoding`; auto-disable already wired (WS-P2-6), but the path is hard-disabled by default until the v0.4.2 measurement decision.
+- [ ] Spec-decode KV-cache reuse — current draft endpoint does a full prefill on every call (~2.5s for 4-8 tokens on NPU 3); KV-cache reuse on the NPU drafter is still required for the 200 ms latency target.
 - [ ] Mosaic Gate 1 simulator projects <1.1× — if so, Phase 3 cancels
 - [ ] Intel NPU driver regression between plan-date and ship-date
 - [ ] llama.cpp FP8/FP4 Blackwell support timeline
@@ -248,7 +248,16 @@ Active risks to track as phases progress. See plan Risk Register for full mitiga
 
 Chronological dev diary. Newest first. Append entries as work happens; keep each entry brief (what changed, what we learned, what's next).
 
-### 2026-04-24 — Phase 2 live as v0.4.1
+### 2026-04-25 — Recovery closeout shipped as v0.4.2
+- Truth-docs pass: `docs/unified-runtime-tracker.md` Current Status + Phase 2 header and `docs/chat-v2-cutover-checklist.md` Phase 2 acceptance now describe Phase 2 as "infrastructure shipped, perf gate open, spec-decode disabled by default" rather than "live"; references the recovery measurement file.
+- Crash-safe mini smoke: `scripts/spec-decode-live-smoke.js` now supports `SPEC_SMOKE_STEP=cuda-only|npu-only|combined` with a free-RAM pre-flight, RSS watchdog, finally-block teardown that unloads llamanode + NPU and stops the spawned NPU server. Verified all three steps on target hardware; combined emitted real spec-decode telemetry (`selectionSource=spec-decode`, `total=1`, `accepted=0` for the 1/1/1 limits).
+- Real eval rewrite: `scripts/speculative-decoding-eval.js` `runOrchestratorTurn` now reads Ollama `eval_count`/`eval_duration` from the terminal `done` payload for the direct path, `_runSpecDecodeChat.meta.committedTokens` and `getLastSpecDecodeOutcome()` for the spec path; per-turn timeout + free-RAM watchdog prevent silent hangs. Added `InferenceOrchestrator.getLastSpecDecodeOutcome()` (~12 LoC, additive).
+- Measured Phase 2 once on `qwen2.5:1.5b`: direct = 62.84 tok/s @ 540 ms first token, spec = 0.024 tok/s @ 42442 ms first token, real speedup `0.0004x`, acceptance 0/4. Decision **paused** documented in `docs/perf/phase2-spec-decode-measurement.md`. Re-evaluation gated on NPU `LLMPipeline` KV-cache reuse and CUDA verifier residency across turns.
+- NPU server gained `DEVFORGE_NPU_GENAI_ONLY=1` opt-in to skip the Optimum fallback while spec-decode is the active workload, halving RAM during evals.
+- Spec-decode remains hard-disabled by default at both selection sites in `inference-orchestrator.js`; the only opt-in is `DEVFORGE_SPEC_DECODE_ENABLE=1`.
+- Release gate 18/18 PASS. Tag: `v0.4.2`.
+
+### 2026-04-24 — Phase 2 infrastructure as v0.4.1
 - Unblocked the CUDA verifier path: installed VS2022 C++ workload + CUDA Toolkit 12.9 (runtime + cublas + thrust, no driver overwrite). Added `ensureCudaOnPath` to `LlamaNodeBackend` that auto-prepends `cudart64_12.dll`'s directory to `process.env.PATH` so the prebuilt CUDA binary loads cleanly regardless of the user's shell env.
 - Wired `_runSpecDecodeChat` in the orchestrator: chat-main turns where the draft selector returns score>=0.7, llamanode is healthy, and the pair isn't auto-disabled now route through the draft -> verify -> commit -> repeat loop. Token deltas surface to the chat engine via the same onChunk callback as direct streaming, so chat-v2 doesn't need to know whether it's running spec-decode or vanilla.
 - Added `LlamaContextSequence.controlledEvaluate(input)` adapter in `evaluateForVerifier`: passes `[token, { generateNext: { probabilities: true, confidence: true } }]` per token, returns `Map<Token, number>` rows. The verifier helpers (`rowArgmax`, `rowProbability`, `rowSample`, `rowResidualSample`) consume Map and Float32Array shapes interchangeably so the synthetic-logits smoke and the live CUDA verifier share one code path.
@@ -258,6 +267,7 @@ Chronological dev diary. Newest first. Append entries as work happens; keep each
 - Closed the deferred v0.3 manual hardware QA debt programmatically via `scripts/v03-manual-qa-harness.js` (7/7 PASS): NPU registration, embedding lane routing, AC/battery routing, warm-loop gating, mid-stream-kill state machine, GenAI engine, spec-decode dashboard wiring all verified by contract checks.
 - Captured baseline: `docs/perf/baseline-2026-04-v0.4.md` shows 7B Ollama at 72.2 tok/s, 13B Ollama at 15 tok/s, 1.5B NPU draft at ~2.4s per 4-token batch (KV-cache reuse pending), warm-loop 100% active.
 - Release gate 18/18, lint clean, `build:win` produced an installer cleanly. Tag: `v0.4.1`.
+- 2026-04-25 recovery note: after live spec-decode stress testing destabilized the machine, spec-decode was hard-disabled by default. The infrastructure remains available behind `DEVFORGE_SPEC_DECODE_ENABLE=1`; the v0.4.2 closeout records the measured perf decision in `docs/perf/phase2-spec-decode-measurement.md`.
 
 ### 2026-04-24 — Phase 2 contract shipped as v0.4.0
 - Bumped Electron 28 → 32.3.3, electron-builder 24 → 25.1.8, node-llama-cpp 2.8.16 → 3.18.1; backend rewritten on the v3 API.

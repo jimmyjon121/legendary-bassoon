@@ -1,6 +1,6 @@
 {
   "name": "devforge",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Sovereign AI Development Environment - Local, Private, Unrestricted",
   "main": "electron/main.js",
   "author": "Christopher",
@@ -47,6 +47,7 @@
     "eval:spec-bus": "node scripts/spec-bus-smoke.js",
     "eval:spec-dashboard": "node scripts/spec-dashboard-smoke.js",
     "eval:spec-decoding": "node scripts/speculative-decoding-eval.js",
+    "eval:spec-live": "node scripts/spec-decode-live-smoke.js",
     "eval:v03-manual-qa": "node scripts/v03-manual-qa-harness.js",
     "eval:live-smoke": "node scripts/stream-cold-load-smoke.js && node scripts/npu-genai-smoke.js && node scripts/speculative-decoding-eval.js",
     "eval:baseline-v03": "node scripts/v03-baseline-session.js",

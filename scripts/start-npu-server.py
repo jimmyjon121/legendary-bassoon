@@ -339,6 +339,17 @@ def ensure_model_loaded():
         # re-run the (failing) optimum load on every request.
         return
 
+    if os.environ.get('DEVFORGE_NPU_GENAI_ONLY') == '1' and state.genai_pipe is not None:
+        # Spec-decode smoke/eval paths only need the GenAI draft pipeline.
+        # Loading the Optimum fallback at the same time doubles memory
+        # pressure and can destabilize low-headroom hardware during tests.
+        state.model = None
+        state.tokenizer = None
+        state.optimum_load_skipped = True
+        state.optimum_load_error = 'skipped by DEVFORGE_NPU_GENAI_ONLY'
+        print('[DevForge][NPU] Optimum fallback skipped by DEVFORGE_NPU_GENAI_ONLY.', flush=True)
+        return
+
     print(f'[DevForge][NPU] Loading (optimum fallback) model={model_id} tokenizer={tokenizer_id} device={requested_device}', flush=True)
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, trust_remote_code=True)

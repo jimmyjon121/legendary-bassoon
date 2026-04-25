@@ -16,6 +16,9 @@ const { embedTextsWithRouting } = require('./embedding-service');
 const draftSelector = require('./draft-selector');
 const { createSpecDecodeBus } = require('./spec-decode-bus');
 const { verifySpecBatch, verifyTreeBatch } = require('./spec-decode-verifier');
+const fs = require('fs');
+const path = require('path');
+const os = require('os');
 
 const PROFILE_ORDER_STANDARD = {
   // Standard mode now registers NPU and Intel Arc passively when the
@@ -796,6 +799,22 @@ class InferenceOrchestrator {
     return this.specDecodeAutoDisabled.has(key);
   }
 
+  // Returns the most recent spec-decode outcome row for the requested
+  // pair (or any pair when omitted). Read this *after* an orchestrator
+  // stream turn to attribute acceptance to the just-completed batch
+  // instead of averaging across earlier turns. Returns null when no
+  // matching row exists.
+  getLastSpecDecodeOutcome(pair = null) {
+    const filterPair = pair ? String(pair).trim() : null;
+    for (let i = this.specDecodeOutcomes.length - 1; i >= 0; i -= 1) {
+      const row = this.specDecodeOutcomes[i];
+      if (!filterPair || row.pair === filterPair) {
+        return { ...row };
+      }
+    }
+    return null;
+  }
+
   getSpecDecodeStats({ pair = null, windowSize = null } = {}) {
     const cfg = this.specDecodeConfig || { windowSize: 50 };
     const window = Math.max(1, Math.floor(Number(windowSize) || cfg.windowSize));
@@ -1009,6 +1028,203 @@ class InferenceOrchestrator {
     return score;
   }
 
+  _isSpecDecodeWorkload(payload = {}) {
+    const workload = String(payload?.workloadType || '').toLowerCase();
+    if (workload && !['chat', 'chat-main', 'chat-long'].includes(workload)) return false;
+    const lane = normalizeLane(payload?.lane, payload?.workloadType);
+    return lane === 'lane_interactive' || lane === 'lane_agent' || !lane;
+  }
+
+  _normalizeModelKey(value) {
+    return String(value || '')
+      .toLowerCase()
+      .replace(/^gguf:/, '')
+      .replace(/:latest$/, '')
+      .replace(/\.gguf$/, '')
+      .replace(/[^a-z0-9]+/g, '');
+  }
+
+  _resolveOllamaBlobForModel(modelName) {
+    const raw = String(modelName || '').trim();
+    if (!raw || raw.startsWith('gguf:') || raw.includes('\\') || raw.includes('/')) return null;
+
+    const [namePart, tagPart = 'latest'] = raw.split(':');
+    const parts = namePart.split('/').filter(Boolean);
+    const namespace = parts.length > 1 ? parts.slice(0, -1).join(path.sep) : 'library';
+    const model = parts[parts.length - 1];
+    const tag = tagPart || 'latest';
+    const manifestPath = path.join(
+      os.homedir(),
+      '.ollama',
+      'models',
+      'manifests',
+      'registry.ollama.ai',
+      namespace,
+      model,
+      tag,
+    );
+
+    try {
+      if (!fs.existsSync(manifestPath)) return null;
+      const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+      const modelLayer = (Array.isArray(manifest?.layers) ? manifest.layers : [])
+        .find((layer) => String(layer?.mediaType || '').includes('application/vnd.ollama.image.model'));
+      const digest = String(modelLayer?.digest || '').trim();
+      if (!digest.startsWith('sha256:')) return null;
+      const blobPath = path.join(os.homedir(), '.ollama', 'models', 'blobs', digest.replace(':', '-'));
+      if (!fs.existsSync(blobPath)) return null;
+      return `gguf:${blobPath}`;
+    } catch {
+      return null;
+    }
+  }
+
+  _resolveLocalGgufForModel(modelName) {
+    const raw = String(modelName || '').trim();
+    if (!raw) return null;
+    if (isGgufModelId(raw)) return raw;
+
+    const normalizedTarget = this._normalizeModelKey(raw);
+    const catalog = Array.isArray(this.store?.get?.('localGgufCatalog'))
+      ? this.store.get('localGgufCatalog')
+      : [];
+    for (const entry of catalog) {
+      const entryPath = String(entry?.path || '').trim();
+      if (!entryPath || !fs.existsSync(entryPath)) continue;
+      const candidates = [
+        entry?.id,
+        entry?.name,
+        path.basename(entryPath),
+        path.basename(entryPath, path.extname(entryPath)),
+      ].map((item) => this._normalizeModelKey(item));
+      if (candidates.some((key) => key && (key.includes(normalizedTarget) || normalizedTarget.includes(key)))) {
+        return `gguf:${entryPath}`;
+      }
+    }
+
+    return this._resolveOllamaBlobForModel(raw);
+  }
+
+  _getActiveDraftRuntimeInfo() {
+    const configPath = path.resolve(__dirname, '..', '..', 'scripts', 'openvino-model.json');
+    try {
+      if (!fs.existsSync(configPath)) return { modelId: null, tokenizerId: null, family: null };
+      const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      const modelId = String(cfg.model_path || cfg.model_id || '').trim();
+      const tokenizerId = String(cfg.tokenizer || modelId || '').trim();
+      const key = this._normalizeModelKey(`${modelId} ${tokenizerId}`);
+      let family = null;
+      if (key.includes('qwen25') || key.includes('qwen2')) family = 'qwen2';
+      else if (key.includes('llama3')) family = 'llama3';
+      else if (key.includes('deepseek')) family = 'deepseek';
+      else if (key.includes('phi4')) family = 'phi-4';
+      else if (key.includes('mistral')) family = 'mistral';
+      return { modelId, tokenizerId, family };
+    } catch {
+      return { modelId: null, tokenizerId: null, family: null };
+    }
+  }
+
+  _isSpecPairCompatibleWithDraftRuntime(pair) {
+    if (!pair || !pair.draftModelId) return false;
+    const runtime = this._getActiveDraftRuntimeInfo();
+    if (!runtime.family) return false;
+    const pairTokenizer = String(pair.tokenizerId || pair.family || '').toLowerCase();
+    if (runtime.family === 'qwen2') return pairTokenizer.includes('qwen');
+    if (runtime.family === 'llama3') return pairTokenizer.includes('llama3') || pairTokenizer === 'llama';
+    if (runtime.family === 'deepseek') return pairTokenizer.includes('deepseek');
+    if (runtime.family === 'phi-4') return pairTokenizer.includes('phi');
+    if (runtime.family === 'mistral') return pairTokenizer.includes('mistral');
+    return false;
+  }
+
+  async _trySelectSpecDecodeBackend(payload = {}, buildDecision, rejectedCandidates = []) {
+    if (process.env.DEVFORGE_SPEC_DECODE_ENABLE !== '1') {
+      rejectedCandidates.push({ backendId: 'llamanode', reason: 'spec_decode_disabled_by_default' });
+      return null;
+    }
+    if (process.env.DEVFORGE_SPEC_DECODE_DISABLE === '1') {
+      rejectedCandidates.push({ backendId: 'llamanode', reason: 'spec_decode_disabled_env' });
+      return null;
+    }
+    if (!this._isSpecDecodeWorkload(payload)) return null;
+
+    const requestedModel = String(payload?.model || '').trim();
+    if (!requestedModel) return null;
+
+    const pair = draftSelector.getDraftFor(requestedModel);
+    if (!pair || !pair.draftModelId || !(Number(pair.score) >= 0.7)) {
+      rejectedCandidates.push({ backendId: 'llamanode', reason: 'spec_pair_unavailable', model: requestedModel });
+      return null;
+    }
+    if (!this._isSpecPairCompatibleWithDraftRuntime(pair)) {
+      rejectedCandidates.push({
+        backendId: 'llamanode',
+        reason: 'spec_pair_incompatible_with_active_draft_runtime',
+        model: requestedModel,
+        pairTokenizerId: pair.tokenizerId || null,
+        activeDraftRuntime: this._getActiveDraftRuntimeInfo(),
+      });
+      return null;
+    }
+
+    const verifierModel = this._resolveLocalGgufForModel(requestedModel);
+    if (!verifierModel) {
+      rejectedCandidates.push({ backendId: 'llamanode', reason: 'spec_verifier_gguf_unavailable', model: requestedModel });
+      return null;
+    }
+
+    const pairKey = `${requestedModel}|${pair.draftModelId}`;
+    if (this.isSpecDecodeDisabled(pairKey)) {
+      rejectedCandidates.push({ backendId: 'llamanode', reason: 'spec_pair_auto_disabled', pairKey });
+      return null;
+    }
+
+    const backend = this.backends.get('llamanode');
+    if (!backend) {
+      rejectedCandidates.push({ backendId: 'llamanode', reason: 'backend_missing' });
+      return null;
+    }
+    const health = await this._safeBackendHealth(backend);
+    if (!health.available || health.gpu !== 'cuda') {
+      rejectedCandidates.push({
+        backendId: 'llamanode',
+        reason: health.available ? 'spec_verifier_cuda_unavailable' : 'spec_verifier_unavailable',
+        healthStatus: health?.status || 'unavailable',
+        gpu: health?.gpu ?? null,
+        error: health?.error || null,
+      });
+      return null;
+    }
+
+    payload._specDecode = {
+      pair,
+      pairKey,
+      requestedModel,
+      verifierModel,
+      draftModelId: pair.draftModelId,
+    };
+
+    return {
+      backend,
+      fallbackReason: null,
+      decisionEvidence: buildDecision({
+        selectedBackend: backend.id,
+        fallbackReason: null,
+        candidateOrder: ['llamanode', 'ollama-cuda'],
+        scored: [{ backendId: backend.id, score: 110, index: 0 }],
+        rejected: rejectedCandidates,
+        selectionSource: 'spec-decode',
+        extra: {
+          pairKey,
+          draftModelId: pair.draftModelId,
+          verifierModel,
+          requestedModel,
+        },
+      }),
+    };
+  }
+
   async _selectBackendForRequest(payload = {}) {
     const lane = normalizeLane(payload.lane, payload.workloadType);
     const modelSize = parseModelSizeHint(payload.model);
@@ -1025,6 +1241,7 @@ class InferenceOrchestrator {
       scored = [],
       rejected = [],
       selectionSource = 'auto',
+      extra = {},
     } = {}) => ({
       lane,
       workloadType: payload.workloadType || null,
@@ -1041,6 +1258,7 @@ class InferenceOrchestrator {
       })),
       rejectedCandidates: rejected,
       timestamp: Date.now(),
+      ...extra,
     });
 
     // Explicit backend override wins.
@@ -1068,6 +1286,13 @@ class InferenceOrchestrator {
         error: health?.error || null,
       });
     }
+
+    // Speculative decoding is a verifier-routing decision, not a normal
+    // profile-order decision. Check it before the generic GGUF/Ollama path so
+    // eligible chat turns get a real llamannode verifier instead of falling
+    // through to ollama-cuda simply because that backend ranks first.
+    const specDecodeSelection = await this._trySelectSpecDecodeBackend(payload, buildDecision, rejectedCandidates);
+    if (specDecodeSelection) return specDecodeSelection;
 
     // Direct GGUF models (id starts with "gguf:") are force-routed to
     // llamanode. This is the path LM Studio imports and local file loads
@@ -1741,7 +1966,16 @@ class InferenceOrchestrator {
         if (err?.code !== 'SPEC_DECODE_UNAVAILABLE') {
           console.warn('[Orchestrator] spec-decode chat failed, falling back to direct stream:', err?.message || err);
         }
-        // fall through to plain stream
+        // Fall through to plain llamannode stream. If the user selected an
+        // Ollama tag but we resolved a local GGUF verifier model, use that
+        // resolved model for the direct fallback too; otherwise backend.stream
+        // would try to load an Ollama tag as a filesystem path.
+        if (normalizedPayload?._specDecode?.verifierModel) {
+          return backend.stream({
+            ...normalizedPayload,
+            model: normalizedPayload._specDecode.verifierModel,
+          }, onChunk);
+        }
       }
     }
     if (mode === 'stream') {
@@ -1754,6 +1988,7 @@ class InferenceOrchestrator {
     if (!backend || backend.id !== 'llamanode') return false;
     if (typeof backend.evaluateForVerifier !== 'function') return false;
     if (typeof backend.getActiveSequence !== 'function') return false;
+    if (process.env.DEVFORGE_SPEC_DECODE_ENABLE !== '1') return false;
     if (process.env.DEVFORGE_SPEC_DECODE_DISABLE === '1') return false;
 
     const workload = String(payload?.workloadType || '').toLowerCase();
@@ -1762,10 +1997,10 @@ class InferenceOrchestrator {
     const mainModel = String(payload?.model || '').trim();
     if (!mainModel) return false;
 
-    const pair = draftSelector.getDraftFor(mainModel);
+    const pair = payload?._specDecode?.pair || draftSelector.getDraftFor(mainModel);
     if (!pair || !pair.draftModelId || !(Number(pair.score) >= 0.7)) return false;
 
-    const pairKey = `${mainModel}|${pair.draftModelId}`;
+    const pairKey = payload?._specDecode?.pairKey || `${mainModel}|${pair.draftModelId}`;
     if (this.isSpecDecodeDisabled(pairKey)) return false;
 
     return true;
@@ -1787,20 +2022,21 @@ class InferenceOrchestrator {
     const bus = this._specDecodeBus || createSpecDecodeBus({ npuBridge });
     if (!this._specDecodeBus) this._specDecodeBus = bus;
 
-    const mainModel = String(payload?.model || '').trim();
-    const pair = draftSelector.getDraftFor(mainModel);
+    const mainModel = String(payload?._specDecode?.requestedModel || payload?.model || '').trim();
+    const verifierModel = String(payload?._specDecode?.verifierModel || payload?.model || '').trim();
+    const pair = payload?._specDecode?.pair || draftSelector.getDraftFor(mainModel);
     if (!pair || !pair.draftModelId) {
       const err = new Error('spec-decode: no draft pair available');
       err.code = 'SPEC_DECODE_UNAVAILABLE';
       throw err;
     }
-    const pairKey = `${mainModel}|${pair.draftModelId}`;
+    const pairKey = payload?._specDecode?.pairKey || `${mainModel}|${pair.draftModelId}`;
 
     // Ensure the verifier model is loaded; this is what makes
     // backend.evaluateForVerifier work. Use the same num_ctx the
     // request asked for so prefill is sized correctly.
     const requestedCtx = Number(payload?.options?.num_ctx) || 4096;
-    await backend.loadModel(mainModel, { contextSize: requestedCtx });
+    await backend.loadModel(verifierModel, { contextSize: requestedCtx });
     const sequence = backend.getActiveSequence?.();
     if (!sequence) {
       const err = new Error('spec-decode: verifier sequence unavailable after loadModel');
@@ -1837,6 +2073,8 @@ class InferenceOrchestrator {
     let acceptedTotal = 0;
     let draftTotal = 0;
     let lastEmittedText = '';
+    let batchCount = 0;
+    const maxSpecBatches = Math.max(1, Number(process.env.DEVFORGE_SPEC_MAX_BATCHES) || 64);
 
     // Prefer the session API so the Python side keeps the prompt + accepted
     // suffix and only the small accepted-delta is shipped per round.
@@ -1854,7 +2092,8 @@ class InferenceOrchestrator {
     };
     const requestIdBase = `spec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 
-    while (committedTokens < maxNewTokens) {
+    while (committedTokens < maxNewTokens && batchCount < maxSpecBatches) {
+      batchCount += 1;
       let draft;
       let secondaryDraft = null;
       const treeEnabled = process.env.DEVFORGE_SPEC_TREE === '1' && !this._specTreeDisabled;
@@ -1945,6 +2184,9 @@ class InferenceOrchestrator {
       const bonusToken = Number.isFinite(Number(verify.bonusToken)) ? Number(verify.bonusToken) : null;
       const committedThisBatch = [...acceptedTokens];
       if (bonusToken != null) committedThisBatch.push(bonusToken);
+      if (committedThisBatch.length === 0) {
+        break;
+      }
 
       acceptedTotal += acceptedTokens.length;
       draftTotal += draftTokens.length;
@@ -2002,6 +2244,7 @@ class InferenceOrchestrator {
         acceptanceRate: draftTotal > 0 ? acceptedTotal / draftTotal : 0,
         tokensPerSecond,
         durationMs,
+        batchCount,
       },
     };
   }

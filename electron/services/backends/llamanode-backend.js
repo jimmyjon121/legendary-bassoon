@@ -458,6 +458,14 @@ class LlamaNodeBackend extends BaseBackend {
       throw err;
     }
 
+    // Correctness first: verify the exact prefix+draft sequence supplied by
+    // the orchestrator. This clears previous verifier state so repeated calls
+    // do not append duplicate prefixes into the same context sequence. A later
+    // KV-cache optimization can replace this with adaptStateToTokens().
+    if (typeof sequence.clearHistory === 'function') {
+      await sequence.clearHistory();
+    }
+
     // Ask for probabilities at every position so the verifier has a
     // distribution for each draft token slot AND for the bonus slot
     // immediately after the last draft token.

@@ -93,12 +93,12 @@ Evidence source:
 
 ## v0.4.1 closeout (2026-04-24)
 
-The five v0.3 manual-only items were closed by `node scripts/v03-manual-qa-harness.js` which programmatically verifies each contract the items rely on. Live UI screenshot capture is still recommended for the next user-driven session, but the contract-level PASS evidence below is sufficient ship evidence for v0.4.1.
+The five v0.3 manual-only items were closed by `node scripts/v03-manual-qa-harness.js` which programmatically verifies each contract the items rely on. Live UI screenshot capture is still recommended for the next user-driven session. Phase 2 speculative-decoding infrastructure shipped in v0.4.1, but the live performance gate is tracked separately in the v0.4.2 recovery closeout and spec-decode is disabled by default.
 
 Evidence source:
 - `npm run eval:release-gate` -> 18/18 PASS
 - `node scripts/v03-manual-qa-harness.js` -> 7/7 PASS, 0 FAIL
-- `npm run eval:live-smoke` -> PASS
+- `npm run eval:live-smoke` -> PASS for non-spec live smokes; speculative decoding requires explicit `DEVFORGE_SPEC_DECODE_ENABLE=1`.
 
 ### Phase 1 acceptance — flipped to PASS
 - NPU registered without opt-in on fresh launch -> **PASS** (orchestrator `_registerPassiveOpenVinoBackends` is unconditional; `PROFILE_ORDER_STANDARD.balanced` includes `openvino-npu`; harness confirms).
@@ -108,11 +108,12 @@ Evidence source:
 - Mid-stream kill: retry banner under partial reply -> **PASS** (chat engine has the streamingStatus banner, two-phase watchdog, partial-reply preservation, and direct-generate fallback path; harness confirms. Live "kill the Python NPU process" capture remains optional UI evidence).
 
 ### Phase 2 acceptance
-- Spec-decode pair-supported chip on ModelSelector -> **PASS** (ModelSelector renders the violet "Spec" chip via `electronAPI.getDraftFor`; covered by `eval:draft-selector` smoke).
-- Phase 2 dashboard wires per-pair acceptance into Hardware Monitor -> **PASS** (orchestrator `_runSpecDecodeChat` calls `recordSpecDecodeOutcome`; HardwareMonitor renders the Spec decode panel; harness confirms).
-- DraftSession KV-reuse contract live -> **PASS** (live `POST /draft/session` round-trip verified end-to-end; latency target deferred to KV-cache-reuse follow-up tracked as a risk register item).
-- Tree-spec verifier picks longest-matching branch -> **PASS** (`spec-verifier-smoke` "scenarioTreeSpecPicksLongerBranch" covers it; orchestrator wires `verifyTreeBatch` behind `DEVFORGE_SPEC_TREE=1`).
+- Spec-decode is hard-disabled by default as of the v0.4.2 recovery closeout. Enable only for controlled experiments with `DEVFORGE_SPEC_DECODE_ENABLE=1`.
+- Spec-decode pair-supported chip on ModelSelector -> **INFRASTRUCTURE PASS; PERF GATE OPEN** (ModelSelector renders the violet "Spec" chip via `electronAPI.getDraftFor`; covered by `eval:draft-selector` smoke).
+- Phase 2 dashboard wires per-pair acceptance into Hardware Monitor -> **INFRASTRUCTURE PASS; PERF GATE OPEN** (orchestrator `_runSpecDecodeChat` records outcomes when the experimental path is enabled; HardwareMonitor renders the Spec decode panel).
+- DraftSession round-trip contract -> **INFRASTRUCTURE PASS; LATENCY TARGET OPEN** (`POST /draft/session` round-trip is implemented; NPU KV-cache reuse and the 200 ms target remain deferred).
+- Tree-spec verifier picks longest-matching branch -> **INFRASTRUCTURE PASS; PERF GATE OPEN** (`spec-verifier-smoke` "scenarioTreeSpecPicksLongerBranch" covers the pure verifier path; live benefit is unmeasured).
 
-### Follow-up actions (still optional, not blocking v0.4.1)
+### Follow-up actions (blocking v0.4.2 recovery closeout)
 - User-captured Hardware Monitor screenshots for AC/battery + profile-flip + mid-stream-kill flows. Repro recipes inline in each item above.
-- Live `eval:spec-decoding` perf gate on the in-process verifier loop once the node-llama-cpp 3.x CUDA prebuild's `testBindingBinary` probe loads on the target machine (binding test risk is in the v0.4 tracker risk register).
+- Live `eval:spec-decoding` direct-vs-spec measurement on the in-process verifier loop, with `DEVFORGE_SPEC_DECODE_ENABLE=1`, before any claim that the Phase 2 perf gate passed.
