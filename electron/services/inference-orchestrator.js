@@ -13,6 +13,9 @@ const hardwareDetection = require('./hardware-detection');
 const JobQueue = require('./job-queue');
 const { getPowerMode } = require('./power-mode');
 const { embedTextsWithRouting } = require('./embedding-service');
+const draftSelector = require('./draft-selector');
+const { createSpecDecodeBus } = require('./spec-decode-bus');
+const { verifySpecBatch, verifyTreeBatch } = require('./spec-decode-verifier');
 
 const PROFILE_ORDER_STANDARD = {
   // Standard mode now registers NPU and Intel Arc passively when the
@@ -1721,10 +1724,328 @@ class InferenceOrchestrator {
 
   async _executeOnBackend(backend, mode, payload, onChunk) {
     const normalizedPayload = this._normalizePayloadForBackend(backend, payload);
+    // Phase 2: stream-mode chat-main turns through llamanode get the
+    // speculative-decode loop when a compatible draft pair exists, the
+    // verifier API is healthy, and auto-disable hasn't suspended the
+    // pair. On any failure we fall back to plain backend.stream so chat
+    // never breaks because of a spec-decode glitch.
+    if (
+      mode === 'stream'
+      && backend?.id === 'llamanode'
+      && this._shouldUseSpecDecode(normalizedPayload, backend)
+    ) {
+      try {
+        const result = await this._runSpecDecodeChat(backend, normalizedPayload, onChunk);
+        if (result?.success !== false) return result;
+      } catch (err) {
+        if (err?.code !== 'SPEC_DECODE_UNAVAILABLE') {
+          console.warn('[Orchestrator] spec-decode chat failed, falling back to direct stream:', err?.message || err);
+        }
+        // fall through to plain stream
+      }
+    }
     if (mode === 'stream') {
       return backend.stream(normalizedPayload, onChunk);
     }
     return backend.generate(normalizedPayload);
+  }
+
+  _shouldUseSpecDecode(payload, backend) {
+    if (!backend || backend.id !== 'llamanode') return false;
+    if (typeof backend.evaluateForVerifier !== 'function') return false;
+    if (typeof backend.getActiveSequence !== 'function') return false;
+    if (process.env.DEVFORGE_SPEC_DECODE_DISABLE === '1') return false;
+
+    const workload = String(payload?.workloadType || '').toLowerCase();
+    if (workload && !['chat', 'chat-main', 'chat-long'].includes(workload)) return false;
+
+    const mainModel = String(payload?.model || '').trim();
+    if (!mainModel) return false;
+
+    const pair = draftSelector.getDraftFor(mainModel);
+    if (!pair || !pair.draftModelId || !(Number(pair.score) >= 0.7)) return false;
+
+    const pairKey = `${mainModel}|${pair.draftModelId}`;
+    if (this.isSpecDecodeDisabled(pairKey)) return false;
+
+    return true;
+  }
+
+  // Drives a draft -> verify -> commit -> continue loop using the NPU
+  // drafter via spec-decode-bus and the in-process llamanode verifier.
+  // Streams accepted tokens to onChunk as plain text deltas so the
+  // caller (chat-v2) cannot tell whether the response came from spec
+  // decoding or vanilla generation. Records per-batch outcomes so the
+  // dashboard's auto-disable state machine has live data.
+  async _runSpecDecodeChat(backend, payload, onChunk) {
+    const npuBridge = getLazyNpuBridge();
+    if (!npuBridge || typeof npuBridge.draftTokens !== 'function') {
+      const err = new Error('spec-decode requires npu-bridge with draftTokens()');
+      err.code = 'SPEC_DECODE_UNAVAILABLE';
+      throw err;
+    }
+    const bus = this._specDecodeBus || createSpecDecodeBus({ npuBridge });
+    if (!this._specDecodeBus) this._specDecodeBus = bus;
+
+    const mainModel = String(payload?.model || '').trim();
+    const pair = draftSelector.getDraftFor(mainModel);
+    if (!pair || !pair.draftModelId) {
+      const err = new Error('spec-decode: no draft pair available');
+      err.code = 'SPEC_DECODE_UNAVAILABLE';
+      throw err;
+    }
+    const pairKey = `${mainModel}|${pair.draftModelId}`;
+
+    // Ensure the verifier model is loaded; this is what makes
+    // backend.evaluateForVerifier work. Use the same num_ctx the
+    // request asked for so prefill is sized correctly.
+    const requestedCtx = Number(payload?.options?.num_ctx) || 4096;
+    await backend.loadModel(mainModel, { contextSize: requestedCtx });
+    const sequence = backend.getActiveSequence?.();
+    if (!sequence) {
+      const err = new Error('spec-decode: verifier sequence unavailable after loadModel');
+      err.code = 'SPEC_DECODE_UNAVAILABLE';
+      throw err;
+    }
+    const model = sequence.model;
+    const tokensRef = model?.tokens;
+    const isEogToken = (token) => {
+      if (typeof model?.isEogToken === 'function') return model.isEogToken(token);
+      if (tokensRef?.eos !== undefined && token === tokensRef.eos) return true;
+      if (tokensRef?.eot !== undefined && token === tokensRef.eot) return true;
+      return false;
+    };
+
+    // Build the prompt text for both drafter (NPU) and verifier (CUDA).
+    const promptText = this._buildSpecDecodePrompt(payload);
+    if (!promptText) {
+      const err = new Error('spec-decode: empty prompt');
+      err.code = 'SPEC_DECODE_UNAVAILABLE';
+      throw err;
+    }
+    const promptTokens = typeof model?.tokenize === 'function' ? model.tokenize(promptText) : [];
+    if (!Array.isArray(promptTokens) || promptTokens.length === 0) {
+      const err = new Error('spec-decode: tokenizer returned empty prefix');
+      err.code = 'SPEC_DECODE_UNAVAILABLE';
+      throw err;
+    }
+
+    const lookahead = Number(process.env.DEVFORGE_SPEC_LOOKAHEAD) || 4;
+    const maxNewTokens = Math.max(16, Number(payload?.options?.num_predict) || 256);
+    const startedAt = Date.now();
+    let committedTokens = 0;
+    let acceptedTotal = 0;
+    let draftTotal = 0;
+    let lastEmittedText = '';
+
+    // Prefer the session API so the Python side keeps the prompt + accepted
+    // suffix and only the small accepted-delta is shipped per round.
+    let serverSessionId = null;
+    try {
+      const created = await bus.createSession({ prompt: promptText });
+      if (created?.success && created.session_id) serverSessionId = created.session_id;
+    } catch {
+      serverSessionId = null;
+    }
+    const sampling = {
+      temperature: Number(payload?.options?.temperature ?? 0),
+      top_k: Number(payload?.options?.top_k ?? 40),
+      top_p: Number(payload?.options?.top_p ?? 0.9),
+    };
+    const requestIdBase = `spec-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+
+    while (committedTokens < maxNewTokens) {
+      let draft;
+      let secondaryDraft = null;
+      const treeEnabled = process.env.DEVFORGE_SPEC_TREE === '1' && !this._specTreeDisabled;
+      if (serverSessionId) {
+        draft = await bus.extendSession({
+          sessionId: serverSessionId,
+          acceptedText: committedTokens === 0 ? null : (lastEmittedText.length > 0 ? lastEmittedText.slice(lastEmittedText.lastIndexOf('\n') + 1) : ''),
+          // We pass the cumulative text via the session's server-side state;
+          // the orchestrator's per-round delta is whatever the verifier just
+          // accepted. The session keeps prompt + committed_text so the pipe
+          // sees the full continuation on every call without us re-sending.
+          acceptedTokens: null,
+          lookahead,
+          requestId: `${requestIdBase}-${committedTokens}`,
+          sampling,
+        });
+      } else {
+        const calls = [bus.requestDraft({
+          prompt: promptText + lastEmittedText,
+          lookahead,
+          requestId: `${requestIdBase}-${committedTokens}-primary`,
+          sampling,
+        })];
+        if (treeEnabled) {
+          calls.push(bus.requestDraft({
+            prompt: promptText + lastEmittedText,
+            lookahead,
+            requestId: `${requestIdBase}-${committedTokens}-secondary`,
+            sampling,
+            branch: 'secondary',
+          }).catch(() => null));
+        }
+        const results = await Promise.all(calls);
+        draft = results[0];
+        secondaryDraft = treeEnabled ? results[1] : null;
+      }
+      if (!draft || draft.success === false) {
+        if (serverSessionId) {
+          // Try to recover via the stateless path.
+          serverSessionId = null;
+          continue;
+        }
+        const err = new Error(`spec-decode draft failed: ${draft?.error || 'unknown'}`);
+        err.code = 'SPEC_DECODE_RUNTIME_ERROR';
+        throw err;
+      }
+      const draftTokens = Array.isArray(draft.draft_tokens) ? draft.draft_tokens : [];
+      if (draftTokens.length === 0) break;
+
+      let verify;
+      const evaluateLogits = async (combinedTokens) => {
+        const result = await backend.evaluateForVerifier({ tokens: combinedTokens });
+        return result.logits;
+      };
+      try {
+        const haveSecondary = secondaryDraft && secondaryDraft.success !== false
+          && Array.isArray(secondaryDraft.draft_tokens) && secondaryDraft.draft_tokens.length > 0;
+        if (haveSecondary) {
+          const treeResult = await verifyTreeBatch({
+            prefix: promptTokens,
+            branches: [
+              { branchId: 'primary', draftTokens },
+              { branchId: 'secondary', draftTokens: secondaryDraft.draft_tokens },
+            ],
+            evaluateLogits,
+            mode: 'greedy',
+          });
+          verify = treeResult;
+          // Auto-disable secondary branch if it gives <5% additional
+          // tokens accepted vs primary across the rolling window.
+          this._recordTreeMargin(pairKey, treeResult.marginalGainTokens, draftTokens.length);
+        } else {
+          verify = await bus.submitVerification({
+            prefix: promptTokens,
+            draftTokens,
+            evaluateLogits,
+            mode: 'greedy',
+          });
+        }
+      } catch (err) {
+        if (err?.code === 'SPEC_DECODE_UNAVAILABLE') throw err;
+        const wrapped = new Error(`spec-decode verifier failed: ${err?.message || err}`);
+        wrapped.code = 'SPEC_DECODE_RUNTIME_ERROR';
+        throw wrapped;
+      }
+
+      const acceptedTokens = Array.isArray(verify.accepted) ? verify.accepted : [];
+      const bonusToken = Number.isFinite(Number(verify.bonusToken)) ? Number(verify.bonusToken) : null;
+      const committedThisBatch = [...acceptedTokens];
+      if (bonusToken != null) committedThisBatch.push(bonusToken);
+
+      acceptedTotal += acceptedTokens.length;
+      draftTotal += draftTokens.length;
+
+      // Detokenize the committed run as a string, anchored on the previously
+      // emitted text so detokenizer heuristics produce continuation-safe
+      // spacing. Then emit the *new* slice via onChunk and roll the prefix
+      // forward for the next draft.
+      const newPrefixTokens = [...promptTokens, ...committedThisBatch];
+      const fullText = typeof model?.detokenize === 'function'
+        ? model.detokenize(newPrefixTokens.slice(promptTokens.length), false, promptTokens)
+        : '';
+      const delta = fullText.length > lastEmittedText.length ? fullText.slice(lastEmittedText.length) : '';
+      if (delta && typeof onChunk === 'function') {
+        onChunk({ response: delta, done: false });
+      }
+      lastEmittedText = fullText;
+
+      promptTokens.push(...committedThisBatch);
+      committedTokens += committedThisBatch.length;
+
+      // Record the per-batch outcome for the dashboard / auto-disable.
+      this.recordSpecDecodeOutcome({
+        pair: pairKey,
+        accepted: acceptedTokens.length,
+        total: draftTokens.length,
+        mainTokensPerSec: null,
+        baselineTokensPerSec: null,
+      });
+
+      // Stop on EOS / EOT.
+      if (bonusToken != null && isEogToken(bonusToken)) break;
+      if (acceptedTokens.some((t) => isEogToken(t))) break;
+    }
+
+    if (typeof onChunk === 'function') onChunk({ done: true });
+
+    if (serverSessionId) {
+      try { await bus.closeSession(serverSessionId); } catch { /* non-blocking */ }
+    }
+
+    const durationMs = Date.now() - startedAt;
+    const tokensPerSecond = durationMs > 0 ? Math.round((committedTokens / (durationMs / 1000)) * 10) / 10 : 0;
+
+    return {
+      success: true,
+      response: lastEmittedText,
+      done: true,
+      meta: {
+        executionMode: 'spec-decode',
+        pair: pairKey,
+        committedTokens,
+        acceptedTotal,
+        draftTotal,
+        acceptanceRate: draftTotal > 0 ? acceptedTotal / draftTotal : 0,
+        tokensPerSecond,
+        durationMs,
+      },
+    };
+  }
+
+  // Tracks tree-spec marginal gain over a rolling window. When the
+  // secondary branch contributes < 5% extra accepted tokens over the
+  // last N rounds, disable tree mode for the remainder of this turn.
+  _recordTreeMargin(pairKey, marginalGainTokens, draftLen) {
+    if (!this._specTreeStats) this._specTreeStats = new Map();
+    const stats = this._specTreeStats.get(pairKey) || { samples: [], sum: 0, total: 0 };
+    const ratio = draftLen > 0 ? marginalGainTokens / draftLen : 0;
+    stats.samples.push(ratio);
+    stats.sum += ratio;
+    stats.total += 1;
+    if (stats.samples.length > 30) {
+      const dropped = stats.samples.shift();
+      stats.sum -= dropped;
+    }
+    this._specTreeStats.set(pairKey, stats);
+    if (stats.samples.length >= 10) {
+      const avg = stats.sum / stats.samples.length;
+      if (avg < 0.05) {
+        this._specTreeDisabled = true;
+      }
+    }
+  }
+
+  _buildSpecDecodePrompt(payload = {}) {
+    if (Array.isArray(payload?.messages) && payload.messages.length > 0) {
+      const lines = [];
+      const system = payload?.system && String(payload.system).trim();
+      if (system) lines.push(`System: ${system}`);
+      for (const m of payload.messages) {
+        const role = String(m?.role || 'user').toLowerCase();
+        const content = String(m?.content || '').trim();
+        if (!content) continue;
+        if (role === 'system') lines.push(`System: ${content}`);
+        else if (role === 'assistant') lines.push(`Assistant: ${content}`);
+        else lines.push(`User: ${content}`);
+      }
+      lines.push('Assistant:');
+      return lines.join('\n\n');
+    }
+    return String(payload?.prompt || '').trim();
   }
 
   async _enqueueInference(mode, payload = {}, onChunk = null) {

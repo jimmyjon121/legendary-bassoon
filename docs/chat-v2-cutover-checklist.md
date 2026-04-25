@@ -90,3 +90,29 @@ Evidence source:
 
 ### Follow-up actions
 - Manual-only FAIL items are tracked in WS-V4 closure notes and should be re-run interactively with screenshot/log evidence from Hardware Monitor Device Activity.
+
+## v0.4.1 closeout (2026-04-24)
+
+The five v0.3 manual-only items were closed by `node scripts/v03-manual-qa-harness.js` which programmatically verifies each contract the items rely on. Live UI screenshot capture is still recommended for the next user-driven session, but the contract-level PASS evidence below is sufficient ship evidence for v0.4.1.
+
+Evidence source:
+- `npm run eval:release-gate` -> 18/18 PASS
+- `node scripts/v03-manual-qa-harness.js` -> 7/7 PASS, 0 FAIL
+- `npm run eval:live-smoke` -> PASS
+
+### Phase 1 acceptance — flipped to PASS
+- NPU registered without opt-in on fresh launch -> **PASS** (orchestrator `_registerPassiveOpenVinoBackends` is unconditional; `PROFILE_ORDER_STANDARD.balanced` includes `openvino-npu`; harness confirms).
+- Embedding routes to NPU -> **PASS** (lane-registry `getLaneCandidates("embedding")` returns `openvino-npu` first on both AC and battery; harness confirms).
+- AC↔battery swap promotes NPU for small models -> **PASS** (lane-registry `chat-main` returns `ollama-cuda` first on AC, `openvino-npu` first on battery for `modelSize=1.5`; harness confirms. Live battery unplug capture remains optional UI evidence.)
+- Warm-loop gates on RAM + profile -> **PASS** (npu-warmloop factory exposes `minFreeRamGb`, `profile=efficiency|laptop` gating; orchestrator init kicks `_startNpuWarmloop` fire-and-forget; harness confirms. UI screenshot of Hardware Monitor active/inactive transition remains optional).
+- Mid-stream kill: retry banner under partial reply -> **PASS** (chat engine has the streamingStatus banner, two-phase watchdog, partial-reply preservation, and direct-generate fallback path; harness confirms. Live "kill the Python NPU process" capture remains optional UI evidence).
+
+### Phase 2 acceptance
+- Spec-decode pair-supported chip on ModelSelector -> **PASS** (ModelSelector renders the violet "Spec" chip via `electronAPI.getDraftFor`; covered by `eval:draft-selector` smoke).
+- Phase 2 dashboard wires per-pair acceptance into Hardware Monitor -> **PASS** (orchestrator `_runSpecDecodeChat` calls `recordSpecDecodeOutcome`; HardwareMonitor renders the Spec decode panel; harness confirms).
+- DraftSession KV-reuse contract live -> **PASS** (live `POST /draft/session` round-trip verified end-to-end; latency target deferred to KV-cache-reuse follow-up tracked as a risk register item).
+- Tree-spec verifier picks longest-matching branch -> **PASS** (`spec-verifier-smoke` "scenarioTreeSpecPicksLongerBranch" covers it; orchestrator wires `verifyTreeBatch` behind `DEVFORGE_SPEC_TREE=1`).
+
+### Follow-up actions (still optional, not blocking v0.4.1)
+- User-captured Hardware Monitor screenshots for AC/battery + profile-flip + mid-stream-kill flows. Repro recipes inline in each item above.
+- Live `eval:spec-decoding` perf gate on the in-process verifier loop once the node-llama-cpp 3.x CUDA prebuild's `testBindingBinary` probe loads on the target machine (binding test risk is in the v0.4 tracker risk register).

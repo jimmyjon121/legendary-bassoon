@@ -69,21 +69,115 @@ function sampleFromDistribution(probs, rng = Math.random) {
   return probs.length - 1;
 }
 
-function residualSample(verifierProbs, draftProbs, rng = Math.random) {
-  // Sample from max(0, p - q), normalized. Used when stochastic mode
-  // rejects a draft token; the bonus replacement is drawn from this
-  // residual distribution to preserve the verifier's marginal.
-  const residual = new Array(verifierProbs.length);
+// ─── Row helpers (logits-array OR sparse Map<token, prob>) ────────────
+// The orchestrator's spec loop passes the verifier rows that come either
+// from controlledEvaluate (Map<Token, number>, already softmaxed and
+// sorted) or from a synthetic test (Float32Array of dense logits).
+// Helpers below normalize the access pattern so the algorithm stays
+// agnostic about which representation it got.
+
+function rowIsMap(row) {
+  return row && typeof row.entries === 'function' && typeof row.get === 'function';
+}
+
+function rowArgmax(row) {
+  if (!row) return -1;
+  if (rowIsMap(row)) {
+    // controlledEvaluate returns the Map sorted by probability, so the
+    // first entry is the argmax.
+    const next = row.entries().next();
+    if (next.done || !Array.isArray(next.value)) return -1;
+    return next.value[0];
+  }
+  return argmax(row);
+}
+
+function rowProbability(row, token) {
+  if (!row) return 0;
+  if (rowIsMap(row)) {
+    return Number(row.get(token)) || 0;
+  }
+  // Float32Array is raw logits -- softmax-on-demand. Cache the softmax
+  // on the array itself so repeat lookups don't re-exponentiate.
+  if (!row.__softmaxCache) {
+    Object.defineProperty(row, '__softmaxCache', {
+      value: softmax(row),
+      enumerable: false,
+      writable: false,
+    });
+  }
+  return row.__softmaxCache[token] ?? 0;
+}
+
+function rowSample(row, rng = Math.random) {
+  if (!row) return -1;
+  if (rowIsMap(row)) {
+    const r = rng();
+    let cum = 0;
+    for (const [token, prob] of row.entries()) {
+      cum += prob;
+      if (r <= cum) return token;
+    }
+    // Fall through to last entry on rounding error.
+    let last = -1;
+    for (const [token] of row.entries()) last = token;
+    return last;
+  }
+  if (!row.__softmaxCache) {
+    Object.defineProperty(row, '__softmaxCache', {
+      value: softmax(row),
+      enumerable: false,
+      writable: false,
+    });
+  }
+  return sampleFromDistribution(row.__softmaxCache, rng);
+}
+
+function rowResidualSample(row, draftProb, draftToken, rng = Math.random) {
+  // Stochastic-mode bonus: sample from max(0, p_verifier - p_draft) where
+  // we approximate the drafter's distribution by placing all of its mass
+  // on draftToken with weight `draftProb`. This isn't the full drafter
+  // distribution (which we don't have for the NPU drafter today), but it
+  // preserves the spec-sampling property that the rejected-draft bonus
+  // is drawn from a distribution whose marginal matches the verifier.
+  if (!row) return -1;
+  if (rowIsMap(row)) {
+    const residual = new Map();
+    let sum = 0;
+    for (const [token, prob] of row.entries()) {
+      const r = token === draftToken ? Math.max(0, prob - (Number(draftProb) || 0)) : prob;
+      if (r > 0) {
+        residual.set(token, r);
+        sum += r;
+      }
+    }
+    if (sum <= 0) return rowSample(row, rng);
+    const draw = rng() * sum;
+    let cum = 0;
+    for (const [token, weight] of residual.entries()) {
+      cum += weight;
+      if (draw <= cum) return token;
+    }
+    let last = -1;
+    for (const [token] of residual.entries()) last = token;
+    return last;
+  }
+  if (!row.__softmaxCache) {
+    Object.defineProperty(row, '__softmaxCache', {
+      value: softmax(row),
+      enumerable: false,
+      writable: false,
+    });
+  }
+  const probs = row.__softmaxCache;
+  const residual = new Array(probs.length);
   let sum = 0;
-  for (let i = 0; i < verifierProbs.length; i += 1) {
-    const r = Math.max(0, verifierProbs[i] - (draftProbs?.[i] ?? 0));
+  for (let i = 0; i < probs.length; i += 1) {
+    const r = i === draftToken ? Math.max(0, probs[i] - (Number(draftProb) || 0)) : probs[i];
     residual[i] = r;
     sum += r;
   }
-  if (sum <= 0) {
-    // Fall back to verifier sample when residual is degenerate.
-    return sampleFromDistribution(verifierProbs, rng);
-  }
+  if (sum <= 0) return sampleFromDistribution(probs, rng);
   for (let i = 0; i < residual.length; i += 1) residual[i] /= sum;
   return sampleFromDistribution(residual, rng);
 }
@@ -166,7 +260,7 @@ async function verifySpecBatch({
     const draftToken = draftTokens[i];
 
     if (effectiveMode === 'greedy') {
-      const verifierArgmax = argmax(logitsRow);
+      const verifierArgmax = rowArgmax(logitsRow);
       if (verifierArgmax === draftToken) {
         accepted.push(draftToken);
         acceptanceLogprobs.push(0);
@@ -178,8 +272,7 @@ async function verifySpecBatch({
     }
 
     // Stochastic acceptance: min(1, p(d_i) / q(d_i))
-    const verifierProbs = softmax(logitsRow);
-    const p = verifierProbs[draftToken] ?? 0;
+    const p = rowProbability(logitsRow, draftToken);
     const q = Math.max(1e-9, draftLogprobs[i] || 1e-9);
     const acceptProb = Math.min(1, p / q);
     if (rng() <= acceptProb) {
@@ -187,7 +280,7 @@ async function verifySpecBatch({
       acceptanceLogprobs.push(Math.log(Math.max(1e-12, p)));
     } else {
       rejectedAtIndex = i;
-      bonusToken = residualSample(verifierProbs, null, rng);
+      bonusToken = rowResidualSample(logitsRow, q, draftToken, rng);
       break;
     }
   }
@@ -196,11 +289,9 @@ async function verifySpecBatch({
     // All draft tokens accepted: amortize the forward pass by sampling
     // one bonus token from the verifier distribution that follows the
     // last accepted draft token.
-    const tailLogits = logits[logits.length - 1];
-    if (tailLogits) {
-      bonusToken = effectiveMode === 'greedy'
-        ? argmax(tailLogits)
-        : sampleFromDistribution(softmax(tailLogits), rng);
+    const tailRow = logits[logits.length - 1];
+    if (tailRow) {
+      bonusToken = effectiveMode === 'greedy' ? rowArgmax(tailRow) : rowSample(tailRow, rng);
     }
   }
 
@@ -214,8 +305,108 @@ async function verifySpecBatch({
   };
 }
 
+/**
+ * Tree speculation: run the verifier over each branch independently and
+ * commit the longest-matching one plus its bonus token. Calls the
+ * single-branch verifier in parallel; the caller is responsible for
+ * picking branch sequences whose prefixes overlap (so tokens shared
+ * across branches are still useful as commit material).
+ *
+ * Returns the same shape as verifySpecBatch plus:
+ *   - winnerBranch: number index of the chosen branch (0-based)
+ *   - perBranch: array of per-branch result objects
+ *   - marginalGainTokens: extra accepted tokens vs. the second-best branch
+ */
+async function verifyTreeBatch({
+  prefix = [],
+  branches,
+  evaluateLogits,
+  mode = 'greedy',
+  rng = Math.random,
+} = {}) {
+  if (!Array.isArray(branches) || branches.length === 0) {
+    throw new Error('verifyTreeBatch: branches must be a non-empty array');
+  }
+  const startedAt = Date.now();
+
+  const perBranch = await Promise.all(branches.map(async (branchSpec) => {
+    const draftTokens = Array.isArray(branchSpec?.draftTokens) ? branchSpec.draftTokens : [];
+    if (draftTokens.length === 0) {
+      return {
+        branchId: branchSpec?.branchId ?? null,
+        accepted: [],
+        rejectedAtIndex: 0,
+        bonusToken: null,
+        durationMs: 0,
+        empty: true,
+      };
+    }
+    try {
+      const result = await verifySpecBatch({
+        prefix,
+        draftTokens,
+        evaluateLogits,
+        mode,
+        draftLogprobs: branchSpec?.draftLogprobs ?? null,
+        rng,
+      });
+      return { ...result, branchId: branchSpec?.branchId ?? null };
+    } catch (err) {
+      return {
+        branchId: branchSpec?.branchId ?? null,
+        accepted: [],
+        rejectedAtIndex: 0,
+        bonusToken: null,
+        durationMs: 0,
+        error: err?.message || String(err),
+      };
+    }
+  }));
+
+  // Pick the branch with the longest accepted prefix; tie-break on
+  // verifier-assigned acceptance logprob sum (higher confidence wins).
+  let winnerIdx = 0;
+  for (let i = 1; i < perBranch.length; i += 1) {
+    const a = perBranch[winnerIdx];
+    const b = perBranch[i];
+    if (b.accepted.length > a.accepted.length) {
+      winnerIdx = i;
+      continue;
+    }
+    if (b.accepted.length === a.accepted.length) {
+      const aSum = (a.acceptanceLogprobs || []).reduce((s, x) => s + x, 0);
+      const bSum = (b.acceptanceLogprobs || []).reduce((s, x) => s + x, 0);
+      if (bSum > aSum) winnerIdx = i;
+    }
+  }
+
+  const winner = perBranch[winnerIdx];
+  const sorted = [...perBranch].sort((a, b) => b.accepted.length - a.accepted.length);
+  const marginalGainTokens = sorted.length > 1
+    ? Math.max(0, sorted[0].accepted.length - sorted[1].accepted.length)
+    : winner.accepted.length;
+
+  return {
+    accepted: winner.accepted,
+    rejectedAtIndex: winner.rejectedAtIndex,
+    bonusToken: winner.bonusToken,
+    acceptanceLogprobs: winner.acceptanceLogprobs || [],
+    durationMs: Date.now() - startedAt,
+    mode: winner.mode || mode,
+    winnerBranch: winnerIdx,
+    winnerBranchId: winner.branchId ?? null,
+    perBranch,
+    marginalGainTokens,
+  };
+}
+
 module.exports = {
   verifySpecBatch,
+  verifyTreeBatch,
   softmax,
   argmax,
+  rowArgmax,
+  rowProbability,
+  rowSample,
+  rowResidualSample,
 };

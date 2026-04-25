@@ -73,6 +73,45 @@ async function loadLlamaModule() {
   }
 }
 
+// Prepend CUDA toolkit bin dirs to PATH so the prebuilt CUDA llama
+// addon can find cudart64_*.dll / cublas64_*.dll at load time. The
+// node-llama-cpp prebuilds for win-x64-cuda are linked against CUDA
+// 12.x runtime; without these DLLs on PATH, getLlama({gpu:'cuda'})
+// silently falls back to CPU.
+function ensureCudaOnPath() {
+  if (process.platform !== 'win32') return;
+  if (process.env.__DEVFORGE_CUDA_PATH_INJECTED === '1') return;
+  const candidates = [
+    process.env.CUDA_PATH,
+    process.env.CUDAToolkit_ROOT,
+    'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9',
+    'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8',
+    'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6',
+    'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.4',
+    'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.2',
+  ];
+  for (const root of candidates) {
+    if (!root) continue;
+    try {
+      const binDir = path.join(root, 'bin');
+      if (fs.existsSync(path.join(binDir, 'cudart64_12.dll'))) {
+        if (!process.env.CUDA_PATH) process.env.CUDA_PATH = root;
+        if (!process.env.CUDAToolkit_ROOT) process.env.CUDAToolkit_ROOT = root;
+        const sep = ';';
+        const parts = String(process.env.PATH || '').split(sep);
+        if (!parts.some((p) => path.resolve(p).toLowerCase() === path.resolve(binDir).toLowerCase())) {
+          process.env.PATH = `${binDir}${sep}${process.env.PATH || ''}`;
+        }
+        process.env.__DEVFORGE_CUDA_PATH_INJECTED = '1';
+        process.env.__DEVFORGE_CUDA_PATH_ROOT = root;
+        return;
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+}
+
 class LlamaNodeBackend extends BaseBackend {
   constructor(config = {}) {
     super({
@@ -113,6 +152,7 @@ class LlamaNodeBackend extends BaseBackend {
   async _getLlama() {
     if (!this._llamaPromise) {
       this._llamaPromise = (async () => {
+        ensureCudaOnPath();
         const mod = await this._getModule();
         if (mod?.__error) {
           throw new Error(mod.__error);
@@ -388,20 +428,21 @@ class LlamaNodeBackend extends BaseBackend {
   }
 
   // Phase 2 verifier adapter. Runs the verifier model forward over the
-  // supplied tokens and returns per-position logits. Concrete shape:
-  //   - input: tokens = [...prefix, ...draftTokens]
-  //   - output: { logits: Float32Array[], vocabSize: number }
-  //     where logits[i] is the next-token distribution after observing
-  //     tokens[0..i] -- length == tokens.length.
+  // supplied tokens and returns per-position next-token distributions
+  // sourced from `LlamaContextSequence.controlledEvaluate(input)`.
   //
-  // The actual logits-extraction call depends on which controlled API
-  // node-llama-cpp 3.x exposes for the installed prebuild. If none is
-  // available, we throw a clearly-labelled "not implemented on this
-  // build" error so the orchestrator can fall back to non-speculative
-  // generation cleanly. The pure verifier algorithm in
-  // electron/services/spec-decode-verifier.js does NOT depend on this
-  // adapter for unit testing -- it accepts an evaluateLogits callback
-  // that the orchestrator wires up at runtime.
+  // node-llama-cpp 3.x's controlledEvaluate accepts an array of items;
+  // each item can be either a bare Token (just evaluate it) or a tuple
+  // [token, { generateNext: { probabilities: true } }] which also asks
+  // for the next-token distribution at that position. The output is an
+  // array aligned with the input; entries we requested probabilities
+  // for include `next.probabilities` as a Map<Token, number> sorted by
+  // descending probability.
+  //
+  // The verifier algorithm in spec-decode-verifier.js consumes either
+  // dense Float32Array logits or this Map directly via rowArgmax /
+  // rowProbability / rowSample helpers, so no dense conversion is
+  // needed -- we forward the Maps as-is.
   async evaluateForVerifier({ tokens } = {}) {
     if (!Array.isArray(tokens) || tokens.length === 0) {
       throw new Error('evaluateForVerifier: tokens array is required');
@@ -411,28 +452,51 @@ class LlamaNodeBackend extends BaseBackend {
     }
     const sequence = this._current.sequence;
 
-    // node-llama-cpp 3.x exposes `controlledEvaluate(tokens, options)`
-    // when built with the verifier-friendly probabilities flag. Probe
-    // it carefully so we degrade clearly when the API is missing.
     if (typeof sequence.controlledEvaluate !== 'function') {
-      const err = new Error('evaluateForVerifier: spec-decode logits API not available in this node-llama-cpp build (controlledEvaluate missing)');
+      const err = new Error('evaluateForVerifier: controlledEvaluate not available in this node-llama-cpp build');
       err.code = 'SPEC_DECODE_UNAVAILABLE';
       throw err;
     }
 
-    const result = await sequence.controlledEvaluate(tokens, {
-      generateLogits: tokens.map(() => true),
+    // Ask for probabilities at every position so the verifier has a
+    // distribution for each draft token slot AND for the bonus slot
+    // immediately after the last draft token.
+    const input = tokens.map((token) => [token, {
+      generateNext: { probabilities: true, confidence: true },
+    }]);
+
+    let result;
+    try {
+      result = await sequence.controlledEvaluate(input);
+    } catch (err) {
+      const wrapped = new Error(`evaluateForVerifier: controlledEvaluate failed: ${err?.message || err}`);
+      wrapped.code = 'SPEC_DECODE_RUNTIME_ERROR';
+      wrapped.cause = err;
+      throw wrapped;
+    }
+
+    if (!Array.isArray(result) || result.length !== tokens.length) {
+      const err = new Error(`evaluateForVerifier: controlledEvaluate returned ${result?.length} entries, expected ${tokens.length}`);
+      err.code = 'SPEC_DECODE_RUNTIME_ERROR';
+      throw err;
+    }
+
+    // Each output entry is `{ next: { token?, confidence?, probabilities? } }`.
+    // For verifier rows we only care about `probabilities`. Forward the
+    // Map as the row; the verifier helpers handle the Map shape natively.
+    const rows = result.map((entry, idx) => {
+      const probs = entry?.next?.probabilities;
+      if (!probs || typeof probs.entries !== 'function') {
+        const err = new Error(`evaluateForVerifier: missing probabilities at position ${idx}`);
+        err.code = 'SPEC_DECODE_RUNTIME_ERROR';
+        throw err;
+      }
+      return probs;
     });
 
-    if (!result || !Array.isArray(result.logits)) {
-      const err = new Error('evaluateForVerifier: controlledEvaluate did not return logits[]');
-      err.code = 'SPEC_DECODE_UNAVAILABLE';
-      throw err;
-    }
-
     return {
-      logits: result.logits,
-      vocabSize: result.logits[0]?.length ?? 0,
+      logits: rows,
+      vocabSize: rows[0]?.size ?? 0,
     };
   }
 

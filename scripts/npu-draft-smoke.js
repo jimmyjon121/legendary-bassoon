@@ -92,6 +92,49 @@ function main() {
     failures
   );
 
+  // ─── Phase 2 A4: tree-spec secondary branch ───────────────────
+  assert(
+    /branch: str \| None = None/.test(npuServer),
+    'DraftRequest must include `branch` for primary/secondary routing',
+    failures
+  );
+  assert(
+    /_ensure_secondary_pipe\(/.test(npuServer)
+      && /state\.genai_pipe_secondary/.test(npuServer),
+    'start-npu-server.py must lazy-load a secondary GenAI pipeline for tree-spec',
+    failures
+  );
+
+  // ─── Phase 2 A3: DraftSession contract ────────────────────────
+  assert(
+    /class DraftSessionInitRequest\(BaseModel\)/.test(npuServer)
+      && /class DraftSessionExtendRequest\(BaseModel\)/.test(npuServer),
+    'start-npu-server.py must declare DraftSessionInitRequest + DraftSessionExtendRequest',
+    failures
+  );
+  assert(
+    /@app\.post\('\/draft\/session'\)/.test(npuServer),
+    'start-npu-server.py must expose POST /draft/session',
+    failures
+  );
+  assert(
+    /@app\.post\('\/draft\/session\/\{session_id\}\/extend'\)/.test(npuServer),
+    'start-npu-server.py must expose POST /draft/session/{session_id}/extend',
+    failures
+  );
+  assert(
+    /@app\.delete\('\/draft\/session\/\{session_id\}'\)/.test(npuServer),
+    'start-npu-server.py must expose DELETE /draft/session/{session_id}',
+    failures
+  );
+  assert(
+    /async createDraftSession\(/.test(npuBridge)
+      && /async extendDraftSession\(/.test(npuBridge)
+      && /async closeDraftSession\(/.test(npuBridge),
+    'npu-bridge must expose createDraftSession / extendDraftSession / closeDraftSession',
+    failures
+  );
+
   if (failures.length > 0) {
     console.error('NPU Draft smoke FAILED:');
     for (const failure of failures) console.error(`  - ${failure}`);

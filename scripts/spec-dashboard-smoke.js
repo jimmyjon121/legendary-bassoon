@@ -130,6 +130,16 @@ function main() {
     'getDeviceUtilization must surface streams.specDecode',
     failures
   );
+  assert(
+    /_runSpecDecodeChat\(/.test(orchSrc) && /_shouldUseSpecDecode\(/.test(orchSrc),
+    'Orchestrator must define _runSpecDecodeChat and _shouldUseSpecDecode (Phase 2 loop)',
+    failures
+  );
+  assert(
+    /createSpecDecodeBus\(\{ npuBridge \}\)/.test(orchSrc),
+    'Orchestrator must instantiate createSpecDecodeBus with the npu bridge',
+    failures
+  );
 
   const ipc = read('electron/ipc-handlers.js');
   assert(

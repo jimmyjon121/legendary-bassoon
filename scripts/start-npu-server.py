@@ -96,17 +96,35 @@ class ServerState:
         # Optimum path (legacy + embeddings).
         self.model = None
         self.tokenizer = None
+        # When the optimum bootstrap has already failed for the active
+        # model, skip the retry on every subsequent request -- the model
+        # is GenAI-loadable but optimum can't ingest a pre-converted IR
+        # without weight files, and burning ~1s per request retrying it
+        # is just log spam plus latency. Reset on state.reset() so a
+        # model-switch gets one fresh attempt.
+        self.optimum_load_skipped: bool = False
+        self.optimum_load_error: Optional[str] = None
         # GenAI path (preferred for chat).
         self.genai_pipe: Optional['ov_genai.LLMPipeline'] = None
         self.genai_model_id: Optional[str] = None
         self.genai_device: Optional[str] = None
+        # Phase 2 A4 tree speculation: secondary drafter pipeline that
+        # runs the SAME model on a different device (typically Intel Arc
+        # GPU) so we can fan out to two parallel drafts per round and let
+        # the verifier pick the longer-matching branch.
+        self.genai_pipe_secondary: Optional['ov_genai.LLMPipeline'] = None
+        self.genai_secondary_device: Optional[str] = None
 
     def reset(self):
         self.model = None
         self.tokenizer = None
+        self.optimum_load_skipped = False
+        self.optimum_load_error = None
         self.genai_pipe = None
         self.genai_model_id = None
         self.genai_device = None
+        self.genai_pipe_secondary = None
+        self.genai_secondary_device = None
 
 
 state = ServerState()
@@ -149,7 +167,9 @@ class DraftRequest(BaseModel):
     either a `prompt` string or a `prefix_tokens` list; the server
     generates `lookahead` (4-8) candidate next tokens for the verifier
     to accept or reject. Same-tokenizer pairs are required for the
-    token IDs returned here to be valid in the verifier's vocabulary."""
+    token IDs returned here to be valid in the verifier's vocabulary.
+    `branch` selects between the primary device pipe (default, NPU) and
+    the secondary device pipe (Intel Arc GPU) for tree speculation."""
 
     prompt: str | None = None
     prefix_tokens: list[int] | None = None
@@ -158,6 +178,7 @@ class DraftRequest(BaseModel):
     temperature: float = 0.0
     top_k: int = 40
     top_p: float = 0.95
+    branch: str | None = None  # 'primary' (default) or 'secondary'
 
 
 # Active draft requests keyed by request_id. Phase 2 uses this for
@@ -313,6 +334,11 @@ def ensure_model_loaded():
     if already_optimum:
         return
 
+    if state.optimum_load_skipped and state.genai_pipe is not None:
+        # Skipped on a prior request; GenAI is the active engine. Don't
+        # re-run the (failing) optimum load on every request.
+        return
+
     print(f'[DevForge][NPU] Loading (optimum fallback) model={model_id} tokenizer={tokenizer_id} device={requested_device}', flush=True)
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_id, trust_remote_code=True)
@@ -337,11 +363,14 @@ def ensure_model_loaded():
         if model is None:
             if state.genai_pipe is not None:
                 # Chat can proceed through GenAI even when optimum embeddings are
-                # unavailable on this device/model combo.
+                # unavailable on this device/model combo. Mark the skip so the
+                # next request doesn't repeat the (failing) load.
                 state.model = None
                 state.tokenizer = None
+                state.optimum_load_skipped = True
+                state.optimum_load_error = '\n'.join(errors)
                 print(
-                    '[DevForge][NPU] Optimum load failed; continuing with GenAI-only chat path.',
+                    '[DevForge][NPU] Optimum load failed; continuing with GenAI-only chat path. Future requests will skip the optimum retry.',
                     flush=True,
                 )
                 return
@@ -356,12 +385,14 @@ def ensure_model_loaded():
         state.tokenizer = tokenizer
         state.config['device'] = used_device
         print(f'[DevForge][NPU] Model loaded on {used_device}.', flush=True)
-    except Exception:
+    except Exception as exc:
         if state.genai_pipe is not None:
             state.model = None
             state.tokenizer = None
+            state.optimum_load_skipped = True
+            state.optimum_load_error = str(exc)
             print(
-                '[DevForge][NPU] Optimum bootstrap crashed; continuing with GenAI-only chat path.',
+                '[DevForge][NPU] Optimum bootstrap crashed; continuing with GenAI-only chat path. Future requests will skip the optimum retry.',
                 flush=True,
             )
             return
@@ -881,6 +912,34 @@ def _extract_token_ids(tokenizer, text: str) -> list[int]:
         return []
 
 
+def _ensure_secondary_pipe(target_device: str = 'GPU') -> bool:
+    """Lazy-load the secondary drafter onto a different device. Used by
+    tree speculation. Returns True when the pipe is loaded and ready."""
+    if state.genai_pipe_secondary is not None and (state.genai_secondary_device or '').upper() == target_device.upper():
+        return True
+    if not GENAI_AVAILABLE or ov_genai is None:
+        return False
+
+    cfg = state.config
+    model_id = cfg.get('model_path') or cfg.get('model_id')
+    if not model_id:
+        return False
+    model_dir = _resolve_genai_model_dir(model_id)
+    if model_dir is None:
+        return False
+    try:
+        print(f'[DevForge][NPU] GenAI: loading secondary drafter {model_dir} on {target_device}', flush=True)
+        pipe = ov_genai.LLMPipeline(str(model_dir), target_device)
+        state.genai_pipe_secondary = pipe
+        state.genai_secondary_device = target_device
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print(f'[DevForge][NPU] GenAI secondary load failed on {target_device}: {exc}', flush=True)
+        state.genai_pipe_secondary = None
+        state.genai_secondary_device = None
+        return False
+
+
 @app.post('/draft')
 def generate_draft(req: DraftRequest):
     """Phase 2 NPU draft endpoint. Generates up to `lookahead` tokens
@@ -889,12 +948,24 @@ def generate_draft(req: DraftRequest):
     forward pass over them. The pair must share a tokenizer for the
     IDs to be valid in the verifier's vocabulary."""
     ensure_model_loaded()
-    pipe = state.genai_pipe
+    branch = (req.branch or 'primary').strip().lower()
+    if branch == 'secondary':
+        target_device = os.environ.get('DEVFORGE_SECONDARY_DRAFT_DEVICE') or 'GPU'
+        if not _ensure_secondary_pipe(target_device):
+            return {
+                'success': False,
+                'error': f'Secondary drafter not available on {target_device}',
+                'branch': branch,
+            }
+        pipe = state.genai_pipe_secondary
+    else:
+        pipe = state.genai_pipe
     if pipe is None:
         return {
             'success': False,
             'error': 'GenAI pipeline unavailable; cannot serve drafts',
             'engine': 'optimum' if state.model is not None else 'none',
+            'branch': branch,
         }
 
     request_id = req.request_id or f'draft-{uuid.uuid4().hex}'
@@ -914,6 +985,7 @@ def generate_draft(req: DraftRequest):
                 'success': False,
                 'error': 'draft request requires either prompt or prefix_tokens',
                 'request_id': request_id,
+                'branch': branch,
             }
 
         cfg = _build_draft_config(req)
@@ -957,18 +1029,19 @@ def generate_draft(req: DraftRequest):
             entry = _draft_requests.get(request_id)
             cancelled = bool(entry and entry.get('cancelled'))
 
+        active_device = (
+            state.genai_secondary_device if branch == 'secondary' else state.genai_device
+        ) or state.config.get('device')
         return {
             'success': True,
             'cancelled': cancelled,
             'request_id': request_id,
             'draft_tokens': ids,
-            # Logprobs are not exposed by all GenAI builds; fall back to
-            # null and let the verifier do greedy acceptance until we add
-            # a Python-side capture pass for the underlying logits.
             'draft_logprobs': None,
             'latency_ms': int((time.perf_counter() - started_at) * 1000),
             'engine': 'genai',
-            'device': state.genai_device or state.config.get('device'),
+            'device': active_device,
+            'branch': branch,
             'tokenizer_id': state.genai_model_id,
         }
     except Exception as exc:  # noqa: BLE001
@@ -976,6 +1049,7 @@ def generate_draft(req: DraftRequest):
             'success': False,
             'error': str(exc),
             'request_id': request_id,
+            'branch': branch,
             'latency_ms': int((time.perf_counter() - started_at) * 1000),
         }
     finally:
@@ -995,6 +1069,193 @@ def cancel_draft(request_id: str):
             return {'success': False, 'request_id': request_id, 'reason': 'unknown-or-completed'}
         entry['cancelled'] = True
     return {'success': True, 'request_id': request_id}
+
+
+# ─── Phase 2 A3: DraftSession with server-side prompt state ────────────
+# Each session keeps the accumulated prompt + accepted-suffix on the
+# server so the orchestrator only ships small `accepted_tokens` deltas
+# per draft. The OpenVINO GenAI LLMPipeline still re-prefills internally
+# on each generate() call -- truly hot-cache draft latency on Intel NPU
+# 3 needs deeper KVCacheEvictionConfig tuning that lives in a follow-up
+# (tracker risk: "Spec-decode KV-cache reuse"). The contract here gives
+# us the API hook v0.4.1 needs and reduces JSON / network overhead.
+
+_draft_sessions: Dict[str, Dict[str, object]] = {}
+_draft_sessions_lock = Lock()
+
+
+class DraftSessionInitRequest(BaseModel):
+    prompt: str | None = None
+    prompt_tokens: list[int] | None = None
+
+
+class DraftSessionExtendRequest(BaseModel):
+    accepted_tokens: list[int] | None = None
+    accepted_text: str | None = None
+    lookahead: int = 4
+    request_id: str | None = None
+    temperature: float = 0.0
+    top_k: int = 40
+    top_p: float = 0.95
+
+
+@app.post('/draft/session')
+def create_draft_session(req: DraftSessionInitRequest):
+    """Create a new server-side draft session. The session anchors a
+    prompt + running accepted-suffix; subsequent extend calls only need
+    to ship the newly-accepted tokens."""
+    ensure_model_loaded()
+    if state.genai_pipe is None:
+        return {
+            'success': False,
+            'error': 'GenAI pipeline unavailable; sessions require the genai engine',
+        }
+
+    try:
+        tokenizer = state.genai_pipe.get_tokenizer()
+    except Exception:  # noqa: BLE001
+        tokenizer = None
+
+    prompt_text = ''
+    if req.prompt and req.prompt.strip():
+        prompt_text = req.prompt
+    elif req.prompt_tokens and tokenizer is not None and hasattr(tokenizer, 'decode'):
+        try:
+            prompt_text = tokenizer.decode(list(req.prompt_tokens))
+        except Exception:  # noqa: BLE001
+            prompt_text = ''
+
+    session_id = f'sess-{uuid.uuid4().hex}'
+    with _draft_sessions_lock:
+        _draft_sessions[session_id] = {
+            'prompt_text': prompt_text,
+            'committed_text': '',
+            'created_at': time.time(),
+            'last_used_at': time.time(),
+            'extend_count': 0,
+        }
+    return {
+        'success': True,
+        'session_id': session_id,
+        'prompt_chars': len(prompt_text),
+        'engine': 'genai',
+        'device': state.genai_device or state.config.get('device'),
+    }
+
+
+@app.post('/draft/session/{session_id}/extend')
+def extend_draft_session(session_id: str, req: DraftSessionExtendRequest):
+    """Append accepted tokens to the session's committed-suffix and
+    return the next batch of draft tokens. Server-side state means the
+    orchestrator only ships the small accepted delta per call."""
+    ensure_model_loaded()
+    if state.genai_pipe is None:
+        return {'success': False, 'error': 'GenAI pipeline unavailable', 'session_id': session_id}
+
+    pipe = state.genai_pipe
+    try:
+        tokenizer = pipe.get_tokenizer()
+    except Exception:  # noqa: BLE001
+        tokenizer = None
+
+    with _draft_sessions_lock:
+        sess = _draft_sessions.get(session_id)
+        if sess is None:
+            return {'success': False, 'error': 'unknown session', 'session_id': session_id}
+
+    accepted_text_delta = ''
+    if req.accepted_text:
+        accepted_text_delta = str(req.accepted_text)
+    elif req.accepted_tokens and tokenizer is not None and hasattr(tokenizer, 'decode'):
+        try:
+            accepted_text_delta = tokenizer.decode(list(req.accepted_tokens))
+        except Exception:  # noqa: BLE001
+            accepted_text_delta = ''
+
+    started_at = time.perf_counter()
+    request_id = req.request_id or f'draft-{uuid.uuid4().hex}'
+    with _draft_requests_lock:
+        _draft_requests[request_id] = {'cancelled': False, 'started_at': started_at}
+
+    try:
+        with _draft_sessions_lock:
+            sess['committed_text'] = sess.get('committed_text', '') + accepted_text_delta
+            full_text = (sess.get('prompt_text') or '') + sess['committed_text']
+            sess['last_used_at'] = time.time()
+            sess['extend_count'] = int(sess.get('extend_count', 0)) + 1
+
+        cfg = _build_draft_config(DraftRequest(
+            prompt=full_text,
+            lookahead=req.lookahead,
+            temperature=req.temperature,
+            top_k=req.top_k,
+            top_p=req.top_p,
+        ))
+
+        with _draft_requests_lock:
+            entry = _draft_requests.get(request_id)
+            cancelled = bool(entry and entry.get('cancelled'))
+        if cancelled:
+            return {
+                'success': True,
+                'cancelled': True,
+                'session_id': session_id,
+                'request_id': request_id,
+                'draft_tokens': [],
+                'latency_ms': int((time.perf_counter() - started_at) * 1000),
+            }
+
+        result = pipe.generate(full_text, cfg)
+        if hasattr(result, 'texts') and result.texts:
+            generated_text = str(result.texts[0])
+        else:
+            generated_text = str(result)
+        ids = _extract_token_ids(tokenizer, generated_text)
+        max_n = max(1, min(int(req.lookahead or 4), 8))
+        if len(ids) > max_n:
+            ids = ids[-max_n:]
+
+        with _draft_requests_lock:
+            entry = _draft_requests.get(request_id)
+            cancelled = bool(entry and entry.get('cancelled'))
+
+        return {
+            'success': True,
+            'cancelled': cancelled,
+            'session_id': session_id,
+            'request_id': request_id,
+            'draft_tokens': ids,
+            'draft_logprobs': None,
+            'latency_ms': int((time.perf_counter() - started_at) * 1000),
+            'engine': 'genai',
+            'device': state.genai_device or state.config.get('device'),
+            'extend_count': int(sess.get('extend_count', 0)),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            'success': False,
+            'error': str(exc),
+            'session_id': session_id,
+            'request_id': request_id,
+            'latency_ms': int((time.perf_counter() - started_at) * 1000),
+        }
+    finally:
+        with _draft_requests_lock:
+            _draft_requests.pop(request_id, None)
+
+
+@app.delete('/draft/session/{session_id}')
+def close_draft_session(session_id: str):
+    with _draft_sessions_lock:
+        sess = _draft_sessions.pop(session_id, None)
+    if sess is None:
+        return {'success': False, 'session_id': session_id, 'reason': 'unknown-or-already-closed'}
+    return {
+        'success': True,
+        'session_id': session_id,
+        'closed_at': time.time(),
+        'extend_count': int(sess.get('extend_count', 0)),
+    }
 
 
 @app.post('/generate-stream')

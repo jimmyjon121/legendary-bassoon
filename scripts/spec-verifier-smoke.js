@@ -14,7 +14,7 @@
  *     draft predictions and row m+n-1 covers the bonus.
  */
 
-const { verifySpecBatch, argmax, softmax } = require('../electron/services/spec-decode-verifier');
+const { verifySpecBatch, verifyTreeBatch, argmax, softmax } = require('../electron/services/spec-decode-verifier');
 
 const failures = [];
 
@@ -169,6 +169,61 @@ async function scenarioHelperFunctions() {
   assert(probs.length === 3 && Math.abs(probs.reduce((a, b) => a + b, 0) - 1) < 1e-6, 'softmax should sum to 1');
 }
 
+async function scenarioTreeSpecPicksLongerBranch() {
+  // Two branches share a prefix; secondary continues correctly while
+  // primary diverges. Tree verifier should commit secondary's longer run.
+  const verifierLogits = [
+    fakeLogits(100, 10),  // -> position 1
+    fakeLogits(100, 20),  // -> position 2
+    fakeLogits(100, 30),  // -> position 3
+    fakeLogits(100, 40),  // -> position 4
+    fakeLogits(100, 50),  // bonus
+  ];
+  const result = await verifyTreeBatch({
+    prefix: [1],
+    branches: [
+      { branchId: 'primary', draftTokens: [10, 20, 99, 40] }, // accepts 2
+      { branchId: 'secondary', draftTokens: [10, 20, 30, 99] }, // accepts 3
+    ],
+    evaluateLogits: () => verifierLogits,
+    mode: 'greedy',
+  });
+  assert(result.winnerBranch === 1, `Tree: secondary should win (got ${result.winnerBranch})`);
+  assert(result.accepted.length === 3, `Tree winner accepted should be 3 (got ${result.accepted.length})`);
+  assert(result.marginalGainTokens === 1, `Tree marginal should be 1 (got ${result.marginalGainTokens})`);
+  assert(Array.isArray(result.perBranch) && result.perBranch.length === 2, 'Tree result must include perBranch');
+}
+
+async function scenarioMapBackedRows() {
+  // controlledEvaluate returns Map<Token, number> sorted by descending
+  // probability. The verifier must work on those rows directly without
+  // a dense Float32Array conversion.
+  const draft = [10, 20, 99, 40];
+  const rowFor = (argmaxToken) => new Map([
+    [argmaxToken, 0.85],
+    [7, 0.05],
+    [13, 0.04],
+    [42, 0.03],
+    [11, 0.03],
+  ]);
+  const logitsByPosition = [
+    rowFor(10), // accept d_0=10
+    rowFor(20), // accept d_1=20
+    rowFor(30), // verifier wants 30, draft says 99 -> reject
+    rowFor(40),
+    rowFor(50),
+  ];
+  const result = await verifySpecBatch({
+    prefix: [1],
+    draftTokens: draft,
+    evaluateLogits: () => logitsByPosition,
+    mode: 'greedy',
+  });
+  assert(result.accepted.length === 2, `Map rows greedy: should accept 2 (got ${result.accepted.length})`);
+  assert(result.rejectedAtIndex === 2, `Map rows greedy: rejectedAtIndex should be 2 (got ${result.rejectedAtIndex})`);
+  assert(result.bonusToken === 30, `Map rows greedy: bonus should be 30 (got ${result.bonusToken})`);
+}
+
 async function main() {
   await scenarioGreedyAllAccepted();
   await scenarioGreedyMidReject();
@@ -177,6 +232,8 @@ async function main() {
   await scenarioStochasticAccept();
   await scenarioInvalidInput();
   await scenarioHelperFunctions();
+  await scenarioMapBackedRows();
+  await scenarioTreeSpecPicksLongerBranch();
 
   if (failures.length > 0) {
     console.error('Spec Verifier smoke FAILED:');

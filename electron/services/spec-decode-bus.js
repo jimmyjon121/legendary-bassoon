@@ -64,14 +64,32 @@ function createHttpDraftTransport(npuBridge) {
   }
   return {
     name: 'http',
-    async requestDraft({ prompt, prefixTokens, lookahead, requestId, sampling }) {
-      return npuBridge.draftTokens({ prompt, prefixTokens, lookahead, requestId, sampling });
+    async requestDraft({ prompt, prefixTokens, lookahead, requestId, sampling, branch }) {
+      return npuBridge.draftTokens({ prompt, prefixTokens, lookahead, requestId, sampling, branch });
     },
     async cancelDraft(requestId) {
       if (typeof npuBridge.cancelDraft !== 'function') {
         return { success: false, error: 'cancelDraft not implemented in transport' };
       }
       return npuBridge.cancelDraft(requestId);
+    },
+    async createSession(payload) {
+      if (typeof npuBridge.createDraftSession !== 'function') {
+        return { success: false, error: 'createDraftSession not implemented in transport' };
+      }
+      return npuBridge.createDraftSession(payload || {});
+    },
+    async extendSession(payload) {
+      if (typeof npuBridge.extendDraftSession !== 'function') {
+        return { success: false, error: 'extendDraftSession not implemented in transport' };
+      }
+      return npuBridge.extendDraftSession(payload || {});
+    },
+    async closeSession(sessionId) {
+      if (typeof npuBridge.closeDraftSession !== 'function') {
+        return { success: false, error: 'closeDraftSession not implemented in transport' };
+      }
+      return npuBridge.closeDraftSession(sessionId);
     },
     dispose() { /* no-op */ },
   };
@@ -114,11 +132,11 @@ function createSpecDecodeBus({ npuBridge, transport = DEFAULT_TRANSPORT } = {}) 
   return {
     transport: activeTransport.name,
 
-    async requestDraft({ prompt = null, prefixTokens = null, lookahead = 4, requestId = null, sampling = {} } = {}) {
+    async requestDraft({ prompt = null, prefixTokens = null, lookahead = 4, requestId = null, sampling = {}, branch = null } = {}) {
       ensureLive();
       const startedAt = nowMs();
       try {
-        const result = await activeTransport.requestDraft({ prompt, prefixTokens, lookahead, requestId, sampling });
+        const result = await activeTransport.requestDraft({ prompt, prefixTokens, lookahead, requestId, sampling, branch });
         const latency = nowMs() - startedAt;
         if (result?.success === false) {
           drafts.failures += 1;
@@ -140,6 +158,46 @@ function createSpecDecodeBus({ npuBridge, transport = DEFAULT_TRANSPORT } = {}) 
     async cancelDraft(requestId) {
       ensureLive();
       return activeTransport.cancelDraft(requestId);
+    },
+
+    async createSession(payload = {}) {
+      ensureLive();
+      if (typeof activeTransport.createSession !== 'function') {
+        return { success: false, error: 'createSession not supported by transport' };
+      }
+      return activeTransport.createSession(payload);
+    },
+
+    async extendSession(payload = {}) {
+      ensureLive();
+      if (typeof activeTransport.extendSession !== 'function') {
+        return { success: false, error: 'extendSession not supported by transport' };
+      }
+      const startedAt = nowMs();
+      try {
+        const result = await activeTransport.extendSession(payload);
+        const latency = nowMs() - startedAt;
+        if (result?.success === false) {
+          drafts.failures += 1;
+          recordSample(drafts, latency);
+          return result;
+        }
+        if (result?.cancelled === true) drafts.cancelled += 1;
+        recordSample(drafts, latency);
+        return result;
+      } catch (err) {
+        drafts.failures += 1;
+        recordSample(drafts, nowMs() - startedAt);
+        throw err;
+      }
+    },
+
+    async closeSession(sessionId) {
+      ensureLive();
+      if (typeof activeTransport.closeSession !== 'function') {
+        return { success: false, error: 'closeSession not supported by transport' };
+      }
+      return activeTransport.closeSession(sessionId);
     },
 
     async submitVerification({

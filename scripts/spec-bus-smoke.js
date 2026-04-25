@@ -79,6 +79,52 @@ async function scenarioCancelDraft() {
   bus.dispose();
 }
 
+async function scenarioSessionLifecycle() {
+  // The session API (createSession / extendSession / closeSession) is the
+  // A3 lower-overhead path. Bus must round-trip through it.
+  const sessionState = { id: null, extends: 0 };
+  const bridge = {
+    async draftTokens() { return { success: true, draft_tokens: [1, 2, 3, 4] }; },
+    async cancelDraft() { return { success: true }; },
+    async createDraftSession({ prompt }) {
+      sessionState.id = `srv-sess-${Math.random().toString(36).slice(2, 6)}`;
+      return { success: true, session_id: sessionState.id, prompt_chars: (prompt || '').length };
+    },
+    async extendDraftSession({ sessionId, lookahead }) {
+      if (sessionId !== sessionState.id) {
+        return { success: false, error: 'unknown session' };
+      }
+      sessionState.extends += 1;
+      return {
+        success: true,
+        session_id: sessionId,
+        request_id: `req-${sessionState.extends}`,
+        draft_tokens: [10, 20, 30, 40].slice(0, lookahead),
+        latency_ms: 5,
+        extend_count: sessionState.extends,
+      };
+    },
+    async closeDraftSession(sessionId) {
+      if (sessionId !== sessionState.id) {
+        return { success: false, error: 'unknown session' };
+      }
+      sessionState.id = null;
+      return { success: true, session_id: sessionId, extend_count: sessionState.extends };
+    },
+  };
+  const bus = createSpecDecodeBus({ npuBridge: bridge });
+  const created = await bus.createSession({ prompt: 'def hello():' });
+  assert(created.success === true && created.session_id, 'createSession should return a session_id');
+
+  const extended = await bus.extendSession({ sessionId: created.session_id, lookahead: 4 });
+  assert(extended.success === true && extended.draft_tokens?.length === 4, 'extendSession should return draft tokens');
+
+  const closed = await bus.closeSession(created.session_id);
+  assert(closed.success === true && closed.extend_count === 1, 'closeSession should return final extend_count');
+
+  bus.dispose();
+}
+
 async function scenarioMetricsOnFailure() {
   const failingBridge = {
     async draftTokens() { return { success: false, error: 'boom' }; },
@@ -119,6 +165,7 @@ async function scenarioDisposeIsTerminal() {
 async function main() {
   await scenarioRoundTripGreedy();
   await scenarioCancelDraft();
+  await scenarioSessionLifecycle();
   await scenarioMetricsOnFailure();
   await scenarioShmemStub();
   await scenarioDisposeIsTerminal();

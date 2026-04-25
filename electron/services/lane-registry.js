@@ -72,6 +72,14 @@ const BASE_LANES = {
     onBattery: ['openvino-npu', 'ollama-cuda', 'llamanode', 'ollama-cpu'],
     reason: 'chat-main prefers RTX CUDA on AC; falls back to NPU on battery',
   },
+  'chat-draft-secondary': {
+    // Phase 2 tree speculation. Secondary draft branch runs on Intel Arc
+    // (OpenVINO GPU) so the NPU primary branch + Arc secondary branch
+    // can be verified in one fused forward pass on the verifier.
+    onAc: ['openvino-gpu', 'openvino-npu', 'ollama-cpu'],
+    onBattery: ['openvino-gpu', 'openvino-npu', 'ollama-cpu'],
+    reason: 'tree-spec secondary draft on Intel Arc iGPU keeps NPU free for primary branch',
+  },
 };
 
 // Maps the orchestrator's existing lane IDs (lane_embedding, lane_agent,

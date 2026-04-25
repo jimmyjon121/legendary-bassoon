@@ -1,6 +1,6 @@
 {
   "name": "devforge",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "description": "Sovereign AI Development Environment - Local, Private, Unrestricted",
   "main": "electron/main.js",
   "author": "Christopher",
@@ -47,8 +47,10 @@
     "eval:spec-bus": "node scripts/spec-bus-smoke.js",
     "eval:spec-dashboard": "node scripts/spec-dashboard-smoke.js",
     "eval:spec-decoding": "node scripts/speculative-decoding-eval.js",
+    "eval:v03-manual-qa": "node scripts/v03-manual-qa-harness.js",
     "eval:live-smoke": "node scripts/stream-cold-load-smoke.js && node scripts/npu-genai-smoke.js && node scripts/speculative-decoding-eval.js",
     "eval:baseline-v03": "node scripts/v03-baseline-session.js",
+    "eval:baseline-v04": "node scripts/v04-baseline-session.js",
     "eval:release-gate": "node scripts/release-gate.js",
     "shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File ./create-shortcut.ps1",
     "shortcut:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File ./create-shortcut.ps1 -Mode Dev"
@@ -149,9 +151,11 @@
         }
       ],
       "icon": "assets/icon.ico",
-      "publisherName": "DevForge",
       "verifyUpdateCodeSignature": false,
-      "signAndEditExecutable": false
+      "signAndEditExecutable": false,
+      "signtoolOptions": {
+        "publisherName": "DevForge"
+      }
     },
     "nsis": {
       "oneClick": false,

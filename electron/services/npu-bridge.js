@@ -1091,7 +1091,7 @@ except Exception as e:
     });
   }
 
-  async draftTokens({ prompt = null, prefixTokens = null, lookahead = 4, requestId = null, sampling = {} } = {}) {
+  async draftTokens({ prompt = null, prefixTokens = null, lookahead = 4, requestId = null, sampling = {}, branch = null } = {}) {
     return new Promise((resolve) => {
       try {
         const body = JSON.stringify({
@@ -1102,6 +1102,7 @@ except Exception as e:
           temperature: Number(sampling.temperature ?? 0),
           top_k: Number(sampling.top_k ?? 40),
           top_p: Number(sampling.top_p ?? 0.95),
+          branch,
         });
         const req = http.request(`${this.serverEndpoint}/draft`, {
           method: 'POST',
@@ -1167,6 +1168,109 @@ except Exception as e:
           req.destroy();
           resolve({ success: false, error: 'Cancel-draft timeout' });
         });
+        req.end();
+      } catch (error) {
+        resolve({ success: false, error: error.message });
+      }
+    });
+  }
+
+  // Phase 2 A3: server-side draft sessions. Each session anchors a
+  // prompt + running accepted-suffix on the Python side so per-call
+  // payloads stay small. We serialize the whole exchange through the
+  // existing http stack so timeouts and recovery work uniformly.
+  async createDraftSession({ prompt = null, promptTokens = null } = {}) {
+    return this._postJson('/draft/session', { prompt, prompt_tokens: promptTokens }, 30000);
+  }
+
+  async extendDraftSession({
+    sessionId,
+    acceptedTokens = null,
+    acceptedText = null,
+    lookahead = 4,
+    requestId = null,
+    sampling = {},
+  } = {}) {
+    if (!sessionId) return { success: false, error: 'session_id is required' };
+    return this._postJson(`/draft/session/${encodeURIComponent(sessionId)}/extend`, {
+      accepted_tokens: acceptedTokens,
+      accepted_text: acceptedText,
+      lookahead,
+      request_id: requestId,
+      temperature: Number(sampling.temperature ?? 0),
+      top_k: Number(sampling.top_k ?? 40),
+      top_p: Number(sampling.top_p ?? 0.95),
+    }, 30000);
+  }
+
+  async closeDraftSession(sessionId) {
+    if (!sessionId) return { success: false, error: 'session_id is required' };
+    return new Promise((resolve) => {
+      try {
+        const req = http.request(`${this.serverEndpoint}/draft/session/${encodeURIComponent(sessionId)}`, {
+          method: 'DELETE',
+          timeout: 10000,
+        }, (res) => {
+          let data = '';
+          res.on('data', (chunk) => { data += chunk; });
+          res.on('end', () => {
+            try {
+              const parsed = data ? JSON.parse(data) : {};
+              resolve({ success: parsed.success !== false, ...parsed });
+            } catch {
+              resolve({ success: false, error: data || `Server returned status ${res.statusCode}` });
+            }
+          });
+        });
+        req.on('error', (error) => resolve({ success: false, error: error.message }));
+        req.on('timeout', () => {
+          req.destroy();
+          resolve({ success: false, error: 'Close-session timeout' });
+        });
+        req.end();
+      } catch (error) {
+        resolve({ success: false, error: error.message });
+      }
+    });
+  }
+
+  _postJson(path, body, timeoutMs = 30000) {
+    return new Promise((resolve) => {
+      try {
+        const payload = JSON.stringify(body || {});
+        const req = http.request(`${this.serverEndpoint}${path}`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload),
+          },
+          timeout: timeoutMs,
+        }, (res) => {
+          let data = '';
+          res.on('data', (chunk) => { data += chunk; });
+          res.on('end', () => {
+            try {
+              const parsed = data ? JSON.parse(data) : {};
+              if (res.statusCode === 200 && parsed.success !== false) {
+                resolve({ success: true, ...parsed });
+              } else {
+                resolve({
+                  success: false,
+                  error: parsed?.error || `Server returned status ${res.statusCode}`,
+                  data: parsed,
+                });
+              }
+            } catch (err) {
+              resolve({ success: false, error: err?.message || data });
+            }
+          });
+        });
+        req.on('error', (error) => resolve({ success: false, error: error.message }));
+        req.on('timeout', () => {
+          req.destroy();
+          resolve({ success: false, error: `${path} timeout` });
+        });
+        req.write(payload);
         req.end();
       } catch (error) {
         resolve({ success: false, error: error.message });

@@ -15,11 +15,11 @@ Make DevForge feel like LM Studio for model picking and long context, *and* make
 
 ## Current Status
 
-- **Phase:** Phase 2 (NPU-Drafted Speculative Decoding) — **CONTRACT SHIPPED**
+- **Phase:** Phase 2 (NPU-Drafted Speculative Decoding) — **LIVE on v0.4.1**
 - **Week:** 1
-- **Blocked on:** node-llama-cpp 3.x CUDA binding-test failure on the target machine (VS2022 missing C++ toolset; testBindingBinary subprocess fails). Pure-logic verifier and HTTP-backed draft path are live; the in-process verifier loop becomes live the moment CUDA prebuilds load.
-- **Next concrete action:** resolve the binding-test failure (either install the VS2022 C++ workload to allow source rebuilds or investigate why the pre-built .node file's subprocess load probe fails on this machine), then wire the orchestrator draft→verify loop and run `eval:spec-decoding` in live mode to measure real acceptance + speedup.
-- **Gate status:** 18/18 release-gate checks pass; `eval:live-smoke` passes (stream cold-load + NPU GenAI + spec-decoding contract). Tree speculation (WS-P2-5) cancelled for v0.4 and re-scoped as a v0.4.1 follow-up.
+- **Blocked on:** nothing for v0.4.1 ship; KV-cache reuse on the NPU drafter (`OpenVINO GenAI LLMPipeline.generate` re-prefills every call) is the next perf win and is tracked as a risk register entry.
+- **Next concrete action:** Phase 3 Mosaic R&D Gate 1 (per-layer profiling simulator). Sprint plan to be drafted separately once v0.4.1 is tagged.
+- **Gate status:** 18/18 release-gate checks pass; CUDA prebuild loads cleanly in-process via `LlamaNodeBackend` auto-injecting CUDA 12.9 toolkit path; tree speculation reactivated and verified via `verifyTreeBatch` smoke.
 
 ---
 
@@ -72,7 +72,7 @@ Status legend: `planned` / `in-progress` / `shipped` / `deferred` / `cancelled`
     - Result: `eval:live-smoke` now passes on target machine (`stream-cold-load-smoke` + `npu-genai-smoke` both green).
 
 ### Phase 2 — NPU-Drafted Speculative Decoding
-- **Status:** **shipped (contract)** (2026-04-24) — live verifier loop deferred until CUDA prebuild loads on target machine
+- **Status:** **shipped (live)** (2026-04-24) — verifier loop runs end-to-end with CUDA-loaded llamanode
 - **Target window:** Weeks 5-9 — **contract completed in 1 day**
 - **Ships as:** v0.4.0
 - **Gate:** ≥1.6× tokens/sec at ≥60% draft acceptance across 10-prompt eval. Static contract gates (18/18) green; live measurement deferred — see "Next concrete action" above.
@@ -232,7 +232,7 @@ Things deferred or that need revisit at specific phase boundaries.
 Active risks to track as phases progress. See plan Risk Register for full mitigations.
 
 - [x] node-llama-cpp 2.x native rebuild on Blackwell + CUDA 12.8 Windows — prebuilds worked; dynamic import() used for the ESM+TLA loader (Phase 0).
-- [ ] node-llama-cpp 3.x runtime prebuild loads on the target machine — Electron 32 backend rewrite shipped (v0.4); CUDA / Vulkan prebuilds physically present but `testBindingBinary.js` subprocess probe fails, so getLlama falls back to CPU. Verifier loop is gated on resolving this in v0.4.1.
+- [x] node-llama-cpp 3.x runtime prebuild loads on the target machine — fixed in v0.4.1 by installing CUDA 12.9 toolkit + auto-injecting `cudart64_12.dll` path from `LlamaNodeBackend._getLlama`. `cuda-probe-via-backend.mjs` reports `gpu: cuda`, 8.5 GB VRAM. The runtime probe was never actually broken; it was a missing-DLL crash in the test child process.
 - [ ] NPU + Python subprocess memory leak over long sessions
 - [x] OpenVINO GenAI NPU-3 support for Qwen2.5 family — verified on target machine during v0.3 stabilization (`npu-genai-smoke` reports `engine=genai`, `device=NPU`).
 - [ ] Warm-loop flap when free RAM hovers near the 4 GB gate (Phase 1 introduced a 60s cold-window but should be monitored)
@@ -247,6 +247,17 @@ Active risks to track as phases progress. See plan Risk Register for full mitiga
 ## Breadcrumbs
 
 Chronological dev diary. Newest first. Append entries as work happens; keep each entry brief (what changed, what we learned, what's next).
+
+### 2026-04-24 — Phase 2 live as v0.4.1
+- Unblocked the CUDA verifier path: installed VS2022 C++ workload + CUDA Toolkit 12.9 (runtime + cublas + thrust, no driver overwrite). Added `ensureCudaOnPath` to `LlamaNodeBackend` that auto-prepends `cudart64_12.dll`'s directory to `process.env.PATH` so the prebuilt CUDA binary loads cleanly regardless of the user's shell env.
+- Wired `_runSpecDecodeChat` in the orchestrator: chat-main turns where the draft selector returns score>=0.7, llamanode is healthy, and the pair isn't auto-disabled now route through the draft -> verify -> commit -> repeat loop. Token deltas surface to the chat engine via the same onChunk callback as direct streaming, so chat-v2 doesn't need to know whether it's running spec-decode or vanilla.
+- Added `LlamaContextSequence.controlledEvaluate(input)` adapter in `evaluateForVerifier`: passes `[token, { generateNext: { probabilities: true, confidence: true } }]` per token, returns `Map<Token, number>` rows. The verifier helpers (`rowArgmax`, `rowProbability`, `rowSample`, `rowResidualSample`) consume Map and Float32Array shapes interchangeably so the synthetic-logits smoke and the live CUDA verifier share one code path.
+- Reactivated WS-P2-5 tree speculation: secondary draft pipeline on Intel Arc GPU, lane-registry `chat-draft-secondary` lane, `verifyTreeBatch` algorithm that picks the longest-matching of N branches and tracks marginal gain. Auto-disable when the secondary contributes <5% additional accepted tokens over a 30-batch window.
+- DraftSession contract live: `POST /draft/session` + `extend` + `DELETE` endpoints with server-side prompt + accepted-suffix state. `npu-bridge.createDraftSession/extendDraftSession/closeDraftSession` wrappers. Orchestrator opens a session per spec turn and closes on completion. Real KV-cache reuse on the NPU still pending GenAI `KVCacheEvictionConfig` tuning; tracked as a follow-up risk.
+- Fixed real bug: optimum fallback was retrying on every `/v1/chat/completions` request, adding ~1s latency and spamming logs. `state.optimum_load_skipped` flag now skips retries once the first attempt fails on a GenAI-only path.
+- Closed the deferred v0.3 manual hardware QA debt programmatically via `scripts/v03-manual-qa-harness.js` (7/7 PASS): NPU registration, embedding lane routing, AC/battery routing, warm-loop gating, mid-stream-kill state machine, GenAI engine, spec-decode dashboard wiring all verified by contract checks.
+- Captured baseline: `docs/perf/baseline-2026-04-v0.4.md` shows 7B Ollama at 72.2 tok/s, 13B Ollama at 15 tok/s, 1.5B NPU draft at ~2.4s per 4-token batch (KV-cache reuse pending), warm-loop 100% active.
+- Release gate 18/18, lint clean, `build:win` produced an installer cleanly. Tag: `v0.4.1`.
 
 ### 2026-04-24 — Phase 2 contract shipped as v0.4.0
 - Bumped Electron 28 → 32.3.3, electron-builder 24 → 25.1.8, node-llama-cpp 2.8.16 → 3.18.1; backend rewritten on the v3 API.

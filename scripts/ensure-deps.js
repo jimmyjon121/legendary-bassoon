@@ -57,6 +57,41 @@ function detectInstalledGpuPrebuilds() {
   };
 }
 
+// node-llama-cpp 3.x's CUDA prebuild (win-x64-cuda) is linked against
+// the CUDA 12 runtime. When CUDA Toolkit isn't installed on the user's
+// machine, the prebuild's testBindingBinary probe fails and the package
+// silently falls back to CPU. Detect the situation so users get a
+// clear "install CUDA 12 for GPU inference" warning.
+function detectCudaToolkit() {
+  if (process.platform !== 'win32') return null;
+  const candidates = [
+    process.env.CUDA_PATH,
+    process.env.CUDAToolkit_ROOT,
+    'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.9',
+    'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.8',
+    'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.6',
+    'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.4',
+    'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v12.2',
+    'C:\\Program Files\\NVIDIA GPU Computing Toolkit\\CUDA\\v13.2',
+  ];
+  for (const root of candidates) {
+    if (!root) continue;
+    try {
+      const cudart12 = path.join(root, 'bin', 'cudart64_12.dll');
+      if (fs.existsSync(cudart12)) {
+        return { root, cudartVersion: 12, supportsLlamaCppPrebuild: true };
+      }
+      const cudart13 = path.join(root, 'bin', 'cudart64_13.dll');
+      if (fs.existsSync(cudart13)) {
+        return { root, cudartVersion: 13, supportsLlamaCppPrebuild: false };
+      }
+    } catch {
+      // try next candidate
+    }
+  }
+  return { root: null, cudartVersion: null, supportsLlamaCppPrebuild: false };
+}
+
 function main() {
   console.log('[ensure-deps] Checking npm dependencies...');
 
@@ -115,10 +150,17 @@ function main() {
         .map((entry) => entry.replace(/^win-x64-?/, '').replace(/^linux-x64-?/, '') || 'cpu')
         .join(', ');
       console.log(`[ensure-deps] [OK] node-llama-cpp GPU prebuilds: ${gpuLabels}`);
-      // CUDA prebuild presence does not guarantee CUDA runtime; the
-      // runtime probe still has to succeed. We log the optimistic state
-      // so operators can match it against actual runtime behavior in the
-      // Hardware Monitor.
+    }
+
+    // Detect CUDA toolkit so we can warn ahead of time when the prebuild
+    // would fail to load at runtime.
+    const cuda = detectCudaToolkit();
+    if (cuda && cuda.supportsLlamaCppPrebuild) {
+      console.log(`[ensure-deps] [OK] CUDA Toolkit ${cuda.cudartVersion} detected at ${cuda.root}; CUDA prebuild can load`);
+    } else if (cuda && cuda.cudartVersion === 13) {
+      console.warn(`[ensure-deps] [WARN] CUDA 13 found at ${cuda.root} but the node-llama-cpp prebuild requires CUDA 12 runtime (cudart64_12.dll). Install CUDA 12.x alongside 13 for GPU inference, or chat will run CPU-only on the llamanode path.`);
+    } else if (process.platform === 'win32') {
+      console.warn('[ensure-deps] [WARN] No CUDA 12 runtime detected. node-llama-cpp prebuild will fall back to CPU. Install CUDA Toolkit 12.x from https://developer.nvidia.com/cuda-12-9-0-download-archive to enable GPU.');
     }
   } else {
     console.warn(`[ensure-deps] [WARN] node-llama-cpp not ready (${nativeCheck.reason}). Direct GGUF loading disabled; Ollama path still works.`);
