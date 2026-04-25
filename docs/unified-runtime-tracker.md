@@ -90,8 +90,8 @@ Status legend: `planned` / `in-progress` / `shipped` / `deferred` / `cancelled`
   - **WS-P2-7 — Phase 2 ship-gate eval:** `scripts/speculative-decoding-eval.js` ships in two modes. Static (release-gate) emits the documented JSON contract for downstream tooling. Live (DEVFORGE_SPEC_EVAL_MODE=live, called from `npm run eval:live-smoke`) drives 10 fixed prompts (5 coding, 3 chat, 2 reasoning) through the live NPU draft endpoint and Ollama main, measures per-prompt draft latency and main tokens/sec, and computes a projected speedup ceiling = (avgAcceptance × lookahead + 1). Real per-token acceptance vs the JS-side approximation requires the verifier loop to be live — documented inline in the script's note field.
   - **WS-P2-8 — Release v0.4:** package.json bumped to 0.4.0, tracker breadcrumb / Phase 2 retrospective added, 18/18 release-gate green at ship time.
 
-#### Known caveat: CUDA binding-test failure on target machine
-node-llama-cpp 3.18.1 prebuilds for `cuda`, `cuda-ext`, and `vulkan` are physically present under `node_modules/@node-llama-cpp/` but the `testBindingBinary.js` probe spawns a subprocess that fails to start. node-llama-cpp falls back to building from source which then fails at "find VS" because VS2022 BuildTools is missing the "Desktop development with C++" workload. Net result: `getLlama({gpu: 'cuda'})` returns a CPU-only Llama instance. This is a fresh-machine setup gap, not a code bug; the orchestrator already routes spec-decoding requests around llamanode when it reports unavailable. Install the VS workload with `winget install Microsoft.VisualStudio.2022.BuildTools --override "--quiet --wait --add Microsoft.VisualStudio.Workload.NativeDesktop --includeRecommended"` (or add `Microsoft.VisualStudio.Workload.NativeDesktop` through Visual Studio Installer), then re-run the CUDA probe. Until that workload is installed and node-llama-cpp resolves CUDA, `prewarmSpecDecodeVerifier self-disables` rather than loading a slow CPU-only verifier.
+#### CUDA verifier status on target machine
+Earlier Phase 2 notes assumed node-llama-cpp 3.18.1 fell back to CPU because the CUDA binding probe tried to build from source and VS2022 BuildTools lacked the "Desktop development with C++" workload. The hardening follow-up disproved that assumption on the current target machine: `node scripts/cuda-probe.mjs`, `node scripts/cuda-probe-via-backend.mjs`, and `node scripts/cuda-verifier-live-probe.js` all resolve `gpu: "cuda"` / `gpuMode: "cuda"`, expose RTX VRAM, and `prewarmSpecDecodeVerifier()` returns `warmed: true` for `qwen2.5:1.5b` at context 1024. Artifact: [`docs/perf/cuda-verifier-live.md`](perf/cuda-verifier-live.md). The VS workload (`Microsoft.VisualStudio.Workload.NativeDesktop`) is still not installed, so keep the v0.4.5 guard: if a future machine resolves `cpu` or `unavailable`, `prewarmSpecDecodeVerifier self-disables` instead of loading a slow CPU-only verifier. Only install the workload if that fallback reappears.
 
 ### Phase 3 — Mosaic Runtime (R&D)
 - **Status:** planned (gated)
@@ -136,6 +136,11 @@ node-llama-cpp 3.18.1 prebuilds for `cuda`, `cuda-ext`, and `vulkan` are physica
 - **Readable inference option layering.** `src/chat-v2/runtime/buildInferenceOptions.js` now names each transform (`applyPresetOverrides`, `applyUserContextOverride`, `applySessionBackendOverride`, `applyFastChatClamp`, `applyVaultOverrides`) while preserving the existing option semantics and source-text release-gate contracts.
 - **Release gate.** Three new checks: `cuda-verifier-guard`, `autonomy-build-options`, `autonomy-orchestrator-route`. Total now **24/24**.
 - **Next phase.** Mosaic Gate 1 proceeds as v0.4.6 on this verified foundation.
+
+### 2026-04-25 — CUDA verifier target-machine verification
+- **Corrected stale assumption.** A follow-up live probe showed the current machine already resolves node-llama-cpp through CUDA despite the missing VS NativeDesktop workload. `scripts/cuda-verifier-live-probe.js` initialized the orchestrator's `llamanode` backend, observed `gpuMode: "cuda"`, and successfully prewarmed the local qwen2.5:1.5b GGUF verifier (`warmed: true`, pair `qwen2.5:1.5b|qwen2.5:1.5b`, ctx 1024).
+- **Artifact.** `docs/perf/cuda-verifier-live.md`.
+- **Policy.** Keep the v0.4.5 guard in place for other machines. On this target, no VS workload install is needed right now; if a future probe returns CPU-only, install `Microsoft.VisualStudio.Workload.NativeDesktop` then re-run the probe.
 
 ---
 

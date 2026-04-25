@@ -26,6 +26,7 @@ function main() {
   const backend = read('electron/services/backends/llamanode-backend.js');
   const orchestrator = read('electron/services/inference-orchestrator.js');
   const tracker = read('docs/unified-runtime-tracker.md');
+  const liveProbe = read('docs/perf/cuda-verifier-live.md');
 
   assert(
     backend.includes('function normalizeLlamaGpuMode(gpu, useGpu = true)'),
@@ -70,6 +71,16 @@ function main() {
   assert(
     tracker.includes('prewarmSpecDecodeVerifier self-disables'),
     'tracker must state prewarmSpecDecodeVerifier self-disables until CUDA is available',
+    failures,
+  );
+  assert(
+    tracker.includes('CUDA verifier target-machine verification'),
+    'tracker must include the target-machine CUDA verifier verification breadcrumb',
+    failures,
+  );
+  assert(
+    liveProbe.includes('**Active GPU mode:** cuda') && liveProbe.includes('"warmed": true'),
+    'docs/perf/cuda-verifier-live.md must record a live CUDA prewarm success',
     failures,
   );
 
