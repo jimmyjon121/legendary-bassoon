@@ -16,6 +16,12 @@ const checks = [
   { id: 'mode-switch', command: 'node scripts/mode-switch-smoke.js' },
   { id: 'llamanode', command: 'node scripts/llamanode-smoke.js' },
   { id: 'tiered-utilization', command: 'node scripts/tiered-utilization-smoke.js' },
+  { id: 'draft-selector', command: 'node scripts/draft-selector-smoke.js' },
+  { id: 'npu-draft', command: 'node scripts/npu-draft-smoke.js' },
+  { id: 'spec-verifier', command: 'node scripts/spec-verifier-smoke.js' },
+  { id: 'spec-bus', command: 'node scripts/spec-bus-smoke.js' },
+  { id: 'spec-dashboard', command: 'node scripts/spec-dashboard-smoke.js' },
+  { id: 'spec-decoding', command: 'node scripts/speculative-decoding-eval.js' },
 ];
 
 function runCheck(check) {

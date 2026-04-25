@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "note": "User overrides for the speculative-decoding pair table. Entries here take precedence over the curated table in electron/services/draft-selector.js. Edit by hand to add a custom main/draft combination; restart not required (the selector re-reads this file on every getDraftFor() call).",
+  "schema": {
+    "pairs[].main": "Required. Main model id as the orchestrator sees it (matches against payload.model substring).",
+    "pairs[].draft": "Required. Draft model id; must be loadable by the NPU draft runtime.",
+    "pairs[].tokenizerId": "Optional. Family tag used by validatePair when tokenizer hashes are unavailable.",
+    "pairs[].family": "Optional. Display label, used in the dashboard.",
+    "pairs[].score": "Optional. 0.0..1.0 -- 1.0 = drop-in pair, 0.7 = adapter required, < 0.5 = unsupported."
+  },
+  "pairs": []
+}

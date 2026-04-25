@@ -1,9 +1,10 @@
 import React, { useEffect, useRef, useMemo } from 'react';
-import { X, Search, RefreshCw, Check, Cpu, HardDrive, FolderSearch, Loader, Code, MessageSquare, Sparkles, BookOpen, Bot } from 'lucide-react';
+import { X, Search, RefreshCw, Check, Cpu, HardDrive, FolderSearch, Loader, Code, MessageSquare, Sparkles, BookOpen, Bot, Zap } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { motion } from 'framer-motion';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { parseModelName } from '../../services/modelOptimizer';
+import { api as electronAPI } from '../../utils/electronAPI';
 
 const AGENTIC_FAMILY_HINTS = [
   'qwen',
@@ -84,6 +85,10 @@ export function ModelSelector({ onClose }) {
   const [npuModels, setNpuModels] = React.useState([]);
   const [isLoadingNpu, setIsLoadingNpu] = React.useState(true);
   const [vramTotalMB, setVramTotalMB] = React.useState(0);
+  // Phase 2: speculative-decoding pair availability per model. We resolve
+  // it lazily as the visible list changes so the chip stays accurate
+  // even after refreshes without spamming IPC for hundreds of entries.
+  const [specPairCache, setSpecPairCache] = React.useState({});
   const containerRef = useRef(null);
 
   // Close on outside click
@@ -335,6 +340,35 @@ export function ModelSelector({ onClose }) {
     return list;
   }, [availableModels, isResearchWorkspace, modelTab, searchQuery]);
 
+  // Resolve speculative-decoding pair info for whatever's currently
+  // visible. We only ask the orchestrator about ids we haven't already
+  // resolved, so opening the selector doesn't spam IPC.
+  useEffect(() => {
+    let cancelled = false;
+    const unresolved = filteredModels
+      .map((entry) => entry?.model?.name)
+      .filter((name) => name && !(name in specPairCache));
+    if (unresolved.length === 0) return undefined;
+
+    (async () => {
+      const updates = {};
+      for (const name of unresolved) {
+        try {
+          const result = await electronAPI.getDraftFor(name);
+          if (cancelled) return;
+          updates[name] = (result && result.success && result.pair) ? result.pair : null;
+        } catch {
+          updates[name] = null;
+        }
+      }
+      if (!cancelled && Object.keys(updates).length > 0) {
+        setSpecPairCache((prev) => ({ ...prev, ...updates }));
+      }
+    })();
+
+    return () => { cancelled = true; };
+  }, [filteredModels, specPairCache]);
+
   const filteredLocalModels = localModels.filter(model => {
     const query = searchQuery.toLowerCase();
     return (
@@ -522,6 +556,8 @@ export function ModelSelector({ onClose }) {
                   const TypeIcon = typeInfo.icon;
                   const isAgentic = entry.score >= 3;
                   const runtimeBadge = getRuntimeBadge(model.name);
+                  const specPair = specPairCache[model.name];
+                  const specSupported = !!(specPair && specPair.draftModelId && specPair.score >= 0.7);
                   return (
                     <div
                       key={model.name}
@@ -564,6 +600,15 @@ export function ModelSelector({ onClose }) {
                             <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${runtimeBadge.className}`}>
                               {runtimeBadge.label}
                             </span>
+                            {specSupported && (
+                              <span
+                                className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 font-medium flex items-center gap-1"
+                                title={`Speculative decoding pair: ${specPair.draftModelId} (${specPair.family || 'override'})`}
+                              >
+                                <Zap size={10} />
+                                Spec
+                              </span>
+                            )}
                             <span className="text-xs text-text-muted flex items-center gap-1">
                               <HardDrive size={10} />
                               {formatSize(model.size)}

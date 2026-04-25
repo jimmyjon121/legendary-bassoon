@@ -1091,6 +1091,89 @@ except Exception as e:
     });
   }
 
+  async draftTokens({ prompt = null, prefixTokens = null, lookahead = 4, requestId = null, sampling = {} } = {}) {
+    return new Promise((resolve) => {
+      try {
+        const body = JSON.stringify({
+          prompt,
+          prefix_tokens: prefixTokens,
+          lookahead,
+          request_id: requestId,
+          temperature: Number(sampling.temperature ?? 0),
+          top_k: Number(sampling.top_k ?? 40),
+          top_p: Number(sampling.top_p ?? 0.95),
+        });
+        const req = http.request(`${this.serverEndpoint}/draft`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(body),
+          },
+          timeout: 30000,
+        }, (res) => {
+          let data = '';
+          res.on('data', (chunk) => { data += chunk; });
+          res.on('end', () => {
+            try {
+              const parsed = data ? JSON.parse(data) : {};
+              if (res.statusCode === 200 && parsed.success !== false) {
+                resolve({ success: true, ...parsed });
+              } else {
+                resolve({
+                  success: false,
+                  error: parsed?.error || `Server returned status ${res.statusCode}`,
+                  data: parsed,
+                });
+              }
+            } catch (err) {
+              resolve({ success: false, error: err?.message || data });
+            }
+          });
+        });
+        req.on('error', (error) => resolve({ success: false, error: error.message }));
+        req.on('timeout', () => {
+          req.destroy();
+          resolve({ success: false, error: 'Draft request timeout' });
+        });
+        req.write(body);
+        req.end();
+      } catch (error) {
+        resolve({ success: false, error: error.message });
+      }
+    });
+  }
+
+  async cancelDraft(requestId) {
+    if (!requestId) return { success: false, error: 'request_id is required' };
+    return new Promise((resolve) => {
+      try {
+        const req = http.request(`${this.serverEndpoint}/draft/${encodeURIComponent(requestId)}`, {
+          method: 'DELETE',
+          timeout: 10000,
+        }, (res) => {
+          let data = '';
+          res.on('data', (chunk) => { data += chunk; });
+          res.on('end', () => {
+            try {
+              const parsed = data ? JSON.parse(data) : {};
+              resolve({ success: parsed.success !== false, ...parsed });
+            } catch {
+              resolve({ success: false, error: data || `Server returned status ${res.statusCode}` });
+            }
+          });
+        });
+        req.on('error', (error) => resolve({ success: false, error: error.message }));
+        req.on('timeout', () => {
+          req.destroy();
+          resolve({ success: false, error: 'Cancel-draft timeout' });
+        });
+        req.end();
+      } catch (error) {
+        resolve({ success: false, error: error.message });
+      }
+    });
+  }
+
   async unloadModel() {
     return new Promise((resolve) => {
       try {

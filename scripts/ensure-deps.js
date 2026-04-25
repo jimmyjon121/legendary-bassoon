@@ -25,14 +25,36 @@ function validateNativeModules() {
   }
 
   // Check that the native binary exists for this platform.
-  // node-llama-cpp ships prebuilds under node_modules/node-llama-cpp/llama/
-  // and node_modules/@node-llama-cpp/ (scoped arch-specific packages).
+  // node-llama-cpp v3 ships scoped GPU-specific prebuilds under
+  // node_modules/@node-llama-cpp/<platform>-<arch>-<gpu>. Each contains
+  // the .node binary the runtime tries to load.
   try {
     const pkgJson = JSON.parse(fs.readFileSync(path.join(llamaCppPath, 'package.json'), 'utf-8'));
     return { ok: true, version: pkgJson.version };
   } catch (err) {
     return { ok: false, reason: `read-failed: ${err.message}` };
   }
+}
+
+// Inspect which GPU prebuilds shipped with the install. v3 publishes
+// scoped subpackages keyed by GPU vendor. Their absence means GPU
+// inference will fall back to CPU at runtime.
+function detectInstalledGpuPrebuilds() {
+  const scopedPath = path.join(nodeModulesPath, '@node-llama-cpp');
+  if (!fs.existsSync(scopedPath)) {
+    return { available: [], scopedDir: null };
+  }
+  const entries = fs.readdirSync(scopedPath).filter((name) => {
+    try {
+      return fs.statSync(path.join(scopedPath, name)).isDirectory();
+    } catch {
+      return false;
+    }
+  });
+  return {
+    scopedDir: scopedPath,
+    available: entries,
+  };
 }
 
 function main() {
@@ -85,6 +107,19 @@ function main() {
   const nativeCheck = validateNativeModules();
   if (nativeCheck.ok) {
     console.log(`[ensure-deps] [OK] node-llama-cpp ${nativeCheck.version} installed`);
+    const prebuilds = detectInstalledGpuPrebuilds();
+    if (prebuilds.available.length === 0) {
+      console.warn('[ensure-deps] [WARN] No GPU prebuilds found under @node-llama-cpp/. Direct GGUF runs CPU-only.');
+    } else {
+      const gpuLabels = prebuilds.available
+        .map((entry) => entry.replace(/^win-x64-?/, '').replace(/^linux-x64-?/, '') || 'cpu')
+        .join(', ');
+      console.log(`[ensure-deps] [OK] node-llama-cpp GPU prebuilds: ${gpuLabels}`);
+      // CUDA prebuild presence does not guarantee CUDA runtime; the
+      // runtime probe still has to succeed. We log the optimistic state
+      // so operators can match it against actual runtime behavior in the
+      // Hardware Monitor.
+    }
   } else {
     console.warn(`[ensure-deps] [WARN] node-llama-cpp not ready (${nativeCheck.reason}). Direct GGUF loading disabled; Ollama path still works.`);
   }

@@ -5029,6 +5029,53 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     }
   });
 
+  // ─── Phase 2: Speculative-decoding draft pairing ───────────────────
+  // Lazy require so the renderer can hit these handlers even on installs
+  // where the orchestrator hasn't finished initializing yet.
+  let _draftSelectorFn;
+  const getDraftSelector = () => {
+    if (_draftSelectorFn === undefined) {
+      try { _draftSelectorFn = require('./services/draft-selector'); }
+      catch (err) {
+        console.warn('[model:getDraftFor] Draft selector not available:', err?.message || err);
+        _draftSelectorFn = null;
+      }
+    }
+    return _draftSelectorFn;
+  };
+
+  ipcMain.handle('model:getDraftFor', async (_, { mainModelId } = {}) => {
+    try {
+      const selector = getDraftSelector();
+      if (!selector) return { success: false, error: 'draft-selector unavailable' };
+      const result = selector.getDraftFor(mainModelId);
+      return { success: true, pair: result };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('model:listSupportedSpecMains', async () => {
+    try {
+      const selector = getDraftSelector();
+      if (!selector) return { success: false, supported: [], error: 'draft-selector unavailable' };
+      return { success: true, supported: selector.listSupportedMains() };
+    } catch (error) {
+      return { success: false, supported: [], error: error.message };
+    }
+  });
+
+  ipcMain.handle('model:validateSpecPair', async (_, payload = {}) => {
+    try {
+      const selector = getDraftSelector();
+      if (!selector) return { success: false, error: 'draft-selector unavailable' };
+      const result = selector.validatePair(payload);
+      return { success: true, ...result };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+
   ipcMain.handle('imageBackend:status', async () => {
     try {
       const endpoint = store.get('imageGenEndpoint');
@@ -5519,6 +5566,41 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: true };
     } catch (error) {
       return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('orchestrator:recordSpecDecodeOutcome', (_, payload = {}) => {
+    if (!orchestrator || typeof orchestrator.recordSpecDecodeOutcome !== 'function') {
+      return { success: false, error: 'Orchestrator not available' };
+    }
+    try {
+      orchestrator.recordSpecDecodeOutcome(payload || {});
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('orchestrator:getSpecDecodeStats', (_, payload = {}) => {
+    if (!orchestrator || typeof orchestrator.getSpecDecodeStats !== 'function') {
+      return { available: false, lastAcceptanceRate: 0, pairs: [] };
+    }
+    try {
+      const stats = orchestrator.getSpecDecodeStats(payload || {});
+      return { available: true, ...stats };
+    } catch (error) {
+      return { available: false, error: error.message };
+    }
+  });
+
+  ipcMain.handle('orchestrator:isSpecDecodeDisabled', (_, payload = {}) => {
+    if (!orchestrator || typeof orchestrator.isSpecDecodeDisabled !== 'function') {
+      return { available: false, disabled: false };
+    }
+    try {
+      return { available: true, disabled: orchestrator.isSpecDecodeDisabled(payload?.pair) };
+    } catch (error) {
+      return { available: false, error: error.message };
     }
   });
 

@@ -745,6 +745,32 @@ export function HardwareMonitorFull() {
                   {deviceActivity.warmloop.warmModel ? ` · ${deviceActivity.warmloop.warmModel.split('/').pop()}` : ''}
                 </p>
               )}
+              {deviceActivity.streams?.specDecode && Array.isArray(deviceActivity.streams.specDecode.pairs) && (
+                <div className="flex items-center justify-between py-2 px-3 rounded-lg bg-white/[0.02] border border-white/[0.04]">
+                  <div className="flex items-center gap-2 min-w-0 flex-wrap">
+                    <span className="text-[11px] text-white/70 font-medium w-16">Spec decode</span>
+                    {deviceActivity.streams.specDecode.pairs.length === 0 ? (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/[0.04] text-white/40">no spec turns yet</span>
+                    ) : (
+                      deviceActivity.streams.specDecode.pairs.map((entry) => (
+                        <span
+                          key={entry.pair}
+                          className={`text-[10px] px-1.5 py-0.5 rounded ${entry.autoDisabled
+                            ? 'bg-rose-500/15 text-rose-300'
+                            : 'bg-violet-500/15 text-violet-300'}`}
+                          title={`${entry.accepted}/${entry.total} accepted across ${entry.count} turns`}
+                        >
+                          {entry.pair.split('|')[0].split(':').slice(-1)[0]}:{Math.round(entry.acceptanceRate * 100)}%
+                          {entry.autoDisabled ? ' off' : ''}
+                        </span>
+                      ))
+                    )}
+                  </div>
+                  <div className="text-[10px] text-white/35">
+                    last {Math.round((deviceActivity.streams.specDecode.lastAcceptanceRate || 0) * 100)}%
+                  </div>
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -136,6 +136,19 @@ class InferenceOrchestrator {
     this.offloadEvidence = new Map();
     this.streamEvents = [];
     this.warmloopTransitions = [];
+    // Phase 2: speculative-decoding outcome history per main+draft pair.
+    // Each entry is { pair, accepted, total, mainTokensPerSec,
+    // baselineTokensPerSec, ts }. Auto-disable evaluates the rolling
+    // window when new outcomes land; the disabled set is queried by
+    // the orchestrator before routing through the verifier loop.
+    this.specDecodeOutcomes = [];
+    this.specDecodeAutoDisabled = new Set();
+    this.specDecodeRecentSinceDisable = new Map();
+    this.specDecodeConfig = {
+      disableThreshold: 0.4,
+      windowSize: 50,
+      autoReenableTurns: 100,
+    };
     this.lastBackendDecision = null;
     this.lastExecutionPlan = null;
     this._applyLanePolicy();
@@ -723,6 +736,89 @@ class InferenceOrchestrator {
     if (this.streamEvents.length > 300) {
       this.streamEvents.shift();
     }
+  }
+
+  // Phase 2: speculative-decoding telemetry. The orchestrator's
+  // dashboard reads aggregated stats; the auto-disable state machine
+  // toggles a pair off when its rolling acceptance rate falls below
+  // the configured threshold. Re-enables after autoReenableTurns
+  // worth of fresh non-spec turns observed on the same pair.
+  recordSpecDecodeOutcome(outcome = {}) {
+    const pair = String(outcome?.pair || '').trim();
+    if (!pair) return;
+    const accepted = Math.max(0, Number(outcome.accepted) || 0);
+    const total = Math.max(accepted, Number(outcome.total) || 0);
+    const row = {
+      ts: Number.isFinite(Number(outcome.ts)) && outcome.ts > 0 ? Number(outcome.ts) : Date.now(),
+      pair,
+      accepted,
+      total,
+      acceptanceRate: total > 0 ? accepted / total : 0,
+      mainTokensPerSec: Number.isFinite(Number(outcome.mainTokensPerSec)) ? Number(outcome.mainTokensPerSec) : null,
+      baselineTokensPerSec: Number.isFinite(Number(outcome.baselineTokensPerSec)) ? Number(outcome.baselineTokensPerSec) : null,
+    };
+    this.specDecodeOutcomes.push(row);
+    if (this.specDecodeOutcomes.length > 1000) {
+      this.specDecodeOutcomes.shift();
+    }
+    this._evaluateSpecDecodeAutoDisable(pair);
+  }
+
+  _evaluateSpecDecodeAutoDisable(pair) {
+    const cfg = this.specDecodeConfig || { disableThreshold: 0.4, windowSize: 50, autoReenableTurns: 100 };
+    const recent = this.specDecodeOutcomes.filter((row) => row.pair === pair).slice(-cfg.windowSize);
+    if (recent.length < Math.max(5, Math.floor(cfg.windowSize / 5))) {
+      // Need enough samples to make a confident call.
+      return;
+    }
+    const avgRate = recent.reduce((sum, row) => sum + row.acceptanceRate, 0) / recent.length;
+    if (avgRate < cfg.disableThreshold) {
+      if (!this.specDecodeAutoDisabled.has(pair)) {
+        this.specDecodeAutoDisabled.add(pair);
+        this.specDecodeRecentSinceDisable.set(pair, 0);
+      }
+    } else if (this.specDecodeAutoDisabled.has(pair)) {
+      const fresh = (this.specDecodeRecentSinceDisable.get(pair) || 0) + recent.length;
+      this.specDecodeRecentSinceDisable.set(pair, fresh);
+      if (fresh >= cfg.autoReenableTurns) {
+        this.specDecodeAutoDisabled.delete(pair);
+        this.specDecodeRecentSinceDisable.delete(pair);
+      }
+    }
+  }
+
+  isSpecDecodeDisabled(pair) {
+    const key = String(pair || '').trim();
+    if (!key) return false;
+    return this.specDecodeAutoDisabled.has(key);
+  }
+
+  getSpecDecodeStats({ pair = null, windowSize = null } = {}) {
+    const cfg = this.specDecodeConfig || { windowSize: 50 };
+    const window = Math.max(1, Math.floor(Number(windowSize) || cfg.windowSize));
+    const filter = (row) => (pair ? row.pair === pair : true);
+    const filtered = this.specDecodeOutcomes.filter(filter).slice(-window);
+    const byPair = new Map();
+    for (const row of filtered) {
+      const bucket = byPair.get(row.pair) || { pair: row.pair, accepted: 0, total: 0, count: 0 };
+      bucket.accepted += row.accepted;
+      bucket.total += row.total;
+      bucket.count += 1;
+      byPair.set(row.pair, bucket);
+    }
+    const pairs = [...byPair.values()].map((b) => ({
+      ...b,
+      acceptanceRate: b.total > 0 ? b.accepted / b.total : 0,
+      autoDisabled: this.specDecodeAutoDisabled.has(b.pair),
+    }));
+    const last = filtered[filtered.length - 1] || null;
+    return {
+      windowSize: window,
+      lastAcceptanceRate: last ? last.acceptanceRate : 0,
+      pairs,
+      autoDisabled: [...this.specDecodeAutoDisabled],
+      config: { ...cfg },
+    };
   }
 
   recordWarmloopTransition(transition = {}) {
@@ -1574,6 +1670,8 @@ class InferenceOrchestrator {
     const streamRows = [...streamById.values()].sort((a, b) => b.updatedAt - a.updatedAt);
     const lastStream = streamRows[0] || null;
 
+    const specDecodeStats = this.getSpecDecodeStats({});
+
     return {
       windowMs,
       generatedAt: now,
@@ -1584,6 +1682,7 @@ class InferenceOrchestrator {
         last: lastStream,
         aborts,
         warmloopTransitions,
+        specDecode: specDecodeStats,
       },
       currentBackend: this.currentBackend?.id || null,
     };

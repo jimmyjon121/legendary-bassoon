@@ -19,8 +19,9 @@ import json
 import os
 import sys
 import time
+import uuid
 from pathlib import Path
-from threading import Thread
+from threading import Lock, Thread
 from typing import Dict, Generator, Optional
 
 try:
@@ -141,6 +142,30 @@ class ChatCompletionRequest(BaseModel):
     temperature: float = 0.7
     top_k: int = 40
     top_p: float = 0.9
+
+
+class DraftRequest(BaseModel):
+    """Phase 2 speculative-decoding draft request. The caller supplies
+    either a `prompt` string or a `prefix_tokens` list; the server
+    generates `lookahead` (4-8) candidate next tokens for the verifier
+    to accept or reject. Same-tokenizer pairs are required for the
+    token IDs returned here to be valid in the verifier's vocabulary."""
+
+    prompt: str | None = None
+    prefix_tokens: list[int] | None = None
+    lookahead: int = 4
+    request_id: str | None = None
+    temperature: float = 0.0
+    top_k: int = 40
+    top_p: float = 0.95
+
+
+# Active draft requests keyed by request_id. Phase 2 uses this for
+# mid-flight cancellation: when the verifier rejects an earlier batch
+# and wants to discard the in-flight remainder, it DELETEs the request
+# id and the next iteration of the streamer returns early.
+_draft_requests: Dict[str, Dict[str, object]] = {}
+_draft_requests_lock = Lock()
 
 
 def _resolve_genai_model_dir(model_id: str) -> Optional[Path]:
@@ -797,6 +822,179 @@ def chat_completions(req: ChatCompletionRequest):
             'latency_ms': latency_ms,
         },
     }
+
+
+def _build_draft_config(req: DraftRequest):
+    """Build a GenerationConfig sized for a speculative-decoding draft
+    pass (4-8 tokens, low temperature). Greedy by default so the
+    verifier sees deterministic candidates the user's prompt actually
+    determines, not noise from a high-temperature roll."""
+    if not GENAI_AVAILABLE or ov_genai is None:
+        raise RuntimeError('GenAI not available; draft endpoint requires openvino-genai')
+    cfg = ov_genai.GenerationConfig()
+    cfg.max_new_tokens = max(1, min(int(req.lookahead or 4), 8))
+    if req.temperature and req.temperature > 0:
+        cfg.do_sample = True
+        cfg.temperature = float(req.temperature)
+        cfg.top_p = float(req.top_p)
+        cfg.top_k = int(req.top_k)
+    else:
+        cfg.do_sample = False
+    return cfg
+
+
+def _resolve_draft_prompt(req: DraftRequest, tokenizer) -> str:
+    if req.prompt and req.prompt.strip():
+        return req.prompt
+    if req.prefix_tokens and tokenizer is not None and hasattr(tokenizer, 'decode'):
+        try:
+            return tokenizer.decode(list(req.prefix_tokens))
+        except Exception:  # noqa: BLE001
+            return ''
+    return ''
+
+
+def _extract_token_ids(tokenizer, text: str) -> list[int]:
+    """OpenVINO GenAI's Tokenizer.encode() returns a TokenizedInputs
+    object whose input_ids is an ov.Tensor of shape [1, seq_len]. Drill
+    down to a flat python list so the verifier can consume it without
+    knowing about the ov.Tensor type."""
+    if tokenizer is None or not text:
+        return []
+    try:
+        encoded = tokenizer.encode(text)
+        ids = getattr(encoded, 'input_ids', encoded)
+        # ids is an ov.Tensor; .data is a numpy ndarray of shape [1, N].
+        if hasattr(ids, 'data'):
+            arr = ids.data
+            try:
+                arr = arr.tolist()
+            except AttributeError:
+                arr = list(arr)
+            if arr and isinstance(arr[0], (list, tuple)):
+                return [int(x) for x in arr[0]]
+            return [int(x) for x in arr]
+        # Already a list-like of ints.
+        return [int(x) for x in ids]
+    except Exception as exc:  # noqa: BLE001
+        print(f'[DevForge][NPU] Failed to extract token ids: {exc}', flush=True)
+        return []
+
+
+@app.post('/draft')
+def generate_draft(req: DraftRequest):
+    """Phase 2 NPU draft endpoint. Generates up to `lookahead` tokens
+    starting from `prompt`/`prefix_tokens` and returns them as raw
+    token IDs so the verifier (running in llamanode) can run a single
+    forward pass over them. The pair must share a tokenizer for the
+    IDs to be valid in the verifier's vocabulary."""
+    ensure_model_loaded()
+    pipe = state.genai_pipe
+    if pipe is None:
+        return {
+            'success': False,
+            'error': 'GenAI pipeline unavailable; cannot serve drafts',
+            'engine': 'optimum' if state.model is not None else 'none',
+        }
+
+    request_id = req.request_id or f'draft-{uuid.uuid4().hex}'
+    started_at = time.perf_counter()
+    with _draft_requests_lock:
+        _draft_requests[request_id] = {'cancelled': False, 'started_at': started_at}
+
+    try:
+        try:
+            tokenizer = pipe.get_tokenizer()
+        except Exception:  # noqa: BLE001
+            tokenizer = None
+
+        prompt = _resolve_draft_prompt(req, tokenizer)
+        if not prompt:
+            return {
+                'success': False,
+                'error': 'draft request requires either prompt or prefix_tokens',
+                'request_id': request_id,
+            }
+
+        cfg = _build_draft_config(req)
+
+        # Cooperative cancellation: check the registry between the time
+        # the request lands and when generate() is dispatched. The
+        # generate() call itself is opaque to mid-flight cancel in this
+        # build of GenAI; aborting once issued requires waiting for the
+        # 4-8 tokens to finish (microseconds at NPU speed).
+        with _draft_requests_lock:
+            entry = _draft_requests.get(request_id)
+            cancelled = bool(entry and entry.get('cancelled'))
+        if cancelled:
+            return {
+                'success': True,
+                'cancelled': True,
+                'request_id': request_id,
+                'draft_tokens': [],
+                'draft_logprobs': [],
+                'latency_ms': int((time.perf_counter() - started_at) * 1000),
+            }
+
+        result = pipe.generate(prompt, cfg)
+        # GenAI returns either a string, a DecodedResults-like object,
+        # or (newer builds) a object whose .tokens is a list of int
+        # tensors. Always recover the text first, then re-tokenize so
+        # we get a flat python int list regardless of build.
+        if hasattr(result, 'texts') and result.texts:
+            text = str(result.texts[0])
+        else:
+            text = str(result)
+        ids = _extract_token_ids(tokenizer, text)
+
+        # Some GenAI builds prepend prompt ids. Take the last `lookahead`
+        # ids so the caller always gets just the freshly-drafted tokens.
+        max_n = max(1, min(int(req.lookahead or 4), 8))
+        if len(ids) > max_n:
+            ids = ids[-max_n:]
+
+        with _draft_requests_lock:
+            entry = _draft_requests.get(request_id)
+            cancelled = bool(entry and entry.get('cancelled'))
+
+        return {
+            'success': True,
+            'cancelled': cancelled,
+            'request_id': request_id,
+            'draft_tokens': ids,
+            # Logprobs are not exposed by all GenAI builds; fall back to
+            # null and let the verifier do greedy acceptance until we add
+            # a Python-side capture pass for the underlying logits.
+            'draft_logprobs': None,
+            'latency_ms': int((time.perf_counter() - started_at) * 1000),
+            'engine': 'genai',
+            'device': state.genai_device or state.config.get('device'),
+            'tokenizer_id': state.genai_model_id,
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            'success': False,
+            'error': str(exc),
+            'request_id': request_id,
+            'latency_ms': int((time.perf_counter() - started_at) * 1000),
+        }
+    finally:
+        with _draft_requests_lock:
+            _draft_requests.pop(request_id, None)
+
+
+@app.delete('/draft/{request_id}')
+def cancel_draft(request_id: str):
+    """Mark an in-flight draft as cancelled. The handler returns
+    immediately; the actual draft thread observes the flag at its next
+    cooperative check (between batches or before the next pipeline call).
+    """
+    with _draft_requests_lock:
+        entry = _draft_requests.get(request_id)
+        if entry is None:
+            return {'success': False, 'request_id': request_id, 'reason': 'unknown-or-completed'}
+        entry['cancelled'] = True
+    return {'success': True, 'request_id': request_id}
 
 
 @app.post('/generate-stream')

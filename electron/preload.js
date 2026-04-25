@@ -340,6 +340,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   loadLocalGguf: (payload) => ipcRenderer.invoke('model:loadLocalGguf', payload),
   listLocalGgufs: () => ipcRenderer.invoke('model:listLocalGgufs'),
   unregisterLocalGguf: (payload) => ipcRenderer.invoke('model:unregisterLocalGguf', payload),
+  getDraftFor: (mainModelId) => ipcRenderer.invoke('model:getDraftFor', { mainModelId }),
+  listSupportedSpecMains: () => ipcRenderer.invoke('model:listSupportedSpecMains'),
+  validateSpecPair: (payload) => ipcRenderer.invoke('model:validateSpecPair', payload),
   scanLmStudioImportedDuplicates: () => ipcRenderer.invoke('lmstudio:scanImportedDuplicates'),
   reclaimLmStudioImportedDuplicates: (payload) => ipcRenderer.invoke('lmstudio:reclaim', payload),
   getImageBackendStatus: () => ipcRenderer.invoke('imageBackend:status'),
@@ -391,6 +394,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setPerformanceProfile: (profile) => ipcRenderer.invoke('llm:setProfile', profile),
   getDeviceUtilization: (windowMs) => ipcRenderer.invoke('orchestrator:getDeviceUtilization', windowMs),
   recordStreamEvent: (payload) => ipcRenderer.invoke('orchestrator:recordStreamEvent', payload || {}),
+  recordSpecDecodeOutcome: (payload) => ipcRenderer.invoke('orchestrator:recordSpecDecodeOutcome', payload || {}),
+  getSpecDecodeStats: (payload) => ipcRenderer.invoke('orchestrator:getSpecDecodeStats', payload || {}),
+  isSpecDecodeDisabled: (payload) => ipcRenderer.invoke('orchestrator:isSpecDecodeDisabled', payload || {}),
 
   // ============================================
   // Model Manager

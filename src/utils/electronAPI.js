@@ -221,6 +221,19 @@ export const api = {
   recordStreamEvent: (payload = {}) =>
     safeCall('recordStreamEvent', [payload], { success: false }),
 
+  // Phase 2: speculative-decoding draft pairing
+  getDraftFor: (mainModelId) => safeCall('getDraftFor', [mainModelId], { success: false, pair: null }),
+  listSupportedSpecMains: () => safeCall('listSupportedSpecMains', [], { success: false, supported: [] }),
+  validateSpecPair: (payload = {}) => safeCall('validateSpecPair', [payload], { success: false, compatible: false }),
+
+  // Phase 2: speculative-decoding telemetry / dashboard
+  recordSpecDecodeOutcome: (payload = {}) =>
+    safeCall('recordSpecDecodeOutcome', [payload], { success: false }),
+  getSpecDecodeStats: (payload = {}) =>
+    safeCall('getSpecDecodeStats', [payload], { available: false, lastAcceptanceRate: 0, pairs: [] }),
+  isSpecDecodeDisabled: (payload = {}) =>
+    safeCall('isSpecDecodeDisabled', [payload], { available: false, disabled: false }),
+
   // Power Mode
   getPowerModeStatus: () => safeCall('getPowerModeStatus', [], { enabled: false }),
   enablePowerMode: () => safeCall('enablePowerMode', [], { enabled: false }),

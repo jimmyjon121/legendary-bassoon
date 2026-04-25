@@ -1,18 +1,28 @@
 /**
  * LlamaNode Backend
  *
- * In-process GGUF runtime via node-llama-cpp. Replaces the "ollama create
- * copies every GGUF into the blob store" path with a direct load from the
- * user's local file — no duplication, no Ollama subprocess, LM Studio-style.
+ * In-process GGUF runtime via node-llama-cpp v3. Replaces the "ollama
+ * create copies every GGUF into the blob store" path with a direct load
+ * from the user's local file -- no duplication, no Ollama subprocess,
+ * LM Studio-style.
  *
  * Single-resident model policy: one (model, context, session) triple is
  * kept hot. Loading a new model evicts the previous one. This mirrors LM
  * Studio's default behavior and matches OLLAMA_MAX_LOADED_MODELS=1.
  *
- * node-llama-cpp is loaded lazily (inside methods, guarded by try/catch)
- * so the app still boots if the native module failed to install or the
- * CUDA runtime is missing. When unavailable, the backend reports as
- * offline and the orchestrator falls back to Ollama automatically.
+ * node-llama-cpp v3 is loaded lazily via dynamic import() so the app
+ * still boots if the native module failed to install or the CUDA runtime
+ * is missing. When unavailable, the backend reports as offline and the
+ * orchestrator falls back to Ollama automatically.
+ *
+ * v3 API differences from v2 the orchestrator should know about:
+ *   - Single Llama singleton (getLlama({ gpu })) shared across loads.
+ *   - Models are awaited (llama.loadModel) instead of new-d.
+ *   - Contexts come from model.createContext + context.getSequence().
+ *   - Streaming uses onTextChunk(string) instead of onToken(int[]).
+ *   - Cancellation via AbortSignal instead of a custom abort flag.
+ *   - LlamaContextSequence exposes evaluate() / getProbabilities() which
+ *     is the foundation Phase 2's speculative-decode verifier needs.
  */
 
 const BaseBackend = require('./base-backend');
@@ -41,22 +51,19 @@ function normalizePathKey(modelPath) {
   }
 }
 
-// node-llama-cpp v2 ships as ESM with top-level await in its entry point,
-// so it cannot be loaded via require() from CommonJS. We use dynamic
-// import() and cache the resulting module reference. The load is async,
-// but the backend's public methods already return promises so callers
-// don't see any difference.
+// node-llama-cpp v3 ships as ESM. Electron 32 (Node 20.18) supports
+// require() of ESM with --experimental-require-module, but dynamic
+// import() works on both v2 and v3 unconditionally so we keep it as
+// the load shim for forward-compat.
 async function loadLlamaModule() {
   try {
     const mod = await import('node-llama-cpp');
-    // import() returns a namespace object; the library's exports live on
-    // it directly. Normalize to a plain object with the symbols we need.
     return {
-      LlamaModel: mod.LlamaModel,
-      LlamaContext: mod.LlamaContext,
+      getLlama: mod.getLlama,
       LlamaChatSession: mod.LlamaChatSession,
+      LlamaJsonSchemaGrammar: mod.LlamaJsonSchemaGrammar,
       LlamaGrammar: mod.LlamaGrammar,
-      AbortError: mod.AbortError,
+      Token: mod.Token,
     };
   } catch (err) {
     const reason = err?.code === 'MODULE_NOT_FOUND' || /Cannot find package/.test(String(err?.message || ''))
@@ -85,24 +92,42 @@ class LlamaNodeBackend extends BaseBackend {
     });
 
     this.useGpu = config.useGpu !== false;
-    // Single-resident model state.
-    this._current = null; // { pathKey, modelPath, contextSize, model, context, session, metadata }
-    this._loading = null; // in-flight load promise (serializes concurrent loads)
-    this._modulePromise = null; // cached dynamic import() promise for node-llama-cpp
+    this._current = null;
+    this._loading = null;
+    this._modulePromise = null;
+    this._llamaPromise = null;
     this._activeRequests = new Map();
 
     this.gpuLayers = typeof config.gpuLayers === 'number' ? config.gpuLayers : -1;
   }
 
-  // Returns a Promise that resolves to the loaded module (or an error
-  // object). We cache the promise so concurrent callers share one load,
-  // and a resolved successful load is memoized for the lifetime of the
-  // process.
   _getModule() {
     if (!this._modulePromise) {
       this._modulePromise = loadLlamaModule();
     }
     return this._modulePromise;
+  }
+
+  // Cached singleton llama instance. Initializing it spawns a worker
+  // that probes the prebuilt bindings, which we only want to do once.
+  async _getLlama() {
+    if (!this._llamaPromise) {
+      this._llamaPromise = (async () => {
+        const mod = await this._getModule();
+        if (mod?.__error) {
+          throw new Error(mod.__error);
+        }
+        if (typeof mod.getLlama !== 'function') {
+          throw new Error('node-llama-cpp v3 API not found - getLlama() missing. Installed version may be 2.x.');
+        }
+        const gpuPreference = this.useGpu ? 'auto' : false;
+        return mod.getLlama({ gpu: gpuPreference });
+      })().catch((err) => {
+        this._llamaPromise = null;
+        throw err;
+      });
+    }
+    return this._llamaPromise;
   }
 
   async checkHealth() {
@@ -116,11 +141,23 @@ class LlamaNodeBackend extends BaseBackend {
       };
     }
     this.setStatus('available');
+    let gpu = null;
+    try {
+      const llama = await this._getLlama();
+      gpu = llama?.gpu ?? null;
+    } catch (err) {
+      return {
+        available: false,
+        status: 'init-failed',
+        error: err?.message || String(err),
+      };
+    }
     return {
       available: true,
       status: this._current ? 'loaded' : 'idle',
       model: this._current?.modelPath || null,
       device: this.device,
+      gpu,
     };
   }
 
@@ -153,40 +190,57 @@ class LlamaNodeBackend extends BaseBackend {
     if (mod?.__error) {
       throw new Error(mod.__error);
     }
+    const llama = await this._getLlama();
+    const { LlamaChatSession } = mod;
+    if (!LlamaChatSession) {
+      throw new Error('node-llama-cpp v3 LlamaChatSession not found - check installed version is 3.x.');
+    }
 
     this._loading = (async () => {
       await this._evictCurrent();
 
-      const { LlamaModel, LlamaContext, LlamaChatSession } = mod;
-      if (!LlamaModel || !LlamaContext || !LlamaChatSession) {
-        throw new Error('node-llama-cpp API not found — check installed version is 2.x');
-      }
-
-      const model = new LlamaModel({
+      const model = await llama.loadModel({
         modelPath,
         gpuLayers: this.useGpu ? this.gpuLayers : 0,
-        useMlock: false,
       });
 
-      const context = new LlamaContext({
-        model,
+      const context = await model.createContext({
         contextSize,
         batchSize: Number(options.batchSize) || 512,
       });
+      const sequence = context.getSequence();
+      const session = new LlamaChatSession({ contextSequence: sequence });
 
-      const session = new LlamaChatSession({ context });
+      const trainedContextLength = (
+        typeof model.trainContextSize === 'number'
+          ? model.trainContextSize
+          : (typeof model.fileInfo?.contextLength === 'number'
+            ? model.fileInfo.contextLength
+            : null)
+      );
 
       const metadata = {
         path: modelPath,
         contextLength: contextSize,
-        trainedContextLength: typeof model.trainContextSize === 'number' ? model.trainContextSize : null,
-        architecture: model.architecture || null,
+        trainedContextLength,
+        architecture: model.fileInfo?.architecture
+          || model.architecture
+          || null,
         fileSize: (() => {
           try { return fs.statSync(modelPath).size; } catch { return null; }
         })(),
       };
 
-      this._current = { pathKey, modelPath, contextSize, model, context, session, metadata };
+      this._current = {
+        pathKey,
+        modelPath,
+        contextSize,
+        model,
+        context,
+        sequence,
+        session,
+        metadata,
+      };
       this.setStatus('available');
       return { success: true, metadata };
     })();
@@ -203,7 +257,8 @@ class LlamaNodeBackend extends BaseBackend {
     const prev = this._current;
     this._current = null;
     try {
-      if (typeof prev.session?.dispose === 'function') await prev.session.dispose();
+      // Disposing the context releases the sequence; disposing the model
+      // releases the underlying weights and frees VRAM.
       if (typeof prev.context?.dispose === 'function') await prev.context.dispose();
       if (typeof prev.model?.dispose === 'function') await prev.model.dispose();
     } catch (err) {
@@ -234,7 +289,7 @@ class LlamaNodeBackend extends BaseBackend {
     return String(payload?.prompt || '').trim();
   }
 
-  _buildGenerationOptions(payload) {
+  _buildGenerationOptions(payload, extra = {}) {
     const o = payload?.options || {};
     const opts = {
       maxTokens: Number.isFinite(Number(o.num_predict)) && Number(o.num_predict) > 0 ? Number(o.num_predict) : 512,
@@ -245,7 +300,7 @@ class LlamaNodeBackend extends BaseBackend {
     if (Number.isFinite(Number(o.repeat_penalty))) {
       opts.repeatPenalty = { penalty: Number(o.repeat_penalty) };
     }
-    return opts;
+    return { ...opts, ...extra };
   }
 
   async generate(payload) {
@@ -272,43 +327,36 @@ class LlamaNodeBackend extends BaseBackend {
     }
 
     const requestId = `llamanode-${Date.now()}`;
-    const mod = await this._getModule();
     const session = this._current.session;
-    const context = this._current.context;
+    const abortController = new AbortController();
+    const cancelHandle = {
+      abort: () => abortController.abort(),
+    };
+    this._activeRequests.set(requestId, cancelHandle);
+
+    const baseOptions = this._buildGenerationOptions(payload, {
+      signal: abortController.signal,
+      onTextChunk: (chunk) => {
+        const text = typeof chunk === 'string' ? chunk : String(chunk || '');
+        if (text) onChunk({ response: text, done: false });
+      },
+    });
 
     let aborted = false;
-    const abortController = {
-      abort: () => { aborted = true; },
-    };
-    this._activeRequests.set(requestId, abortController);
-
-    const baseOptions = this._buildGenerationOptions(payload);
-
     try {
-      await session.prompt(prompt, {
-        ...baseOptions,
-        onToken: (chunks) => {
-          if (aborted) return;
-          try {
-            const decoded = typeof context.decode === 'function'
-              ? context.decode(chunks)
-              : (mod.Token && typeof mod.Token.decode === 'function' ? mod.Token.decode(chunks) : String(chunks));
-            if (decoded) {
-              onChunk({ response: decoded, done: false });
-            }
-          } catch (err) {
-            console.warn('[LlamaNode] token decode failed:', err?.message || err);
-          }
-        },
-      });
-      if (!aborted) onChunk({ done: true });
+      await session.prompt(prompt, baseOptions);
+      if (!abortController.signal.aborted) onChunk({ done: true });
     } catch (err) {
-      if (!aborted) throw err;
+      if (abortController.signal.aborted) {
+        aborted = true;
+      } else {
+        throw err;
+      }
     } finally {
       this._activeRequests.delete(requestId);
     }
 
-    return { requestId };
+    return { requestId, aborted };
   }
 
   async cancel(requestId) {
@@ -331,8 +379,64 @@ class LlamaNodeBackend extends BaseBackend {
     }];
   }
 
+  // Phase 2 hook: speculative-decode verifier needs raw access to the
+  // active LlamaContextSequence so it can evaluate(tokens) and read
+  // probabilities for the verifier acceptance loop. Returns null when
+  // no model is loaded so callers can fall back to single-device mode.
+  getActiveSequence() {
+    return this._current?.sequence || null;
+  }
+
+  // Phase 2 verifier adapter. Runs the verifier model forward over the
+  // supplied tokens and returns per-position logits. Concrete shape:
+  //   - input: tokens = [...prefix, ...draftTokens]
+  //   - output: { logits: Float32Array[], vocabSize: number }
+  //     where logits[i] is the next-token distribution after observing
+  //     tokens[0..i] -- length == tokens.length.
+  //
+  // The actual logits-extraction call depends on which controlled API
+  // node-llama-cpp 3.x exposes for the installed prebuild. If none is
+  // available, we throw a clearly-labelled "not implemented on this
+  // build" error so the orchestrator can fall back to non-speculative
+  // generation cleanly. The pure verifier algorithm in
+  // electron/services/spec-decode-verifier.js does NOT depend on this
+  // adapter for unit testing -- it accepts an evaluateLogits callback
+  // that the orchestrator wires up at runtime.
+  async evaluateForVerifier({ tokens } = {}) {
+    if (!Array.isArray(tokens) || tokens.length === 0) {
+      throw new Error('evaluateForVerifier: tokens array is required');
+    }
+    if (!this._current?.sequence) {
+      throw new Error('evaluateForVerifier: no model loaded');
+    }
+    const sequence = this._current.sequence;
+
+    // node-llama-cpp 3.x exposes `controlledEvaluate(tokens, options)`
+    // when built with the verifier-friendly probabilities flag. Probe
+    // it carefully so we degrade clearly when the API is missing.
+    if (typeof sequence.controlledEvaluate !== 'function') {
+      const err = new Error('evaluateForVerifier: spec-decode logits API not available in this node-llama-cpp build (controlledEvaluate missing)');
+      err.code = 'SPEC_DECODE_UNAVAILABLE';
+      throw err;
+    }
+
+    const result = await sequence.controlledEvaluate(tokens, {
+      generateLogits: tokens.map(() => true),
+    });
+
+    if (!result || !Array.isArray(result.logits)) {
+      const err = new Error('evaluateForVerifier: controlledEvaluate did not return logits[]');
+      err.code = 'SPEC_DECODE_UNAVAILABLE';
+      throw err;
+    }
+
+    return {
+      logits: result.logits,
+      vocabSize: result.logits[0]?.length ?? 0,
+    };
+  }
+
   estimatePerformance(parameterCount) {
-    // RTX 5050 Laptop Blackwell rough estimate (with CUDA GPU layers).
     return {
       tokensPerSecond: parameterCount < 7 ? 80 : parameterCount < 13 ? 50 : parameterCount < 30 ? 25 : 10,
       memoryRequired: parameterCount * 1.2,

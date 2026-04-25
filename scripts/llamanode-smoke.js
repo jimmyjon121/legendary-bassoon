@@ -91,8 +91,8 @@ function main() {
   );
 
   // Lazy-loads the native module so the app boots even when install fails.
-  // Uses dynamic import() because node-llama-cpp@2 is ESM with top-level await
-  // and cannot be loaded via require() from CommonJS.
+  // Uses dynamic import() to load the ESM entry; works for both v2 and v3.
+  // v3 (Phase 2) requires Node 20+, which is satisfied by Electron 32+.
   assert(
     /await import\(['"]node-llama-cpp['"]\)/.test(llamanodeBackend),
     'LlamaNodeBackend must use dynamic import() for node-llama-cpp (ESM with TLA)',
