@@ -235,6 +235,10 @@ export const api = {
     safeCall('prewarmSpecDecodeVerifier', [payload], { warmed: false, skipped: 'unavailable' }),
   isSpecDecodeDisabled: (payload = {}) =>
     safeCall('isSpecDecodeDisabled', [payload], { available: false, disabled: false }),
+  isMosaicDevEnabled: () =>
+    safeCall('isMosaicDevEnabled', [], { enabled: false }),
+  readMosaicArtifacts: () =>
+    safeCall('readMosaicArtifacts', [], { success: false, profiles: {}, decision: null }),
 
   // Power Mode
   getPowerModeStatus: () => safeCall('getPowerModeStatus', [], { enabled: false }),

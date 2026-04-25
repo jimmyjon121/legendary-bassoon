@@ -1,0 +1,67 @@
+﻿{
+  "schemaVersion": 1,
+  "model": "qwen2.5-coder:14b",
+  "modelSpec": {
+    "id": "qwen2.5-coder:14b",
+    "totalLayers": 48,
+    "footprintBytes": 9663676416,
+    "bytesPerLayer": 201326592,
+    "kvBytesPerToken": 524288,
+    "nCtx": 4096
+  },
+  "assignment": {
+    "rtx": 42,
+    "cpu": 6,
+    "arc": 0
+  },
+  "predictedTps": 7.473298721061694,
+  "predictedFirstTokenMs": 6359.250000000005,
+  "capacityMultiplier": 1.1428571428571428,
+  "speedFraction": 0.9963093581347207,
+  "baseline": {
+    "rtxOnlyLayers": 42,
+    "rtxOnlyFootprintBytes": 8455716864,
+    "rtxOnlyTokensPerSecond": 7.500982159851556,
+    "thresholds": {
+      "capacityMultiplier": 1.3,
+      "minBaselineFraction": 0.5
+    }
+  },
+  "profilesUsed": {
+    "rtx": {
+      "source": "live",
+      "throughputTokensPerSecond": 7.500982159851556,
+      "memoryBytes": 8546942976,
+      "error": null
+    },
+    "arc": {
+      "source": "fallback",
+      "throughputTokensPerSecond": 6,
+      "memoryBytes": 10737418240,
+      "error": null
+    },
+    "cpu": {
+      "source": "live",
+      "throughputTokensPerSecond": 7.285092060797735,
+      "memoryBytes": 33917235200,
+      "error": null
+    },
+    "npu": {
+      "source": "live",
+      "throughputTokensPerSecond": 0.01,
+      "memoryBytes": 1610612736,
+      "error": null
+    },
+    "rebar": {
+      "source": "live",
+      "throughputTokensPerSecond": 0.01,
+      "memoryBytes": 8546942976,
+      "error": null
+    }
+  },
+  "decision": "fail",
+  "reasons": [
+    "capacityMultiplier 1.143 < 1.3"
+  ],
+  "generatedAt": "2026-04-25T17:39:09.200Z"
+}

@@ -1,0 +1,65 @@
+﻿{
+  "schemaVersion": 1,
+  "model": "qwen3-30b-abliterated:q4_k_m",
+  "modelSpec": {
+    "id": "qwen3-30b-abliterated:q4_k_m",
+    "totalLayers": 64,
+    "footprintBytes": 19327352832,
+    "bytesPerLayer": 301989888,
+    "kvBytesPerToken": 786432,
+    "nCtx": 4096
+  },
+  "assignment": {
+    "rtx": 28,
+    "cpu": 36,
+    "arc": 0
+  },
+  "predictedTps": 23.947926431371314,
+  "predictedFirstTokenMs": 8225.875,
+  "capacityMultiplier": 2.2857142857142856,
+  "speedFraction": 0.9829124061185159,
+  "baseline": {
+    "rtxOnlyLayers": 28,
+    "rtxOnlyFootprintBytes": 8455716864,
+    "rtxOnlyTokensPerSecond": 24.364252889981085,
+    "thresholds": {
+      "capacityMultiplier": 1.3,
+      "minBaselineFraction": 0.5
+    }
+  },
+  "profilesUsed": {
+    "rtx": {
+      "source": "live",
+      "throughputTokensPerSecond": 24.364252889981085,
+      "memoryBytes": 8546942976,
+      "error": null
+    },
+    "arc": {
+      "source": "fallback",
+      "throughputTokensPerSecond": 6,
+      "memoryBytes": 10737418240,
+      "error": null
+    },
+    "cpu": {
+      "source": "live",
+      "throughputTokensPerSecond": 23.63382461161502,
+      "memoryBytes": 33917235200,
+      "error": null
+    },
+    "npu": {
+      "source": "live",
+      "throughputTokensPerSecond": 0.01,
+      "memoryBytes": 1610612736,
+      "error": null
+    },
+    "rebar": {
+      "source": "live",
+      "throughputTokensPerSecond": 0.01,
+      "memoryBytes": 8546942976,
+      "error": null
+    }
+  },
+  "decision": "pass",
+  "reasons": [],
+  "generatedAt": "2026-04-25T17:37:02.619Z"
+}

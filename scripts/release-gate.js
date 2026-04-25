@@ -28,6 +28,7 @@ const checks = [
   { id: 'autonomy-routing', command: 'node scripts/autonomy-routing-smoke.js' },
   { id: 'autonomy-build-options', command: 'node scripts/autonomy-build-options-smoke.js' },
   { id: 'autonomy-orchestrator-route', command: 'node scripts/autonomy-orchestrator-route-smoke.js' },
+  { id: 'mosaic-gate1', command: 'node scripts/mosaic-gate1-smoke.js' },
 ];
 
 function runCheck(check) {

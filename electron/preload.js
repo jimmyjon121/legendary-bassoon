@@ -398,6 +398,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getSpecDecodeStats: (payload) => ipcRenderer.invoke('orchestrator:getSpecDecodeStats', payload || {}),
   isSpecDecodeDisabled: (payload) => ipcRenderer.invoke('orchestrator:isSpecDecodeDisabled', payload || {}),
   prewarmSpecDecodeVerifier: (payload) => ipcRenderer.invoke('orchestrator:prewarmSpecDecodeVerifier', payload || {}),
+  isMosaicDevEnabled: () => ipcRenderer.invoke('dev:isMosaicEnabled'),
+  readMosaicArtifacts: () => ipcRenderer.invoke('dev:readMosaicArtifacts'),
 
   // ============================================
   // Model Manager

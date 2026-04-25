@@ -5643,6 +5643,37 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     }
   });
 
+  ipcMain.handle('dev:isMosaicEnabled', () => ({
+    enabled: process.env.DEVFORGE_MOSAIC_DEV === '1',
+  }));
+
+  ipcMain.handle('dev:readMosaicArtifacts', async () => {
+    if (process.env.DEVFORGE_MOSAIC_DEV !== '1') {
+      return { success: false, error: 'Mosaic dev mode is disabled' };
+    }
+    const artifactDir = path.join(appPath, 'docs', 'perf', 'mosaic');
+    const readJson = async (file) => {
+      try {
+        const text = await fsPromises.readFile(path.join(artifactDir, file), 'utf8');
+        return JSON.parse(text);
+      } catch {
+        return null;
+      }
+    };
+    const profileFiles = ['rtx', 'arc', 'npu', 'cpu', 'rebar'];
+    const profiles = {};
+    for (const id of profileFiles) {
+      profiles[id] = await readJson(`profile-${id}.json`);
+    }
+    return {
+      success: true,
+      profiles,
+      decision: await readJson('decision.json'),
+      sim14b: await readJson('sim-14b.json'),
+      sim30b: await readJson('sim-30b.json'),
+    };
+  });
+
   ipcMain.handle('llm:setProfile', (_, profile) => {
     if (!orchestrator) {
       return { success: false, error: 'Orchestrator not available' };

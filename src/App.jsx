@@ -61,6 +61,7 @@ import { StartupScreen } from './components/Startup/StartupScreen';
 const ChatV2Harness = lazy(() => import('./chat-v2/ui/ChatV2Harness').then(m => ({ default: m.ChatV2Harness })));
 const CodeWorkbench = lazy(() => import('./components/Code/CodeWorkbench').then(m => ({ default: m.CodeWorkbench })));
 const ResearchWorkspace = lazy(() => import('./components/Research/ResearchWorkspace').then(m => ({ default: m.ResearchWorkspace })));
+const MosaicLab = lazy(() => import('./components/Dev/MosaicLab').then(m => ({ default: m.MosaicLab || m.default })));
 
 // Minimal loading fallback - PURE BLACK to prevent any flash
 // Uses inline styles because CSS may not be loaded yet
@@ -122,6 +123,11 @@ function App() {
   const [showOnboarding, setShowOnboarding] = useState(false);
   const [isCheckingOnboarding, setIsCheckingOnboarding] = useState(true);
   const [showStartupScreen, setShowStartupScreen] = useState(() => shouldShowStartupScreenOnBoot());
+  const [mosaicDevEnabled, setMosaicDevEnabled] = useState(() => {
+    if (typeof import.meta !== 'undefined' && import.meta.env?.VITE_MOSAIC_DEV === '1') return true;
+    if (typeof window !== 'undefined' && window.__DEVFORGE_MOSAIC_DEV__ === true) return true;
+    return false;
+  });
   
   
   // Animation store initialization
@@ -207,6 +213,17 @@ function App() {
     };
     
     checkOnboarding();
+
+    if (isElectron() && window.electronAPI?.isMosaicDevEnabled) {
+      window.electronAPI.isMosaicDevEnabled()
+        .then((res) => {
+          if (res?.enabled) {
+            window.__DEVFORGE_MOSAIC_DEV__ = true;
+            setMosaicDevEnabled(true);
+          }
+        })
+        .catch(() => {});
+    }
 
     // Listen for panic mode (only in Electron)
     let cleanup = null;
@@ -407,6 +424,11 @@ function App() {
         
         <ToastContainer />
         <KeyboardShortcutsModal isOpen={showKeyboardShortcuts} onClose={closeKeyboardShortcuts} />
+        {mosaicDevEnabled && (
+          <Suspense fallback={null}>
+            <MosaicLab />
+          </Suspense>
+        )}
       </Layout>
       </div>
     </ErrorBoundary>

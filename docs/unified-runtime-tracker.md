@@ -18,8 +18,8 @@ Make DevForge feel like LM Studio for model picking and long context, *and* make
 - **Phase:** Phase 2 (NPU-Drafted Speculative Decoding) — **infrastructure shipped; perf gate open**
 - **Week:** 1
 - **Blocked on:** live direct-vs-spec measurement and the NPU KV-cache reuse latency target; spec-decode is hard-disabled by default and requires `DEVFORGE_SPEC_DECODE_ENABLE=1` for experimental runs.
-- **Next concrete action:** Phase 3 Mosaic Gate 1 (v0.4.6) using the existing plan at `.cursor/plans/mosaic_gate_1_fe34323c.plan.md`; v0.4.5 hardening verified the NPU draft-session delta path and blocked CPU-only verifier prewarm.
-- **Gate status:** 24/24 release-gate checks pass for static/smoke contracts (adds `cuda-verifier-guard-smoke.js`, `autonomy-build-options-smoke.js`, and `autonomy-orchestrator-route-smoke.js`); the Phase 2 perf gate (>=1.6x tokens/sec at >=60% draft acceptance) is not yet proven on target hardware.
+- **Next concrete action:** Mosaic is cancelled after Gate 1 failed; keep the classic v0.4 runtime line stable and only revisit Phase 2 perf if a future draft/verifier pairing can beat the measured baseline.
+- **Gate status:** 25/25 release-gate checks pass for static/smoke contracts (adds `mosaic-gate1-smoke.js`); Phase 3 Gate 1 failed honestly and the Phase 2 perf gate (>=1.6x tokens/sec at >=60% draft acceptance) remains unproven.
 
 ---
 
@@ -94,13 +94,15 @@ Status legend: `planned` / `in-progress` / `shipped` / `deferred` / `cancelled`
 Earlier Phase 2 notes assumed node-llama-cpp 3.18.1 fell back to CPU because the CUDA binding probe tried to build from source and VS2022 BuildTools lacked the "Desktop development with C++" workload. The hardening follow-up disproved that assumption on the current target machine: `node scripts/cuda-probe.mjs`, `node scripts/cuda-probe-via-backend.mjs`, and `node scripts/cuda-verifier-live-probe.js` all resolve `gpu: "cuda"` / `gpuMode: "cuda"`, expose RTX VRAM, and `prewarmSpecDecodeVerifier()` returns `warmed: true` for `qwen2.5:1.5b` at context 1024. Artifact: [`docs/perf/cuda-verifier-live.md`](perf/cuda-verifier-live.md). The VS workload (`Microsoft.VisualStudio.Workload.NativeDesktop`) is still not installed, so keep the v0.4.5 guard: if a future machine resolves `cpu` or `unavailable`, `prewarmSpecDecodeVerifier self-disables` instead of loading a slow CPU-only verifier. Only install the workload if that fallback reappears.
 
 ### Phase 3 — Mosaic Runtime (R&D)
-- **Status:** planned (gated)
+- **Status:** **cancelled** (2026-04-25, Gate 1 failed)
 - **Target window:** Weeks 9-20
 - **Gate 1 (Week 10-11):** profiling simulator must project ≥1.3× effective model-size capacity. If fail → Phase 3 cancelled, v0.4 is final.
 - **Gate 2 (Week 18-19):** end-to-end must beat RTX partial-offload by ≥1.5× on 32B Q4. If fail → Mosaic stays dev-only.
 - **Key new files:** `docs/mosaic-architecture.md`, `src/components/Dev/MosaicLab.jsx`, native coordinator addon
 - **Ships as:** v0.5 if both gates pass
-- **Actual start:** —
+- **Actual start:** 2026-04-25
+- **Actual end:** 2026-04-25
+- **Gate 1 result:** **FAIL** — mandatory 14B target projected `1.143x` capacity vs the `1.3x` threshold at `99.6%` RTX-only baseline speed. Best-effort 30B projected `2.286x`, but the plan made 14B mandatory, so the cancellation rule applies. Canonical artifact: `docs/perf/mosaic-gate1.md`.
 
 ---
 
@@ -142,6 +144,12 @@ Earlier Phase 2 notes assumed node-llama-cpp 3.18.1 fell back to CPU because the
 - **Artifact.** `docs/perf/cuda-verifier-live.md`.
 - **Policy.** Keep the v0.4.5 guard in place for other machines. On this target, no VS workload install is needed right now; if a future probe returns CPU-only, install `Microsoft.VisualStudio.Workload.NativeDesktop` then re-run the probe.
 
+### 2026-04-25 — v0.4.6 Mosaic Gate 1 FAILED; Phase 3 cancelled
+- **Gate basis.** Mandatory `qwen2.5-coder:14b` simulation from live profiles projected `capacityMultiplier=1.143x`, below the required `1.3x`, while retaining `speedFraction=0.996` of RTX-only baseline. The best-effort `qwen3-30b-abliterated:q4_k_m` projection showed `2.286x`, but the v0.4.6 plan made 14B mandatory; therefore Gate 1 fails.
+- **Artifacts.** `docs/perf/mosaic-gate1.md`, `docs/perf/mosaic/decision.json`, `docs/perf/mosaic/sim-14b.json`, `docs/perf/mosaic/sim-30b.json`, and per-device profile JSONs under `docs/perf/mosaic/`.
+- **Shipped scaffolding retained.** `docs/mosaic-architecture.md`, the pure-JS simulator/decision scripts, safety-guarded profilers, and hidden `MosaicLab` dev panel remain useful research/debug assets, but Mosaic runtime build work is cancelled unless a future hardware/runtime change warrants a new gate.
+- **Release gate.** `mosaic-gate1-smoke.js` is the 25th release-gate check; total **25/25**.
+
 ---
 
 ## Decision Log
@@ -177,6 +185,12 @@ Chronological record of choices that shaped the plan. Each entry: what, why, alt
 - **Choice:** Mosaic runtime only exists behind `DEVFORGE_MOSAIC_DEV=1` environment variable and a dev-only panel during Phase 3 R&D. Promoted to user-visible only after Gate 2 passes.
 - **Why:** User picked "Hidden entirely. Ship only after Gate 2 passes." Keeps experimental code out of the stable UI surface; protects users from performance cliffs mid-development.
 - **Revisit when:** Gate 2 passes → promote to user-visible with warning banner.
+
+### 2026-04-25 — Mosaic Gate 1 measurement-driven; coordinator language deferred
+- **Choice:** Gate 1 is a measurement and simulation gate only. It ships profilers, a pure-JS simulator, a hidden MosaicLab panel, and a PASS/FAIL decision artifact; it does not choose or build the native coordinator.
+- **Why:** v0.4.5 hardened the foundation enough to measure honestly, but native coordination is still expensive R&D. Gate 1 must prove at least 1.3x effective model-size capacity at >=50% RTX-only baseline throughput before any native runtime work starts.
+- **Alternatives considered:** Start a Node N-API coordinator immediately; start a Rust `napi-rs` coordinator immediately; skip the hidden panel. All are premature before measured PASS.
+- **Revisit when:** `docs/perf/mosaic-gate1.md` records PASS — then choose Node N-API vs Rust `napi-rs` in the Phase 3 build plan.
 
 ### 2026-04-23 — Preserve workstation-citizen mode in efficiency/laptop profiles
 - **Choice:** The existing conservative clamps (context floors, `keep_alive: 8m`, single loaded model) are preserved as explicit presets inside the `efficiency` and `laptop` performance profiles, not removed entirely.
