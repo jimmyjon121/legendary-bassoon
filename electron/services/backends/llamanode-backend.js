@@ -51,6 +51,26 @@ function normalizePathKey(modelPath) {
   }
 }
 
+function normalizeLlamaGpuMode(gpu, useGpu = true) {
+  if (!useGpu) return 'cpu';
+  if (gpu === false || gpu == null) return 'cpu';
+  const text = typeof gpu === 'string'
+    ? gpu
+    : [
+      gpu?.type,
+      gpu?.name,
+      gpu?.id,
+      gpu?.device,
+      gpu?.backend,
+    ].filter(Boolean).join(' ');
+  const value = String(text || '').toLowerCase();
+  if (!value || value === 'false' || value === 'cpu') return 'cpu';
+  if (value.includes('cuda')) return 'cuda';
+  if (value.includes('vulkan')) return 'vulkan';
+  if (value.includes('metal')) return 'metal';
+  return value || 'unavailable';
+}
+
 // node-llama-cpp v3 ships as ESM. Electron 32 (Node 20.18) supports
 // require() of ESM with --experimental-require-module, but dynamic
 // import() works on both v2 and v3 unconditionally so we keep it as
@@ -136,6 +156,7 @@ class LlamaNodeBackend extends BaseBackend {
     this._modulePromise = null;
     this._llamaPromise = null;
     this._activeRequests = new Map();
+    this._activeGpuMode = 'unavailable';
 
     this.gpuLayers = typeof config.gpuLayers === 'number' ? config.gpuLayers : -1;
   }
@@ -161,13 +182,30 @@ class LlamaNodeBackend extends BaseBackend {
           throw new Error('node-llama-cpp v3 API not found - getLlama() missing. Installed version may be 2.x.');
         }
         const gpuPreference = this.useGpu ? 'auto' : false;
-        return mod.getLlama({ gpu: gpuPreference });
+        const llama = await mod.getLlama({ gpu: gpuPreference });
+        this._activeGpuMode = normalizeLlamaGpuMode(llama?.gpu, this.useGpu);
+        return llama;
       })().catch((err) => {
         this._llamaPromise = null;
+        this._activeGpuMode = 'unavailable';
         throw err;
       });
     }
     return this._llamaPromise;
+  }
+
+  async getActiveGpuMode() {
+    if (this._activeGpuMode && this._activeGpuMode !== 'unavailable') {
+      return this._activeGpuMode;
+    }
+    try {
+      const llama = await this._getLlama();
+      this._activeGpuMode = normalizeLlamaGpuMode(llama?.gpu, this.useGpu);
+      return this._activeGpuMode;
+    } catch {
+      this._activeGpuMode = 'unavailable';
+      return 'unavailable';
+    }
   }
 
   async checkHealth() {
@@ -185,6 +223,7 @@ class LlamaNodeBackend extends BaseBackend {
     try {
       const llama = await this._getLlama();
       gpu = llama?.gpu ?? null;
+      this._activeGpuMode = normalizeLlamaGpuMode(gpu, this.useGpu);
     } catch (err) {
       return {
         available: false,
@@ -198,6 +237,7 @@ class LlamaNodeBackend extends BaseBackend {
       model: this._current?.modelPath || null,
       device: this.device,
       gpu,
+      gpuMode: this._activeGpuMode,
     };
   }
 

@@ -119,6 +119,81 @@ function applyAdaptive(options, adaptive) {
   return next;
 }
 
+function applyPresetOverrides(options, activePreset) {
+  if (!activePreset) return options;
+  let next = { ...options };
+  if (Number.isFinite(Number(activePreset.temperature))) next.temperature = Number(activePreset.temperature);
+  if (Number.isFinite(Number(activePreset.top_p))) next.top_p = Number(activePreset.top_p);
+  if (Number.isFinite(Number(activePreset.top_k))) next.top_k = Number(activePreset.top_k);
+  if (Number.isFinite(Number(activePreset.context_length)) && activePreset.context_length > 0) {
+    next.num_ctx = Number(activePreset.context_length);
+  }
+  next = mergePresetSystemPrompt(next, activePreset);
+  const presetDevicePin = String(activePreset?.device_pin ?? '').trim();
+  if (presetDevicePin) {
+    next.forceBackend = presetDevicePin;
+  }
+  return next;
+}
+
+function applyUserContextOverride(options, sessionState = {}) {
+  const next = { ...options };
+  const userCtxPick = sessionState.contextLengthTokens;
+  const hasUserContextOverride = Number.isFinite(Number(userCtxPick)) && Number(userCtxPick) > 0;
+  if (hasUserContextOverride) {
+    next.num_ctx = Math.floor(Number(userCtxPick));
+  }
+  return { options: next, hasUserContextOverride };
+}
+
+function applySessionBackendOverride(options, sessionState = {}) {
+  const sessionBackendOverride = String(sessionState.backendOverride || '').trim();
+  if (sessionBackendOverride) {
+    options.forceBackend = sessionBackendOverride;
+  }
+  return { ...options };
+}
+
+function applyFastChatClamp(options, {
+  workspaceType,
+  hasExplicitPreset,
+  hasUserContextOverride,
+  fastChatEnabled,
+} = {}) {
+  const next = { ...options };
+  if (fastChatEnabled && workspaceType === 'casual' && !hasExplicitPreset && !hasUserContextOverride) {
+    if (Number.isFinite(Number(next.num_ctx))) {
+      next.num_ctx = Math.min(Number(next.num_ctx), 4096);
+    }
+    if (Number.isFinite(Number(next.num_predict))) {
+      next.num_predict = Math.min(Number(next.num_predict), 768);
+    }
+    if (Number.isFinite(Number(next.num_batch))) {
+      next.num_batch = Math.min(Number(next.num_batch), 96);
+    }
+  }
+  return next;
+}
+
+async function applyVaultOverrides(options, workspaceId) {
+  if (String(workspaceId).toLowerCase() !== 'nsfw') return options;
+  try {
+    const profile = await loadVaultProfile();
+    return mergeVaultOverrides(options, profile);
+  } catch (_) {
+    return options;
+  }
+}
+
+function restoreNonClampedOptions(clamped, options) {
+  const systemPrompt = String(options?.systemPrompt ?? '').trim();
+  const forceBackend = String(options?.forceBackend ?? '').trim();
+  let result = clamped;
+  if (systemPrompt) result = { ...result, systemPrompt };
+  if (forceBackend) result = { ...result, forceBackend };
+  return result;
+}
+
 export async function buildChatV2InferenceOptions({ model, workspace } = {}) {
   const appState = useAppStore.getState();
   const modelName = String(model || appState.currentModel || '').trim();
@@ -154,70 +229,38 @@ export async function buildChatV2InferenceOptions({ model, workspace } = {}) {
     const activePreset = Array.isArray(presets) ? (presets.find((p) => p?.is_default) || presets[0]) : null;
     if (activePreset) {
       hasExplicitPreset = true;
-      if (Number.isFinite(Number(activePreset.temperature))) options.temperature = Number(activePreset.temperature);
-      if (Number.isFinite(Number(activePreset.top_p))) options.top_p = Number(activePreset.top_p);
-      if (Number.isFinite(Number(activePreset.top_k))) options.top_k = Number(activePreset.top_k);
-      if (Number.isFinite(Number(activePreset.context_length)) && activePreset.context_length > 0) {
-        options.num_ctx = Number(activePreset.context_length);
-      }
-      options = mergePresetSystemPrompt(options, activePreset);
-      const presetDevicePin = String(activePreset?.device_pin ?? '').trim();
-      if (presetDevicePin) {
-        options.forceBackend = presetDevicePin;
-      }
+      options = applyPresetOverrides(options, activePreset);
     }
   } catch (_) {
     // Non-blocking.
   }
 
   const sessionState = useChatV2SessionStore.getState();
-  const userCtxPick = sessionState.contextLengthTokens;
-  const hasUserContextOverride = Number.isFinite(Number(userCtxPick)) && Number(userCtxPick) > 0;
-  if (hasUserContextOverride) {
-    options.num_ctx = Math.floor(Number(userCtxPick));
-  }
-
-  const sessionBackendOverride = String(sessionState.backendOverride || '').trim();
-  if (sessionBackendOverride) {
-    options.forceBackend = sessionBackendOverride;
-  }
+  const userContextResult = applyUserContextOverride(options, sessionState);
+  options = applySessionBackendOverride(userContextResult.options, sessionState);
+  const hasUserContextOverride = userContextResult.hasUserContextOverride;
 
   // Fast chat mode (opt-in) caps casual workspace to snappy defaults for
   // lowest first-token latency. Off by default so long context works out of
   // the box; users who want LM-Studio-style snappy casual chat toggle it on
   // in Settings. Explicit user presets always win regardless of this flag.
   const fastChatEnabled = Boolean(appState.fastChatMode);
-  if (fastChatEnabled && workspaceType === 'casual' && !hasExplicitPreset && !hasUserContextOverride) {
-    if (Number.isFinite(Number(options.num_ctx))) {
-      options.num_ctx = Math.min(Number(options.num_ctx), 4096);
-    }
-    if (Number.isFinite(Number(options.num_predict))) {
-      options.num_predict = Math.min(Number(options.num_predict), 768);
-    }
-    if (Number.isFinite(Number(options.num_batch))) {
-      options.num_batch = Math.min(Number(options.num_batch), 96);
-    }
-  }
+  options = applyFastChatClamp(options, {
+    workspaceType,
+    hasExplicitPreset,
+    hasUserContextOverride,
+    fastChatEnabled,
+  });
 
   // Vault workspace: apply Abyssal Devourer profile overrides on top of
   // optimizer/preset choices. The profile is persisted in scripts/openvino-model.json
   // and edited via the Vault Safety settings.
-  if (String(workspaceId).toLowerCase() === 'nsfw') {
-    try {
-      const profile = await loadVaultProfile();
-      options = mergeVaultOverrides(options, profile);
-    } catch (_) { /* non-blocking */ }
-  }
+  options = await applyVaultOverrides(options, workspaceId);
 
-  const systemPrompt = String(options?.systemPrompt ?? '').trim();
-  const forceBackend = String(options?.forceBackend ?? '').trim();
   const clamped = clampInferenceOptionsToModel(options, {
     modelInfo: appState.currentModelInfo || null,
     autoTuneResult: appState.autoTuneResult || null,
     fallback: 8192,
   }).options;
-  let result = clamped;
-  if (systemPrompt) result = { ...result, systemPrompt };
-  if (forceBackend) result = { ...result, forceBackend };
-  return result;
+  return restoreNonClampedOptions(clamped, options);
 }

@@ -24,7 +24,10 @@ const checks = [
   { id: 'spec-decoding', command: 'node scripts/speculative-decoding-eval.js' },
   { id: 'preset-system-prompt', command: 'node scripts/preset-system-prompt-smoke.js' },
   { id: 'spec-decode-residency', command: 'node scripts/spec-decode-residency-smoke.js' },
+  { id: 'cuda-verifier-guard', command: 'node scripts/cuda-verifier-guard-smoke.js' },
   { id: 'autonomy-routing', command: 'node scripts/autonomy-routing-smoke.js' },
+  { id: 'autonomy-build-options', command: 'node scripts/autonomy-build-options-smoke.js' },
+  { id: 'autonomy-orchestrator-route', command: 'node scripts/autonomy-orchestrator-route-smoke.js' },
 ];
 
 function runCheck(check) {

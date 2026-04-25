@@ -151,3 +151,7 @@ hanging.
   `avgRealSpeedup >= 1.0` on at least one prompt — at which point the
   ramp 1 / 3 / 10 in the recovery plan resumes and the orchestrator's
   selection-site flip flips back to default-on.
+
+## 2026-04-25 — v0.4.5 hardening live verification
+
+Live verification reached /draft/session and two /extend calls. chat_mode_active=true, second generate_mode=delta. See [phase2-unblock-live.md](phase2-unblock-live.md).

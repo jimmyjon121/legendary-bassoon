@@ -1176,6 +1176,15 @@ class InferenceOrchestrator {
     if (!backend || typeof backend.loadModel !== 'function') {
       return { warmed: false, skipped: 'llamanode_unavailable' };
     }
+    const gpuMode = typeof backend.getActiveGpuMode === 'function'
+      ? await backend.getActiveGpuMode()
+      : 'unavailable';
+    if (gpuMode === 'cpu' || gpuMode === 'unavailable') {
+      return { warmed: false, skipped: 'verifier_cpu_only', gpuMode };
+    }
+    if (gpuMode !== 'cuda') {
+      return { warmed: false, skipped: 'verifier_not_cuda', gpuMode };
+    }
 
     const contextSize = Number.isFinite(Number(options.contextSize)) && Number(options.contextSize) > 0
       ? Number(options.contextSize)
@@ -1347,6 +1356,12 @@ class InferenceOrchestrator {
         reason: 'force_backend_unavailable',
         healthStatus: health?.status || 'unavailable',
         error: health?.error || null,
+      });
+    } else if (payload.forceBackend) {
+      rejectedCandidates.push({
+        backendId: payload.forceBackend,
+        reason: 'force_backend_unavailable',
+        healthStatus: 'missing',
       });
     }
 
