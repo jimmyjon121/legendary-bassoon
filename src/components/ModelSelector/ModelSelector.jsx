@@ -56,10 +56,44 @@ function getAgenticModelScore(modelName = '') {
   return score;
 }
 
+function quantBucketFromParsed(parsed) {
+  const q = parsed?.quantization;
+  if (!q) return null;
+  const u = String(q).toUpperCase();
+  if (u.startsWith('Q4')) return 'Q4';
+  if (u.startsWith('Q5')) return 'Q5';
+  if (u.startsWith('Q6')) return 'Q6';
+  if (u.startsWith('Q8')) return 'Q8';
+  if (u.startsWith('F16') || u.startsWith('FP16')) return 'F16';
+  return null;
+}
+
+function VramFitDot({ sizeBytes, vramTotalMB }) {
+  const vramGb = vramTotalMB > 0 ? vramTotalMB / 1024 : 0;
+  const sizeGb = Number(sizeBytes) > 0 ? Number(sizeBytes) / (1024 ** 3) : 0;
+  if (!vramGb || !sizeGb) return null;
+  const est = sizeGb * 1.2;
+  let cls = 'bg-emerald-400';
+  let title = 'Estimated VRAM fit: comfortable (model×1.2 ≤ VRAM)';
+  if (est > vramGb && sizeGb <= vramGb) {
+    cls = 'bg-amber-400';
+    title = 'Estimated VRAM fit: tight (raw size ≤ VRAM, headroom may be low)';
+  } else if (sizeGb > vramGb) {
+    cls = 'bg-red-500';
+    title = 'Estimated VRAM fit: likely over capacity';
+  }
+  return (
+    <span
+      title={title}
+      className={`inline-block h-2 w-2 shrink-0 rounded-full ${cls}`}
+      aria-hidden
+    />
+  );
+}
+
 export function ModelSelector({ onClose }) {
   const currentModel = useAppStore((s) => s.currentModel);
   const availableModels = useAppStore((s) => s.availableModels);
-  const modelStatus = useAppStore((s) => s.modelStatus);
   const error = useAppStore((s) => s.error);
   const llmHealth = useAppStore((s) => s.llmHealth);
   const currentModelInfo = useAppStore((s) => s.currentModelInfo);
@@ -72,6 +106,8 @@ export function ModelSelector({ onClose }) {
   const isNsfwWorkspace = currentWorkspace === 'nsfw';
 
   const [searchQuery, setSearchQuery] = React.useState('');
+  const [quantFilter, setQuantFilter] = React.useState('all');
+  const [sortKey, setSortKey] = React.useState('recent');
   const [isRefreshing, setIsRefreshing] = React.useState(false);
   const [localError, setLocalError] = React.useState(null);
   const [modelTab, setModelTab] = React.useState(isResearchWorkspace ? 'agentic' : 'all');
@@ -213,6 +249,42 @@ export function ModelSelector({ onClose }) {
   const modelCatalog = useAppStore((s) => s.modelCatalog);
   const storeNpuStatus = useAppStore((s) => s.npuStatus);
 
+  const catalogLastUsedAt = React.useCallback((modelName) => {
+    const want = String(modelName || '');
+    if (!want) return 0;
+    for (const entry of modelCatalog.values()) {
+      if (String(entry?.name || '') === want) {
+        const ts = entry?.meta?.lastUsedAt;
+        return Number.isFinite(Number(ts)) ? Number(ts) : 0;
+      }
+    }
+    return 0;
+  }, [modelCatalog]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const raw = await window.electronAPI?.getSettings?.('modelSelectorPrefs');
+        const prefs = raw && typeof raw === 'object' ? raw : {};
+        if (cancelled) return;
+        if (prefs.sort === 'size' || prefs.sort === 'name' || prefs.sort === 'recent') {
+          setSortKey(prefs.sort);
+        }
+      } catch (_) { /* noop */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const persistModelSelectorSort = React.useCallback(async (next) => {
+    setSortKey(next);
+    try {
+      const raw = await window.electronAPI?.getSettings?.('modelSelectorPrefs');
+      const prev = raw && typeof raw === 'object' ? raw : {};
+      await window.electronAPI?.setSettings?.('modelSelectorPrefs', { ...prev, sort: next });
+    } catch (_) { /* noop */ }
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     // Hydrate once on mount. Catalog slice dedupes concurrent callers and
@@ -320,25 +392,50 @@ export function ModelSelector({ onClose }) {
     const query = searchQuery.toLowerCase();
     let list = availableModels
       .filter((model) => model.name?.toLowerCase().includes(query))
-      .map((model) => ({
-        model,
-        score: getAgenticModelScore(model?.name || ''),
-      }));
+      .map((model) => {
+        const parsed = parseModelName(model?.name || '');
+        return {
+          model,
+          score: getAgenticModelScore(model?.name || ''),
+          quantBucket: quantBucketFromParsed(parsed),
+        };
+      });
+
+    if (quantFilter !== 'all') {
+      list = list.filter((entry) => entry.quantBucket === quantFilter);
+    }
 
     if (modelTab === 'agentic') {
       list = list.filter((entry) => entry.score >= 3);
     }
 
-    if (modelTab === 'agentic' || isResearchWorkspace) {
+    const scorePrimary = modelTab === 'agentic' || isResearchWorkspace;
+    if (scorePrimary) {
       list.sort((a, b) => {
         const scoreDiff = b.score - a.score;
         if (scoreDiff !== 0) return scoreDiff;
+        if (sortKey === 'name') return String(a.model?.name || '').localeCompare(String(b.model?.name || ''));
+        if (sortKey === 'size') return (Number(b.model?.size) || 0) - (Number(b.model?.size) || 0);
+        const tb = catalogLastUsedAt(b.model?.name);
+        const ta = catalogLastUsedAt(a.model?.name);
+        if (tb !== ta) return tb - ta;
+        return String(a.model?.name || '').localeCompare(String(b.model?.name || ''));
+      });
+    } else if (sortKey === 'name') {
+      list.sort((a, b) => String(a.model?.name || '').localeCompare(String(b.model?.name || '')));
+    } else if (sortKey === 'size') {
+      list.sort((a, b) => (Number(b.model?.size) || 0) - (Number(a.model?.size) || 0));
+    } else {
+      list.sort((a, b) => {
+        const tb = catalogLastUsedAt(b.model?.name);
+        const ta = catalogLastUsedAt(a.model?.name);
+        if (tb !== ta) return tb - ta;
         return String(a.model?.name || '').localeCompare(String(b.model?.name || ''));
       });
     }
 
     return list;
-  }, [availableModels, isResearchWorkspace, modelTab, searchQuery]);
+  }, [availableModels, catalogLastUsedAt, isResearchWorkspace, modelTab, quantFilter, searchQuery, sortKey]);
 
   // Resolve speculative-decoding pair info for whatever's currently
   // visible. We only ask the orchestrator about ids we haven't already
@@ -460,6 +557,29 @@ export function ModelSelector({ onClose }) {
 
         {/* Search */}
         <div className="p-3 border-b border-forge-border">
+          <div className="flex flex-wrap gap-1 mb-2">
+            {[
+              { id: 'all', label: 'All' },
+              { id: 'Q4', label: 'Q4' },
+              { id: 'Q5', label: 'Q5' },
+              { id: 'Q6', label: 'Q6' },
+              { id: 'Q8', label: 'Q8' },
+              { id: 'F16', label: 'F16' },
+            ].map((chip) => (
+              <button
+                key={chip.id}
+                type="button"
+                onClick={() => setQuantFilter(chip.id)}
+                className={`h-7 px-2 rounded-md text-[10px] font-medium transition-colors ${
+                  quantFilter === chip.id
+                    ? 'bg-sky-500/25 text-sky-200 border border-sky-500/35'
+                    : 'text-text-muted hover:text-text-secondary border border-transparent'
+                }`}
+              >
+                {chip.label}
+              </button>
+            ))}
+          </div>
           <div className="relative">
             <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
             <input
@@ -470,6 +590,19 @@ export function ModelSelector({ onClose }) {
               className="input pl-9 py-2 text-sm"
               autoFocus
             />
+          </div>
+          <div className="mt-2 flex items-center gap-2">
+            <label htmlFor="model-selector-sort" className="text-[10px] text-text-muted shrink-0">Sort</label>
+            <select
+              id="model-selector-sort"
+              value={sortKey}
+              onChange={(e) => persistModelSelectorSort(e.target.value)}
+              className="flex-1 min-w-0 input py-1.5 text-xs"
+            >
+              <option value="recent">Recent</option>
+              <option value="size">Size</option>
+              <option value="name">Name</option>
+            </select>
           </div>
           <div className="mt-2 flex items-center gap-1 rounded-lg border border-forge-border bg-forge-bg p-1">
             {[
@@ -610,6 +743,7 @@ export function ModelSelector({ onClose }) {
                               </span>
                             )}
                             <span className="text-xs text-text-muted flex items-center gap-1">
+                              <VramFitDot sizeBytes={model.size} vramTotalMB={vramTotalMB} />
                               <HardDrive size={10} />
                               {formatSize(model.size)}
                             </span>

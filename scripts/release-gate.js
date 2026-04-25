@@ -22,6 +22,7 @@ const checks = [
   { id: 'spec-bus', command: 'node scripts/spec-bus-smoke.js' },
   { id: 'spec-dashboard', command: 'node scripts/spec-dashboard-smoke.js' },
   { id: 'spec-decoding', command: 'node scripts/speculative-decoding-eval.js' },
+  { id: 'preset-system-prompt', command: 'node scripts/preset-system-prompt-smoke.js' },
 ];
 
 function runCheck(check) {

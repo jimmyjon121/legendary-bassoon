@@ -79,8 +79,8 @@ function main() {
     failures
   );
   assert(
-    buildOptions.includes("if (fastChatEnabled && workspaceType === 'casual' && !hasExplicitPreset)"),
-    'buildInferenceOptions must gate casual clamp on fastChatEnabled AND workspaceType AND no explicit preset',
+    buildOptions.includes("if (fastChatEnabled && workspaceType === 'casual' && !hasExplicitPreset && !hasUserContextOverride)"),
+    'buildInferenceOptions must gate casual clamp on fastChatEnabled AND workspaceType AND no explicit preset AND no user context override',
     failures
   );
 

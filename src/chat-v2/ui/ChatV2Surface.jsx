@@ -15,8 +15,13 @@ import {
   Send,
   Sparkles,
   Square,
+  Unplug,
   X,
 } from 'lucide-react';
+import { useAppStore } from '../../stores/appStore';
+import { useChatV2SessionStore } from '../../stores/chatV2SessionStore';
+import { useToastStore } from '../../stores/toastStore';
+import { safeCall } from '../../utils/electronAPI';
 
 const StreamingMarkdown = lazy(() =>
   import('./StreamingMarkdown').then((m) => ({
@@ -26,6 +31,16 @@ const StreamingMarkdown = lazy(() =>
 
 const WEB_SEARCH_PREF_KEY = 'researchWebSearchEnabled';
 const THINK_LONGER_PREF_KEY = 'chatV2ThinkLongerEnabled';
+
+const CTX_LENGTH_CHOICES = [
+  { label: 'Auto', tokens: null },
+  { label: '4K', tokens: 4096 },
+  { label: '8K', tokens: 8192 },
+  { label: '16K', tokens: 16384 },
+  { label: '32K', tokens: 32768 },
+  { label: '64K', tokens: 65536 },
+  { label: '128K', tokens: 131072 },
+];
 
 const WORKSPACE_CHROME = {
   casual: {
@@ -385,6 +400,9 @@ function PromptCard({ title, detail, prompt, color, onClick }) {
 export function ChatV2Surface({ engine, title = 'Chat V2 (Standalone)' }) {
   const [state, setState] = useState(() => engine.getState());
   const [input, setInput] = useState('');
+  const contextLengthTokens = useChatV2SessionStore((s) => s.contextLengthTokens);
+  const setContextLengthTokens = useChatV2SessionStore((s) => s.setContextLengthTokens);
+  const currentModelInfo = useAppStore((s) => s.currentModelInfo);
   const [webSearchEnabled, setWebSearchEnabled] = useState(() => {
     if (typeof window === 'undefined') return false;
     return window.localStorage?.getItem(WEB_SEARCH_PREF_KEY) === 'true';
@@ -530,6 +548,12 @@ export function ChatV2Surface({ engine, title = 'Chat V2 (Standalone)' }) {
   }, [runtimeState?.offloadEvidence, modelToken]);
   const inferenceOptions = state.effectiveInferenceOptions || state.activeInferenceOptions || {};
   const activeCtx = Number(inferenceOptions?.num_ctx || 0);
+  const modelCtxCap = Number(
+    currentModelInfo?.contextLength
+    || currentModelInfo?.effectiveContextLength
+    || currentModelInfo?.rawContextLength
+    || 0,
+  );
   const activeBatch = Number(inferenceOptions?.num_batch || 0);
   const activeGpuLayers = Number.isFinite(Number(inferenceOptions?.num_gpu))
     ? Number(inferenceOptions.num_gpu)
@@ -568,6 +592,32 @@ export function ChatV2Surface({ engine, title = 'Chat V2 (Standalone)' }) {
     activeBatch > 0 ? `batch ${activeBatch}` : null,
     activeGpuLayers != null ? `gpu ${activeGpuLayers}` : null,
   ].filter(Boolean).join(' | ');
+
+  const approxTokensUsed = useMemo(() => {
+    let chars = 0;
+    for (const m of messages) {
+      chars += String(m.content || '').length;
+      const r = m.reasoning;
+      if (r && typeof r === 'object') {
+        chars += String(r.content || r.closedContent || '').length;
+      }
+    }
+    chars += String(state.streamingContent || '').length;
+    return Math.max(0, Math.ceil(chars / 4));
+  }, [messages, state.streamingContent]);
+
+  const ctxBudget = activeCtx > 0 ? activeCtx : (modelCtxCap > 0 ? modelCtxCap : 0);
+  const ctxUsePercent = ctxBudget > 0 ? Math.min(100, Math.round((approxTokensUsed / ctxBudget) * 100)) : 0;
+  const ctxUsedClass =
+    ctxBudget > 0 && ctxUsePercent >= 95
+      ? 'text-red-400'
+      : ctxBudget > 0 && ctxUsePercent >= 80
+        ? 'text-amber-300'
+        : 'text-zinc-500';
+  const ctxUsedLabel =
+    ctxBudget > 0
+      ? `${approxTokensUsed.toLocaleString()} / ${ctxBudget.toLocaleString()} (${ctxUsePercent}%)`
+      : null;
   const streamingReasoning = state.streamingReasoning && typeof state.streamingReasoning === 'object'
     ? state.streamingReasoning
     : null;
@@ -678,6 +728,16 @@ export function ChatV2Surface({ engine, title = 'Chat V2 (Standalone)' }) {
     }
   }, [engine, state.model]);
 
+  const handleEjectModel = useCallback(async () => {
+    if (!state.model) return;
+    await Promise.all([
+      safeCall('unloadModel', [], null),
+      safeCall('unloadNpuModel', [], null),
+    ]);
+    useToastStore.getState().success('Unloaded', 'Unloaded current model');
+    void engine.refreshRuntimeState(true);
+  }, [engine, state.model]);
+
   const controlMetadata = useMemo(() => ({
     ...(canUseWebSearch ? { webSearchEnabled } : {}),
     ...(thinkLongerEnabled ? { thinkLonger: true } : {}),
@@ -705,6 +765,14 @@ export function ChatV2Surface({ engine, title = 'Chat V2 (Standalone)' }) {
             {perfLabel && (
               <span className="hidden sm:inline-flex rounded-full border border-emerald-400/25 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-300">
                 {perfLabel}
+              </span>
+            )}
+            {ctxUsedLabel && (
+              <span
+                className={`hidden md:inline-flex rounded-full border border-white/[0.08] bg-white/[0.03] px-2 py-0.5 text-[10px] font-medium ${ctxUsedClass}`}
+                title="Approximate context use (chars÷4); budget from active ctx or model cap"
+              >
+                ctx {ctxUsedLabel}
               </span>
             )}
             {executionMode && executionMode !== 'native_chat' && (
@@ -812,6 +880,14 @@ export function ChatV2Surface({ engine, title = 'Chat V2 (Standalone)' }) {
                   active={Boolean(state.model) && !isWarmingModel}
                   onClick={handleWarmupModel}
                   disabled={isWarmingModel || !state.model}
+                />
+                <ControlButton
+                  icon={Unplug}
+                  label="Eject"
+                  color="#f87171"
+                  active={Boolean(state.model)}
+                  onClick={handleEjectModel}
+                  disabled={!state.model}
                 />
               </div>
             </div>
@@ -976,6 +1052,33 @@ export function ChatV2Surface({ engine, title = 'Chat V2 (Standalone)' }) {
               <BrainCircuit size={12} />
               {thinkLongerEnabled ? 'Think Longer' : 'Standard'}
             </button>
+
+            <label className="inline-flex h-7 items-center gap-1.5 rounded-lg border border-white/[0.08] bg-white/[0.03] px-2 text-[11px] text-zinc-400">
+              <span className="text-zinc-500 shrink-0">Ctx</span>
+              <select
+                className="max-w-[5.5rem] bg-transparent text-[11px] text-zinc-200 outline-none"
+                value={contextLengthTokens == null ? '' : String(contextLengthTokens)}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  setContextLengthTokens(v === '' ? null : Number(v));
+                }}
+                aria-label="Context length"
+              >
+                {CTX_LENGTH_CHOICES.map((c) => {
+                  const disabled =
+                    c.tokens != null && modelCtxCap > 0 && c.tokens > modelCtxCap;
+                  return (
+                    <option
+                      key={c.label}
+                      value={c.tokens == null ? '' : String(c.tokens)}
+                      disabled={disabled}
+                    >
+                      {c.label}{disabled ? ' (cap)' : ''}
+                    </option>
+                  );
+                })}
+              </select>
+            </label>
 
             <span className="mx-1 h-4 w-px bg-white/[0.06]" />
 

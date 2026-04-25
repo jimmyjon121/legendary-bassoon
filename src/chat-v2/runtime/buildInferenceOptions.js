@@ -1,8 +1,10 @@
 import { buildOptimizedOllamaOptionsWithInfo } from '../../services/modelOptimizer';
 import { useAdaptiveGeneration } from '../../services/adaptiveGeneration';
 import { useAppStore } from '../../stores/appStore';
+import { useChatV2SessionStore } from '../../stores/chatV2SessionStore';
 import { api } from '../../utils/electronAPI';
 import { clampInferenceOptionsToModel } from './inferenceOptionsUtil';
+import { mergePresetSystemPrompt } from './mergePresetSystemPrompt.cjs';
 
 let _vaultProfileCache = { at: 0, value: null };
 async function loadVaultProfile() {
@@ -158,9 +160,16 @@ export async function buildChatV2InferenceOptions({ model, workspace } = {}) {
       if (Number.isFinite(Number(activePreset.context_length)) && activePreset.context_length > 0) {
         options.num_ctx = Number(activePreset.context_length);
       }
+      options = mergePresetSystemPrompt(options, activePreset);
     }
   } catch (_) {
     // Non-blocking.
+  }
+
+  const userCtxPick = useChatV2SessionStore.getState().contextLengthTokens;
+  const hasUserContextOverride = Number.isFinite(Number(userCtxPick)) && Number(userCtxPick) > 0;
+  if (hasUserContextOverride) {
+    options.num_ctx = Math.floor(Number(userCtxPick));
   }
 
   // Fast chat mode (opt-in) caps casual workspace to snappy defaults for
@@ -168,7 +177,7 @@ export async function buildChatV2InferenceOptions({ model, workspace } = {}) {
   // the box; users who want LM-Studio-style snappy casual chat toggle it on
   // in Settings. Explicit user presets always win regardless of this flag.
   const fastChatEnabled = Boolean(appState.fastChatMode);
-  if (fastChatEnabled && workspaceType === 'casual' && !hasExplicitPreset) {
+  if (fastChatEnabled && workspaceType === 'casual' && !hasExplicitPreset && !hasUserContextOverride) {
     if (Number.isFinite(Number(options.num_ctx))) {
       options.num_ctx = Math.min(Number(options.num_ctx), 4096);
     }
@@ -190,9 +199,11 @@ export async function buildChatV2InferenceOptions({ model, workspace } = {}) {
     } catch (_) { /* non-blocking */ }
   }
 
-  return clampInferenceOptionsToModel(options, {
+  const systemPrompt = String(options?.systemPrompt ?? '').trim();
+  const clamped = clampInferenceOptionsToModel(options, {
     modelInfo: appState.currentModelInfo || null,
     autoTuneResult: appState.autoTuneResult || null,
     fallback: 8192,
   }).options;
+  return systemPrompt ? { ...clamped, systemPrompt } : clamped;
 }

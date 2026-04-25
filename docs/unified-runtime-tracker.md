@@ -18,8 +18,8 @@ Make DevForge feel like LM Studio for model picking and long context, *and* make
 - **Phase:** Phase 2 (NPU-Drafted Speculative Decoding) — **infrastructure shipped; perf gate open**
 - **Week:** 1
 - **Blocked on:** live direct-vs-spec measurement and the NPU KV-cache reuse latency target; spec-decode is hard-disabled by default and requires `DEVFORGE_SPEC_DECODE_ENABLE=1` for experimental runs.
-- **Next concrete action:** Measure direct-vs-spec on a small model via live `eval:spec-decoding`, record the decision in `docs/perf/phase2-spec-decode-measurement.md`, then tag v0.4.2.
-- **Gate status:** 18/18 release-gate checks pass for static/smoke contracts; the Phase 2 perf gate (>=1.6x tokens/sec at >=60% draft acceptance) is not yet proven on target hardware.
+- **Next concrete action:** Ship LM Studio parity polish as **v0.4.3** (chat context picker, ctx used %, eject, model picker quant/sort/VRAM dot, per-model system prompt fix); keep Phase 2 live spec-decode measurement on the backlog below until hardware/eval signals are ready.
+- **Gate status:** 19/19 release-gate checks pass for static/smoke contracts (includes `preset-system-prompt-smoke.js`); the Phase 2 perf gate (>=1.6x tokens/sec at >=60% draft acceptance) is not yet proven on target hardware.
 
 ---
 
@@ -101,6 +101,24 @@ node-llama-cpp 3.18.1 prebuilds for `cuda`, `cuda-ext`, and `vulkan` are physica
 - **Key new files:** `docs/mosaic-architecture.md`, `src/components/Dev/MosaicLab.jsx`, native coordinator addon
 - **Ships as:** v0.5 if both gates pass
 - **Actual start:** —
+
+---
+
+## Backlog — next phase candidates
+
+- **Phase 2 unblock** — NPU `LLMPipeline` KV-cache reuse + CUDA verifier residency across turns. **Revisit when** re-running `npm run eval:spec-decoding` in live mode produces `avgRealSpeedup >= 1.0` on a single prompt on the target machine.
+
+- **User-autonomy UI** — Explicit per-model device pin and per-chat backend override. **Revisit when** at least one user-reported case of “wrong backend was chosen” appears after v0.4.3 ships.
+
+- **Phase 3 Mosaic R&D Gate 1** — Per-layer profiling simulator that decides whether to build the multi-device weight-splitting runtime. **Revisit when** the machine sustains a stable spec-decode ship and we want a Q4-32B-class step; the master plan still defines Gate 1 cancel/proceed criteria.
+
+- **Stabilize and push** — Push branch `wip/mac-handoff-2026-02-13` and tag `v0.4.2` to `origin`, then pick the next phase. **Revisit when** you explicitly approve (anytime).
+
+### 2026-04-25 — v0.4.3 LM Studio parity polish (patch)
+- Per-model **system prompts** from SQLite presets now flow through `buildChatV2InferenceOptions` and `buildSystemPrompt` (preset wins when non-empty; workspace settings remain the fallback).
+- Chat V2 **context length** picker (Auto + 4K–128K, capped by model metadata), **approximate ctx used / budget %** in the header strip, and **Eject** (parallel `llm:unload` + `npu:unloadModel`) in the runtime panel.
+- **Model selector:** quant filter chips, sort (Recent / Size / Name) persisted in `modelSelectorPrefs`, per-row VRAM fit dot from hardware stats + model size.
+- Release gate: **19th** check `scripts/preset-system-prompt-smoke.js`.
 
 ---
 
