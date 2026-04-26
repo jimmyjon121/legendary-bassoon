@@ -1127,6 +1127,10 @@ class InferenceOrchestrator {
 
   _isSpecPairCompatibleWithDraftRuntime(pair) {
     if (!pair || !pair.draftModelId) return false;
+    // When the drafter runs in-process via llamanode (DEVFORGE_SPEC_DRAFTER=llamanode),
+    // the OpenVINO server's configured tokenizer is irrelevant — the drafter loads
+    // the actual draft GGUF whose tokenizer matches the verifier by construction.
+    if (process.env.DEVFORGE_SPEC_DRAFTER === 'llamanode') return true;
     const runtime = this._getActiveDraftRuntimeInfo();
     if (!runtime.family) return false;
     const pairTokenizer = String(pair.tokenizerId || pair.family || '').toLowerCase();
@@ -2155,14 +2159,45 @@ class InferenceOrchestrator {
     let batchCount = 0;
     const maxSpecBatches = Math.max(1, Number(process.env.DEVFORGE_SPEC_MAX_BATCHES) || 64);
 
+    // Optional llamanode-as-drafter mode: when DEVFORGE_SPEC_DRAFTER=llamanode
+    // is set, we run the drafter via a sidecar LlamaNodeBackend instance
+    // loaded with a small same-tokenizer GGUF (e.g. qwen2.5:1.5b). This
+    // bypasses the OpenVINO/GGUF tokenizer mismatch and lets the verifier
+    // accept draft tokens that share the verifier's argmax conventions.
+    const useLlamanodeDrafter = process.env.DEVFORGE_SPEC_DRAFTER === 'llamanode';
+    let llamanodeDrafter = null;
+    if (useLlamanodeDrafter) {
+      const drafterModel = process.env.DEVFORGE_SPEC_DRAFTER_GGUF
+        || this._resolveLocalGgufForModel(pair.draftModelId)
+        || this._resolveOllamaBlobForModel(pair.draftModelId)
+        || verifierModel;
+      try {
+        if (!this._specDrafterBackend) {
+          this._specDrafterBackend = new LlamaNodeBackend({
+            id: 'llamanode-drafter',
+            useGpu: true,
+            device: 'NVIDIA GPU (drafter)',
+            priority: 4,
+          });
+        }
+        await this._specDrafterBackend.loadModel(drafterModel, { contextSize: requestedCtx });
+        llamanodeDrafter = this._specDrafterBackend;
+      } catch (err) {
+        console.warn('[Orchestrator] llamanode drafter failed to load, falling back to NPU bus:', err?.message || err);
+        llamanodeDrafter = null;
+      }
+    }
+
     // Prefer the session API so the Python side keeps the prompt + accepted
     // suffix and only the small accepted-delta is shipped per round.
     let serverSessionId = null;
-    try {
-      const created = await bus.createSession({ prompt: promptText });
-      if (created?.success && created.session_id) serverSessionId = created.session_id;
-    } catch {
-      serverSessionId = null;
+    if (!llamanodeDrafter) {
+      try {
+        const created = await bus.createSession({ prompt: promptText });
+        if (created?.success && created.session_id) serverSessionId = created.session_id;
+      } catch {
+        serverSessionId = null;
+      }
     }
     const sampling = {
       temperature: Number(payload?.options?.temperature ?? 0),
@@ -2176,7 +2211,23 @@ class InferenceOrchestrator {
       let draft;
       let secondaryDraft = null;
       const treeEnabled = process.env.DEVFORGE_SPEC_TREE === '1' && !this._specTreeDisabled;
-      if (serverSessionId) {
+      if (llamanodeDrafter) {
+        try {
+          const result = await llamanodeDrafter.draftTokens({
+            prefixTokens: promptTokens,
+            lookahead,
+          });
+          draft = {
+            success: true,
+            draft_tokens: Array.isArray(result?.tokens) ? result.tokens : [],
+            draft_text: typeof result?.text === 'string' ? result.text : '',
+            engine: 'llamanode',
+            device: 'cuda',
+          };
+        } catch (err) {
+          draft = { success: false, error: err?.message || String(err) };
+        }
+      } else if (serverSessionId) {
         draft = await bus.extendSession({
           sessionId: serverSessionId,
           acceptedText: committedTokens === 0 ? null : lastAcceptedTextDelta,

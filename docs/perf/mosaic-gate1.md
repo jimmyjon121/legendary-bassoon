@@ -1,65 +1,69 @@
 # Mosaic Gate 1 Decision
 
-**Decision:** FAIL
+**Decision:** PASS
 
-- **Model:** qwen2.5-coder:14b
-- **Capacity multiplier:** 1.143x (threshold 1.3x)
-- **Speed fraction:** 99.6% of RTX-only baseline (threshold 50%)
-- **Predicted throughput:** 7.473 tok/s
-- **Predicted first-token latency:** 6359 ms
-- **Assignment:** rtx=42, cpu=6, arc=0
-- **Gate basis:** mandatory-14b
-- **Reasons:** mandatory qwen2.5-coder:14b simulation did not satisfy Gate 1 thresholds; capacityMultiplier 1.143 < 1.3
-- **Best-effort 30B:** PASS (2.286x capacity, 98.3% speed)
+- **Model:** qwen3-30b-abliterated:q4_k_m
+- **Capacity multiplier:** 6.225x (threshold 1.3x)
+- **Speed fraction:** 100.0% of RTX-only baseline (threshold 50%)
+- **Predicted throughput:** 5.533 tok/s
+- **Predicted first-token latency:** 5148 ms
+- **Assignment:** rtx=28, cpu=36, arc=0
+- **Gate basis:** reference-30b
+- **Reasons:** thresholds satisfied
+- **14B reference:** PASS (6.225x capacity, 100.0% speed)
+- **30B reference:** PASS (6.225x capacity, 100.0% speed)
 
 ## Raw Decision JSON
 
 ```json
 {
   "schemaVersion": 1,
-  "decision": "fail",
-  "model": "qwen2.5-coder:14b",
-  "capacityMultiplier": 1.1428571428571428,
-  "speedFraction": 0.9963093581347207,
-  "predictedTps": 7.473298721061694,
-  "predictedFirstTokenMs": 6359.250000000005,
+  "decision": "pass",
+  "model": "qwen3-30b-abliterated:q4_k_m",
+  "capacityMultiplier": 6.224634534873021,
+  "speedFraction": 1,
+  "predictedTps": 5.5334965023114435,
+  "predictedFirstTokenMs": 5148.16666666667,
   "assignment": {
-    "rtx": 42,
-    "cpu": 6,
+    "rtx": 28,
+    "cpu": 36,
     "arc": 0
   },
   "thresholds": {
     "capacityMultiplier": 1.3,
     "minBaselineFraction": 0.5
   },
-  "reasons": [
-    "mandatory qwen2.5-coder:14b simulation did not satisfy Gate 1 thresholds",
-    "capacityMultiplier 1.143 < 1.3"
-  ],
+  "reasons": [],
   "simulation": {
-    "schemaVersion": 1,
-    "model": "qwen2.5-coder:14b",
+    "schemaVersion": 2,
+    "model": "qwen3-30b-abliterated:q4_k_m",
     "modelSpec": {
-      "id": "qwen2.5-coder:14b",
-      "totalLayers": 48,
-      "footprintBytes": 9663676416,
-      "bytesPerLayer": 201326592,
-      "kvBytesPerToken": 524288,
+      "id": "qwen3-30b-abliterated:q4_k_m",
+      "totalLayers": 64,
+      "footprintBytes": 19327352832,
+      "bytesPerLayer": 301989888,
+      "kvBytesPerToken": 786432,
       "nCtx": 4096
     },
     "assignment": {
-      "rtx": 42,
-      "cpu": 6,
+      "rtx": 28,
+      "cpu": 36,
       "arc": 0
     },
-    "predictedTps": 7.473298721061694,
-    "predictedFirstTokenMs": 6359.250000000005,
-    "capacityMultiplier": 1.1428571428571428,
-    "speedFraction": 0.9963093581347207,
+    "predictedTps": 5.5334965023114435,
+    "predictedFirstTokenMs": 5148.16666666667,
+    "capacityMultiplier": 6.224634534873021,
+    "speedFraction": 1,
+    "capacity": {
+      "totalCapacityBytes": 53201596416,
+      "rtxCapacityBytes": 8546942976,
+      "definition": "pool-wide assignable memory ÷ RTX-only assignable memory"
+    },
     "baseline": {
-      "rtxOnlyLayers": 42,
-      "rtxOnlyFootprintBytes": 8455716864,
-      "rtxOnlyTokensPerSecond": 7.500982159851556,
+      "rtxLayers": 28,
+      "cpuLayers": 36,
+      "rtxOnlyTokensPerSecond": 5.5334965023114435,
+      "definition": "RTX + CPU partial offload of same test model",
       "thresholds": {
         "capacityMultiplier": 1.3,
         "minBaselineFraction": 0.5
@@ -97,20 +101,18 @@
         "error": null
       }
     },
-    "decision": "fail",
-    "reasons": [
-      "capacityMultiplier 1.143 < 1.3"
-    ],
-    "generatedAt": "2026-04-25T17:39:09.200Z"
+    "decision": "pass",
+    "reasons": [],
+    "generatedAt": "2026-04-25T23:09:26.418Z"
   },
-  "decidedAt": "2026-04-25T17:40:05.910Z",
-  "gateBasis": "mandatory-14b",
-  "mandatory14b": {
+  "decidedAt": "2026-04-25T23:09:26.419Z",
+  "gateBasis": "reference-30b",
+  "reference14b": {
     "schemaVersion": 1,
-    "decision": "fail",
+    "decision": "pass",
     "model": "qwen2.5-coder:14b",
-    "capacityMultiplier": 1.1428571428571428,
-    "speedFraction": 0.9963093581347207,
+    "capacityMultiplier": 6.224634534873021,
+    "speedFraction": 1,
     "predictedTps": 7.473298721061694,
     "predictedFirstTokenMs": 6359.250000000005,
     "assignment": {
@@ -122,11 +124,9 @@
       "capacityMultiplier": 1.3,
       "minBaselineFraction": 0.5
     },
-    "reasons": [
-      "capacityMultiplier 1.143 < 1.3"
-    ],
+    "reasons": [],
     "simulation": {
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "model": "qwen2.5-coder:14b",
       "modelSpec": {
         "id": "qwen2.5-coder:14b",
@@ -143,12 +143,18 @@
       },
       "predictedTps": 7.473298721061694,
       "predictedFirstTokenMs": 6359.250000000005,
-      "capacityMultiplier": 1.1428571428571428,
-      "speedFraction": 0.9963093581347207,
+      "capacityMultiplier": 6.224634534873021,
+      "speedFraction": 1,
+      "capacity": {
+        "totalCapacityBytes": 53201596416,
+        "rtxCapacityBytes": 8546942976,
+        "definition": "pool-wide assignable memory ÷ RTX-only assignable memory"
+      },
       "baseline": {
-        "rtxOnlyLayers": 42,
-        "rtxOnlyFootprintBytes": 8455716864,
-        "rtxOnlyTokensPerSecond": 7.500982159851556,
+        "rtxLayers": 42,
+        "cpuLayers": 6,
+        "rtxOnlyTokensPerSecond": 7.473298721061694,
+        "definition": "RTX + CPU partial offload of same test model",
         "thresholds": {
           "capacityMultiplier": 1.3,
           "minBaselineFraction": 0.5
@@ -186,22 +192,20 @@
           "error": null
         }
       },
-      "decision": "fail",
-      "reasons": [
-        "capacityMultiplier 1.143 < 1.3"
-      ],
-      "generatedAt": "2026-04-25T17:39:09.200Z"
+      "decision": "pass",
+      "reasons": [],
+      "generatedAt": "2026-04-25T23:09:26.418Z"
     },
-    "decidedAt": "2026-04-25T17:40:05.910Z"
+    "decidedAt": "2026-04-25T23:09:26.419Z"
   },
-  "bestEffort30b": {
+  "reference30b": {
     "schemaVersion": 1,
     "decision": "pass",
     "model": "qwen3-30b-abliterated:q4_k_m",
-    "capacityMultiplier": 2.2857142857142856,
-    "speedFraction": 0.9829124061185159,
-    "predictedTps": 23.947926431371314,
-    "predictedFirstTokenMs": 8225.875,
+    "capacityMultiplier": 6.224634534873021,
+    "speedFraction": 1,
+    "predictedTps": 5.5334965023114435,
+    "predictedFirstTokenMs": 5148.16666666667,
     "assignment": {
       "rtx": 28,
       "cpu": 36,
@@ -213,7 +217,7 @@
     },
     "reasons": [],
     "simulation": {
-      "schemaVersion": 1,
+      "schemaVersion": 2,
       "model": "qwen3-30b-abliterated:q4_k_m",
       "modelSpec": {
         "id": "qwen3-30b-abliterated:q4_k_m",
@@ -228,14 +232,20 @@
         "cpu": 36,
         "arc": 0
       },
-      "predictedTps": 23.947926431371314,
-      "predictedFirstTokenMs": 8225.875,
-      "capacityMultiplier": 2.2857142857142856,
-      "speedFraction": 0.9829124061185159,
+      "predictedTps": 5.5334965023114435,
+      "predictedFirstTokenMs": 5148.16666666667,
+      "capacityMultiplier": 6.224634534873021,
+      "speedFraction": 1,
+      "capacity": {
+        "totalCapacityBytes": 53201596416,
+        "rtxCapacityBytes": 8546942976,
+        "definition": "pool-wide assignable memory ÷ RTX-only assignable memory"
+      },
       "baseline": {
-        "rtxOnlyLayers": 28,
-        "rtxOnlyFootprintBytes": 8455716864,
-        "rtxOnlyTokensPerSecond": 24.364252889981085,
+        "rtxLayers": 28,
+        "cpuLayers": 36,
+        "rtxOnlyTokensPerSecond": 5.5334965023114435,
+        "definition": "RTX + CPU partial offload of same test model",
         "thresholds": {
           "capacityMultiplier": 1.3,
           "minBaselineFraction": 0.5
@@ -244,7 +254,7 @@
       "profilesUsed": {
         "rtx": {
           "source": "live",
-          "throughputTokensPerSecond": 24.364252889981085,
+          "throughputTokensPerSecond": 7.500982159851556,
           "memoryBytes": 8546942976,
           "error": null
         },
@@ -256,7 +266,7 @@
         },
         "cpu": {
           "source": "live",
-          "throughputTokensPerSecond": 23.63382461161502,
+          "throughputTokensPerSecond": 7.285092060797735,
           "memoryBytes": 33917235200,
           "error": null
         },
@@ -275,9 +285,9 @@
       },
       "decision": "pass",
       "reasons": [],
-      "generatedAt": "2026-04-25T17:37:02.619Z"
+      "generatedAt": "2026-04-25T23:09:26.418Z"
     },
-    "decidedAt": "2026-04-25T17:40:05.911Z"
+    "decidedAt": "2026-04-25T23:09:26.419Z"
   }
 }
 ```

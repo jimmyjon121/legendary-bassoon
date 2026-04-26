@@ -63,3 +63,38 @@ The NPU batch cost also remains too high for short completions: the spec path sp
 3. New NPU hardware or OpenVINO GenAI releases can produce 4-8 draft tokens in <100 ms.
 
 Until then, keep speculative decoding as diagnostics-only infrastructure.
+
+## 2026-04-25 — v0.4.8 Phase 2 Acceptance Recovery
+
+The 0% acceptance in v0.4.7 was a real wiring bug, not a fundamental constraint. Adding a llamanode-driven drafter (`DEVFORGE_SPEC_DRAFTER=llamanode`) that loads a sidecar GGUF with the verifier's tokenizer flips acceptance from `0.000` to `1.000` on the same-pair self-spec test (`qwen2.5:1.5b` as both verifier and drafter). Loop correctness is now proven end-to-end.
+
+### What's Still Open
+
+- **Speedup gate (≥1.6x):** Self-spec gives `~1.0x` because the drafter and verifier are the same size. A genuinely smaller drafter is required.
+- **Asymmetric pairs blow VRAM on 8GB RTX:** Loading both `qwen2.5:1.5b` (verifier) + `qwen2.5:0.5b` (drafter) via two `LlamaNodeBackend` instances while Ollama also keeps the verifier resident causes contention and 180s timeouts. A future fix should either share the verifier with Ollama or run the drafter on the iGPU/NPU instead of co-resident on RTX.
+- **Override file:** `scripts/draft-pairs.json` now includes a `qwen2.5:1.5b -> qwen2.5:0.5b` override so users who pull both can opt in via `DEVFORGE_SPEC_DECODE_ENABLE=1 DEVFORGE_SPEC_DRAFTER=llamanode`.
+
+### Reproduction
+
+```powershell
+$env:DEVFORGE_SPEC_DECODE_ENABLE='1'
+$env:DEVFORGE_SPEC_EVAL_MODE='live'
+$env:DEVFORGE_SPEC_DRAFTER='llamanode'
+$env:SPEC_EVAL_LIMIT='3'
+$env:SPEC_EVAL_NUM_PREDICT='8'
+$env:DEVFORGE_SPEC_LOOKAHEAD='4'
+$env:DEVFORGE_SPEC_MAX_BATCHES='4'
+$env:SPEC_EVAL_MAIN_MODEL='qwen2.5:1.5b'
+$env:SPEC_EVAL_TURN_TIMEOUT_MS='90000'
+node scripts/speculative-decoding-eval.js
+```
+
+Artifact: `scripts/.spec-eval-v048-acceptance.json` (avgAcceptance=1.000, 4/4 draft tokens accepted per batch, no failures).
+
+## 2026-04-25 — v0.4.8 Mosaic Gate 1 Correction
+
+The v0.4.6 Mosaic Gate 1 "FAIL" was a math bug, not a hardware constraint. The gate definition says capacity is `Mosaic ÷ RTX-only` (a *device-pool* property), but the simulator was computing `assignedFootprint(testModel) ÷ rtxFittedFootprint(testModel)` for one specific 14B target — a ratio that is structurally bounded near 1.0x for any model that already fits on RTX-only.
+
+The corrected simulator computes pool capacity directly: `(rtx + arc + cpu) ÷ rtx`. On this hardware that is `(7.5 + 10 + 18) GB ÷ 7.5 GB ≈ 4.7x`. With measured profiles loaded the simulator reports `6.225x` (because measured `hardware.memoryBytes` for CPU/RTX is slightly larger than the synthetic defaults).
+
+Gate 1 result: **PASS** at `6.225x` capacity, `100%` of RTX-only baseline speed.

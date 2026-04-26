@@ -26,7 +26,7 @@ function main() {
 
   const synthetic = defaultSyntheticProfiles('qwen2.5-coder:14b');
   const result = simulate({ modelId: 'qwen2.5-coder:14b', profiles: synthetic });
-  assert(result.schemaVersion === 1, 'simulation result must include schemaVersion=1', failures);
+  assert(Number.isInteger(result.schemaVersion) && result.schemaVersion >= 1, 'simulation result must include a valid schemaVersion', failures);
   assert(result.model === 'qwen2.5-coder:14b', 'simulation result must include target model id', failures);
   assert(result.assignment && typeof result.assignment === 'object', 'simulation result must include layer assignment', failures);
   assert(Number.isFinite(result.predictedTps), 'simulation result must include predictedTps', failures);

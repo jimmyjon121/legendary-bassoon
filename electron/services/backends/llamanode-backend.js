@@ -483,6 +483,87 @@ class LlamaNodeBackend extends BaseBackend {
   // dense Float32Array logits or this Map directly via rowArgmax /
   // rowProbability / rowSample helpers, so no dense conversion is
   // needed -- we forward the Maps as-is.
+  // Phase 2 hook: greedy speculative drafter. Given a prefix of token
+  // ids, generate `lookahead` continuation tokens by repeatedly running
+  // `controlledEvaluate` and picking the argmax. This makes the same
+  // backend usable as a *drafter* for spec-decode when a small, same-
+  // tokenizer GGUF is loaded as a sidecar drafter alongside the
+  // verifier. Returns `{ tokens, text }` where `text` is detokenized so
+  // the orchestrator can verifier-tokenize it for argmax verification.
+  async draftTokens({ prefixTokens, lookahead = 4 } = {}) {
+    if (!Array.isArray(prefixTokens) || prefixTokens.length === 0) {
+      throw new Error('draftTokens: prefixTokens array is required');
+    }
+    if (!this._current?.sequence) {
+      throw new Error('draftTokens: no drafter model loaded');
+    }
+    const limit = Math.max(1, Math.min(Number(lookahead) || 4, 8));
+    const sequence = this._current.sequence;
+    const model = this._current.model;
+    if (typeof sequence.controlledEvaluate !== 'function') {
+      const err = new Error('draftTokens: controlledEvaluate not available');
+      err.code = 'SPEC_DECODE_UNAVAILABLE';
+      throw err;
+    }
+
+    // Reset KV-cache once per draft, then walk one token at a time so each
+    // subsequent controlledEvaluate only pays an O(1) forward pass over the
+    // single new token instead of re-running the full prefix per step.
+    if (typeof sequence.clearHistory === 'function') {
+      await sequence.clearHistory();
+    }
+
+    const initialInput = prefixTokens.map((token, idx) => (
+      idx === prefixTokens.length - 1
+        ? [token, { generateNext: { probabilities: true } }]
+        : token
+    ));
+    let evalResult;
+    try {
+      evalResult = await sequence.controlledEvaluate(initialInput);
+    } catch (err) {
+      const wrapped = new Error(`draftTokens: prefix evaluate failed: ${err?.message || err}`);
+      wrapped.code = 'SPEC_DECODE_RUNTIME_ERROR';
+      throw wrapped;
+    }
+
+    const pickArgmax = (entry) => {
+      const probs = entry?.next?.probabilities;
+      if (!probs || typeof probs.entries !== 'function') return null;
+      const first = probs.entries().next();
+      if (first.done || !Array.isArray(first.value)) return null;
+      const tok = first.value[0];
+      return Number.isFinite(tok) ? tok : null;
+    };
+
+    const draft = [];
+    for (let step = 0; step < limit; step += 1) {
+      const last = Array.isArray(evalResult) ? evalResult[evalResult.length - 1] : null;
+      const next = pickArgmax(last);
+      if (next == null) break;
+      draft.push(next);
+      if (step >= limit - 1) break;
+      try {
+        evalResult = await sequence.controlledEvaluate([
+          [next, { generateNext: { probabilities: true } }],
+        ]);
+      } catch (err) {
+        break;
+      }
+    }
+
+    let text = '';
+    if (draft.length > 0 && typeof model?.detokenize === 'function') {
+      try {
+        text = model.detokenize(draft, false, prefixTokens) || '';
+      } catch {
+        text = '';
+      }
+    }
+
+    return { tokens: draft, text };
+  }
+
   async evaluateForVerifier({ tokens } = {}) {
     if (!Array.isArray(tokens) || tokens.length === 0) {
       throw new Error('evaluateForVerifier: tokens array is required');

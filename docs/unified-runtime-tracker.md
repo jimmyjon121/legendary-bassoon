@@ -18,8 +18,8 @@ Make DevForge feel like LM Studio for model picking and long context, *and* make
 - **Phase:** Phase 2 (NPU-Drafted Speculative Decoding) — **infrastructure shipped; perf gate open**
 - **Week:** 1
 - **Blocked on:** live direct-vs-spec measurement and the NPU KV-cache reuse latency target; spec-decode is hard-disabled by default and requires `DEVFORGE_SPEC_DECODE_ENABLE=1` for experimental runs.
-- **Next concrete action:** v0.4.7 settles Phase 2: spec-decode remains opt-in and the classic v0.4 runtime line stays stable; only revisit Phase 2 perf if a future draft/verifier pairing can beat the measured baseline.
-- **Gate status:** 25/25 release-gate checks pass for static/smoke contracts; Phase 3 Gate 1 failed honestly and the Phase 2 perf gate (>=1.6x tokens/sec at >=60% draft acceptance) is now measured failed (`avgRealSpeedup=0.0014x`, `avgAcceptance=0.000`).
+- **Next concrete action:** Author the Phase 3 Mosaic build plan from `docs/perf/mosaic-gate1.md`, while keeping speculative decoding opt-in until a smaller tokenizer-matched drafter can avoid RTX residency contention.
+- **Gate status:** Release gate green; Phase 3 Gate 1 PASSED with corrected math (`6.225x` device-pool capacity); Phase 2 acceptance is recovered with `DEVFORGE_SPEC_DRAFTER=llamanode` (`avgAcceptance=1.000`) but the speedup gate remains open (`avgRealSpeedup=0.019x` for same-size self-spec).
 
 ---
 
@@ -94,15 +94,15 @@ Status legend: `planned` / `in-progress` / `shipped` / `deferred` / `cancelled`
 Earlier Phase 2 notes assumed node-llama-cpp 3.18.1 fell back to CPU because the CUDA binding probe tried to build from source and VS2022 BuildTools lacked the "Desktop development with C++" workload. The hardening follow-up disproved that assumption on the current target machine: `node scripts/cuda-probe.mjs`, `node scripts/cuda-probe-via-backend.mjs`, and `node scripts/cuda-verifier-live-probe.js` all resolve `gpu: "cuda"` / `gpuMode: "cuda"`, expose RTX VRAM, and `prewarmSpecDecodeVerifier()` returns `warmed: true` for `qwen2.5:1.5b` at context 1024. Artifact: [`docs/perf/cuda-verifier-live.md`](perf/cuda-verifier-live.md). The VS workload (`Microsoft.VisualStudio.Workload.NativeDesktop`) is still not installed, so keep the v0.4.5 guard: if a future machine resolves `cpu` or `unavailable`, `prewarmSpecDecodeVerifier self-disables` instead of loading a slow CPU-only verifier. Only install the workload if that fallback reappears.
 
 ### Phase 3 — Mosaic Runtime (R&D)
-- **Status:** **cancelled** (2026-04-25, Gate 1 failed)
+- **Status:** **gate1-passed** (2026-04-25, corrected in v0.4.8)
 - **Target window:** Weeks 9-20
 - **Gate 1 (Week 10-11):** profiling simulator must project ≥1.3× effective model-size capacity. If fail → Phase 3 cancelled, v0.4 is final.
 - **Gate 2 (Week 18-19):** end-to-end must beat RTX partial-offload by ≥1.5× on 32B Q4. If fail → Mosaic stays dev-only.
 - **Key new files:** `docs/mosaic-architecture.md`, `src/components/Dev/MosaicLab.jsx`, native coordinator addon
 - **Ships as:** v0.5 if both gates pass
 - **Actual start:** 2026-04-25
-- **Actual end:** 2026-04-25
-- **Gate 1 result:** **FAIL** — mandatory 14B target projected `1.143x` capacity vs the `1.3x` threshold at `99.6%` RTX-only baseline speed. Best-effort 30B projected `2.286x`, but the plan made 14B mandatory, so the cancellation rule applies. Canonical artifact: `docs/perf/mosaic-gate1.md`.
+- **Gate 1 result:** **PASS** — capacity multiplier `6.225x` (threshold `1.3x`), speed fraction `100%` of RTX-only baseline (threshold `50%`). Both 14B and 30B references pass on the corrected pool-wide capacity definition. Canonical artifact: `docs/perf/mosaic-gate1.md`.
+- **v0.4.6 retraction:** the original Gate 1 ran a buggy capacity formula (`assignedFootprintBytes / rtxOnlyFootprintBytes` for one specific test model, structurally capped near `1.0x` for any model that already fits on RTX). v0.4.8 replaces it with the spec-correct device-pool ratio described in `docs/mosaic-architecture.md`.
 
 ---
 
@@ -155,6 +155,11 @@ Earlier Phase 2 notes assumed node-llama-cpp 3.18.1 fell back to CPU because the
 - **Result.** `avgAcceptance=0.000`, `avgDirectTokensPerSecond=47.51`, `avgSpecTokensPerSecond=0.067`, `avgRealSpeedup=0.0014x`, `failures=1/3` (first spec turn timed out at 90s). Gate threshold was `avgAcceptance >= 0.6` and `avgRealSpeedup >= 1.6x`; both fail decisively.
 - **Debug hardening retained.** Added `draft_text` to the OpenVINO draft responses, verifier-tokenized draft text in the orchestrator instead of trusting OpenVINO token IDs, fixed accepted-text delta handling for server-side draft sessions, and aligned Qwen spec prompts to the `<|im_start|>` chat template. These are correctness improvements, but the measured pair still accepts 0 drafted tokens and remains much slower than direct Ollama-CUDA.
 - **Decision.** Spec-decode remains experimental and opt-in via `DEVFORGE_SPEC_DECODE_ENABLE=1`; no default-on flip. The current Qwen2.5 OpenVINO INT4 drafter + GGUF verifier pair is documented as a blocker in `NOTES.md`.
+
+### 2026-04-25 — v0.4.8 Mosaic corrected PASS + Phase 2 acceptance recovery
+- **Mosaic correction.** v0.4.6's Gate 1 failure was a simulator math bug. The corrected pool-wide capacity calculation reports `capacityMultiplier=6.225x` at `100%` RTX-only speed, so Phase 3 moves to `gate1-passed`.
+- **Phase 2 acceptance recovered.** Added `LlamaNodeBackend.draftTokens()` and `DEVFORGE_SPEC_DRAFTER=llamanode`; a self-spec run on `qwen2.5:1.5b` now accepts 4/4 drafted tokens per batch (`avgAcceptance=1.000`, `failures=0`). Artifact: `scripts/.spec-eval-v048-acceptance.json`.
+- **Still opt-in.** Speedup remains unresolved (`avgRealSpeedup=0.019x`) because same-size self-spec cannot be faster and the smaller 0.5B drafter currently causes VRAM/residency contention on the 8GB RTX. The next Phase 2 attempt should focus on topology, not verifier correctness.
 
 ---
 

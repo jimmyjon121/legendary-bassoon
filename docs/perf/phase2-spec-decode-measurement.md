@@ -197,3 +197,13 @@ node scripts/speculative-decoding-eval.js
   1. A draft/main pair that shares weights bit-exact (e.g., a Qwen2.5 1.5B Q4 GGUF drafter loaded via llamanode against the same GGUF used as the verifier).
   2. A native shmem spec-bus transport that removes JS-side per-call latency.
   3. Faster hardware where NPU `pipe.generate` for a 4-8 token batch costs <100 ms instead of ~2.5 s.
+
+## 2026-04-25 — v0.4.8 acceptance recovered with llamanode drafter
+
+The v0.4.7 0% acceptance was caused by the OpenVINO NPU drafter and the llama.cpp verifier disagreeing on token ids / greedy next-token choices. v0.4.8 adds an opt-in `DEVFORGE_SPEC_DRAFTER=llamanode` mode that loads the draft GGUF through `LlamaNodeBackend` and drafts in the verifier's tokenizer space.
+
+- **Self-spec artifact:** [`scripts/.spec-eval-v048-acceptance.json`](../../scripts/.spec-eval-v048-acceptance.json).
+- **Result:** `avgAcceptance=1.000`, `failures=0`, `promptsMeasured=3`.
+- **Speed:** `avgRealSpeedup=0.019x` for same-size self-spec (`qwen2.5:1.5b` as both verifier and drafter), so the speedup gate still does **not** pass.
+- **Asymmetric attempt:** `qwen2.5:1.5b` verifier + `qwen2.5:0.5b` drafter times out on the current 8GB RTX when both llama.cpp contexts compete with Ollama residency. The token loop is now correct; the next bottleneck is resident memory/topology.
+- **Decision:** Phase 2 moves from "acceptance broken" to "acceptance proven, speedup unresolved." Spec-decode remains opt-in; a future pass should focus on a smaller drafter that does not co-reside on RTX with the verifier, or on a shared-process verifier/drafter context that avoids duplicating the main model.

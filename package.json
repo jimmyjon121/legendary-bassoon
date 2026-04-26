@@ -1,6 +1,6 @@
 {
   "name": "devforge",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "Sovereign AI Development Environment - Local, Private, Unrestricted",
   "main": "electron/main.js",
   "author": "Christopher",

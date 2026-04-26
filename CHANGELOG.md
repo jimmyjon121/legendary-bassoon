@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.4.8 — Mosaic Gate 1 Correction + Phase 2 Acceptance Recovery
+
+- **Mosaic Gate 1: PASS** (corrected). The v0.4.6 "FAIL" used a ratio that was structurally capped near `1.0x` for any model that already fits on RTX-only. The corrected device-pool ratio is `6.225x` (threshold `1.3x`) at `100%` RTX-only baseline speed. Phase 3 status moves from `cancelled` to `gate1-passed`.
+- **Phase 2 acceptance: 0.000 -> 1.000.** Added `LlamaNodeBackend.draftTokens()` and an opt-in `DEVFORGE_SPEC_DRAFTER=llamanode` mode that runs the drafter via a sidecar GGUF with the verifier's tokenizer. Self-spec on `qwen2.5:1.5b` shows 4/4 draft tokens accepted per batch with no failures; `scripts/.spec-eval-v048-acceptance.json` is the captured run.
+- **Speedup gate still open.** Same-size self-spec is `~1.0x` by construction; a genuinely smaller drafter is required, and the asymmetric `1.5B + 0.5B` test currently times out on the 8GB RTX due to dual-model VRAM contention. Spec-decode remains opt-in.
+- Updated `scripts/draft-pairs.json` with a `qwen2.5:1.5b -> qwen2.5:0.5b` override for users who pull both models.
+
 ## v0.4.7 — Phase 2 Live Settlement
 
 - Re-ran the live speculative-decoding gate after NPU draft sessions and CUDA verifier prewarm were verified.

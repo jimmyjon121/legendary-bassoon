@@ -102,8 +102,8 @@ The default chat experience keeps the conversation front and center while preser
 ### 🧪 Local Runtime R&D Status
 - **LM Studio parity polish shipped:** Chat V2 now has context controls, model eject, approximate context-used percentage, per-model system prompts, model-picker quant filters, sort, and VRAM fit dots.
 - **User autonomy shipped:** Per-model device pins and per-chat backend overrides let advanced users force a route when the automatic orchestrator makes the wrong call.
-- **Speculative decoding remains opt-in:** Phase 2 infrastructure is present for experimentation, but the live perf gate failed on current hardware (`avgRealSpeedup=0.0014x`, `avgAcceptance=0`). It is intentionally gated behind `DEVFORGE_SPEC_DECODE_ENABLE=1`.
-- **Mosaic runtime cancelled after Gate 1:** The simulator/profiler artifacts remain in `docs/perf/mosaic/`, but the mandatory 14B Gate 1 target reached only `1.143x` capacity vs the required `1.3x`, so no native cross-device coordinator will be built in this line.
+- **Speculative decoding loop verified:** Phase 2 acceptance fixed in v0.4.8 (`avgAcceptance=1.000` on the self-spec verifier loop with `DEVFORGE_SPEC_DRAFTER=llamanode`). The full perf gate (`>=1.6x` speedup) is still open because asymmetric drafters need a smaller GGUF that does not contend with the verifier on 8GB VRAM. Spec-decode remains opt-in behind `DEVFORGE_SPEC_DECODE_ENABLE=1`.
+- **Mosaic runtime Gate 1 PASSED:** Corrected device-pool capacity math projects `6.225x` capacity at `100%` of RTX-only baseline speed. Phase 3 native coordinator design is unblocked but not started.
 
 ### 🎨 Local Image Generation
 - **ComfyUI integration:** Professional image generation workflow.

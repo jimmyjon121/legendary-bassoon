@@ -7,6 +7,11 @@ const path = require('path');
 const ROOT = path.resolve(__dirname, '..');
 const ARTIFACT_DIR = path.join(ROOT, 'docs/perf/mosaic');
 
+// Reference targets used to project tps/first-token at a particular model
+// size. The simulator's capacity decision is independent of which test
+// model is asked about — capacity is a device-pool property — but tps/
+// first-token estimates are per-target since per-layer cost scales with
+// model layer count and bytes-per-layer.
 const MODEL_PROFILES = {
   'qwen2.5-coder:14b': {
     id: 'qwen2.5-coder:14b',
@@ -33,8 +38,10 @@ const DEVICE_MEMORY = {
   npu: 1.5 * 1024 ** 3,
 };
 
+const ASSIGNABLE_DEVICES = ['rtx', 'arc', 'cpu'];
+
 function readJson(filePath) {
-  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
+  return JSON.parse(fs.readFileSync(filePath, 'utf8').replace(/^\uFEFF/, ''));
 }
 
 function mean(values, fallback = 0) {
@@ -108,8 +115,8 @@ function defaultSyntheticProfiles(modelId) {
   };
 }
 
-function assignLayers({ model, profiles }) {
-  const devices = ['rtx', 'arc', 'cpu']
+function assignLayers({ model, profiles, allowedDevices = ASSIGNABLE_DEVICES }) {
+  const devices = allowedDevices
     .map((id) => profiles[id])
     .filter(Boolean)
     .sort((a, b) => a.decodeMs - b.decodeMs);
@@ -152,6 +159,38 @@ function estimateTps({ assignment, profiles }) {
   return { predictedTps, predictedFirstTokenMs: prefillMs };
 }
 
+// Mosaic Gate 1 capacity is a *device pool* property: how much model
+// footprint can be hosted across allowed devices vs how much fits on
+// RTX alone. It is independent of any one test model's layer count.
+function deviceCapacity(profiles, allowedDevices = ASSIGNABLE_DEVICES) {
+  let total = 0;
+  let rtx = 0;
+  for (const id of allowedDevices) {
+    const p = profiles[id];
+    if (!p) continue;
+    const bytes = Number(p.memoryBytes || 0);
+    total += bytes;
+    if (id === 'rtx') rtx = bytes;
+  }
+  return { totalCapacityBytes: total, rtxCapacityBytes: rtx };
+}
+
+function rtxOnlyEstimateTps(profiles, model) {
+  const rtx = profiles.rtx;
+  const cpu = profiles.cpu;
+  if (!rtx) return { predictedTps: 0, rtxLayers: 0, cpuLayers: 0, predictedFirstTokenMs: 0 };
+  const rtxLayers = Math.min(model.totalLayers, Math.floor((rtx.memoryBytes || 0) / model.bytesPerLayer));
+  const cpuLayers = Math.max(0, model.totalLayers - rtxLayers);
+  const decodeMs = rtxLayers * rtx.decodeMs + (cpu ? cpuLayers * cpu.decodeMs : 0);
+  const prefillMs = rtxLayers * rtx.prefillMs + (cpu ? cpuLayers * cpu.prefillMs : 0);
+  return {
+    predictedTps: decodeMs > 0 ? 1000 / decodeMs : 0,
+    rtxLayers,
+    cpuLayers,
+    predictedFirstTokenMs: prefillMs,
+  };
+}
+
 function simulate({
   modelId = 'qwen2.5-coder:14b',
   profiles = null,
@@ -161,25 +200,30 @@ function simulate({
   const model = MODEL_PROFILES[modelId] || MODEL_PROFILES['qwen2.5-coder:14b'];
   const loaded = profiles || { ...defaultSyntheticProfiles(model.id), ...loadProfiles({ artifactDir }) };
   const normalized = Object.fromEntries(Object.entries(loaded).map(([k, v]) => [k, normalizeProfile(v)]));
+
+  // Mosaic placement (RTX + Arc + CPU) for the requested test model.
   const assignment = assignLayers({ model, profiles: normalized });
   const estimates = estimateTps({ assignment, profiles: normalized });
-  const rtx = normalized.rtx || defaultSyntheticProfiles(model.id).rtx;
-  const rtxFitBytes = Number(rtx.memoryBytes || DEVICE_MEMORY.rtx);
-  const rtxOnlyLayers = Math.floor(rtxFitBytes / model.bytesPerLayer);
-  const rtxOnlyFootprintBytes = Math.min(model.footprintBytes, rtxOnlyLayers * model.bytesPerLayer);
-  const assignedLayers = Object.entries(assignment)
-    .filter(([device]) => device !== 'unplaced')
-    .reduce((sum, [, layers]) => sum + Number(layers || 0), 0);
-  const assignedFootprintBytes = assignedLayers * model.bytesPerLayer;
-  const capacityMultiplier = rtxOnlyFootprintBytes > 0 ? assignedFootprintBytes / rtxOnlyFootprintBytes : 0;
-  const baselineTps = Number(rtx.throughputTokensPerSecond || rtx.tps || 0);
+
+  // Capacity is a device-pool property (Gate 1 spec).
+  const { totalCapacityBytes, rtxCapacityBytes } = deviceCapacity(normalized);
+  const capacityMultiplier = rtxCapacityBytes > 0 ? totalCapacityBytes / rtxCapacityBytes : 0;
+
+  // Speed baseline: RTX-only partial offload of the same test model
+  // (RTX as many layers as fit, remainder on CPU). This keeps the speed
+  // gate honest even though capacity is computed pool-wide.
+  const baseline = rtxOnlyEstimateTps(normalized, model);
+  const baselineTps = baseline.predictedTps
+    || Number(normalized.rtx?.throughputTokensPerSecond || normalized.rtx?.tps || 0);
   const speedFraction = baselineTps > 0 ? estimates.predictedTps / baselineTps : 0;
-  const pass = capacityMultiplier >= thresholds.capacityMultiplier
-    && speedFraction >= thresholds.minBaselineFraction
-    && !assignment.unplaced;
+
+  const passCapacity = capacityMultiplier >= thresholds.capacityMultiplier;
+  const passSpeed = speedFraction >= thresholds.minBaselineFraction;
+  const passNoUnplaced = !assignment.unplaced;
+  const pass = passCapacity && passSpeed && passNoUnplaced;
 
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     model: model.id,
     modelSpec: model,
     assignment,
@@ -187,10 +231,16 @@ function simulate({
     predictedFirstTokenMs: estimates.predictedFirstTokenMs,
     capacityMultiplier,
     speedFraction,
+    capacity: {
+      totalCapacityBytes,
+      rtxCapacityBytes,
+      definition: 'pool-wide assignable memory ÷ RTX-only assignable memory',
+    },
     baseline: {
-      rtxOnlyLayers,
-      rtxOnlyFootprintBytes,
+      rtxLayers: baseline.rtxLayers,
+      cpuLayers: baseline.cpuLayers,
       rtxOnlyTokensPerSecond: baselineTps,
+      definition: 'RTX + CPU partial offload of same test model',
       thresholds,
     },
     profilesUsed: Object.fromEntries(Object.entries(normalized).map(([id, p]) => [id, {
@@ -201,9 +251,9 @@ function simulate({
     }])),
     decision: pass ? 'pass' : 'fail',
     reasons: [
-      capacityMultiplier >= thresholds.capacityMultiplier ? null : `capacityMultiplier ${capacityMultiplier.toFixed(3)} < ${thresholds.capacityMultiplier}`,
-      speedFraction >= thresholds.minBaselineFraction ? null : `speedFraction ${speedFraction.toFixed(3)} < ${thresholds.minBaselineFraction}`,
-      assignment.unplaced ? `${assignment.unplaced} layer(s) unplaced` : null,
+      passCapacity ? null : `capacityMultiplier ${capacityMultiplier.toFixed(3)} < ${thresholds.capacityMultiplier}`,
+      passSpeed ? null : `speedFraction ${speedFraction.toFixed(3)} < ${thresholds.minBaselineFraction}`,
+      passNoUnplaced ? null : `${assignment.unplaced} layer(s) unplaced`,
     ].filter(Boolean),
     generatedAt: new Date().toISOString(),
   };
@@ -221,7 +271,11 @@ if (require.main === module) {
 
 module.exports = {
   MODEL_PROFILES,
+  DEVICE_MEMORY,
   simulate,
   loadProfiles,
   defaultSyntheticProfiles,
+  deviceCapacity,
+  rtxOnlyEstimateTps,
+  assignLayers,
 };

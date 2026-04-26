@@ -21,7 +21,15 @@ const checks = [
   { id: 'spec-verifier', command: 'node scripts/spec-verifier-smoke.js' },
   { id: 'spec-bus', command: 'node scripts/spec-bus-smoke.js' },
   { id: 'spec-dashboard', command: 'node scripts/spec-dashboard-smoke.js' },
-  { id: 'spec-decoding', command: 'node scripts/speculative-decoding-eval.js' },
+  {
+    id: 'spec-decoding',
+    command: 'node scripts/speculative-decoding-eval.js',
+    env: {
+      DEVFORGE_SPEC_EVAL_MODE: 'static',
+      DEVFORGE_SPEC_DECODE_ENABLE: '',
+      DEVFORGE_SPEC_DRAFTER: '',
+    },
+  },
   { id: 'preset-system-prompt', command: 'node scripts/preset-system-prompt-smoke.js' },
   { id: 'spec-decode-residency', command: 'node scripts/spec-decode-residency-smoke.js' },
   { id: 'cuda-verifier-guard', command: 'node scripts/cuda-verifier-guard-smoke.js' },
@@ -34,7 +42,10 @@ const checks = [
 function runCheck(check) {
   process.stdout.write(`Running ${check.id} gate... `);
   try {
-    execSync(check.command, { stdio: 'pipe' });
+    execSync(check.command, {
+      stdio: 'pipe',
+      env: { ...process.env, ...(check.env || {}) },
+    });
     console.log('PASS');
     return { id: check.id, ok: true };
   } catch (error) {

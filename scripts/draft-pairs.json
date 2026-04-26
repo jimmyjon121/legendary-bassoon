@@ -8,5 +8,13 @@
     "pairs[].family": "Optional. Display label, used in the dashboard.",
     "pairs[].score": "Optional. 0.0..1.0 -- 1.0 = drop-in pair, 0.7 = adapter required, < 0.5 = unsupported."
   },
-  "pairs": []
+  "pairs": [
+    {
+      "main": "qwen2.5:1.5b",
+      "draft": "qwen2.5:0.5b",
+      "tokenizerId": "qwen2",
+      "family": "qwen2.5",
+      "score": 1.0
+    }
+  ]
 }
