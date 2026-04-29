@@ -58,5 +58,7 @@ Required fields:
 - `sim-14b.json`: simulator output for the mandatory 14B target.
 - `sim-30b.json`: simulator output for the best-effort 30B target when enough profile data exists.
 - `decision.json`: machine-readable PASS/FAIL result from `mosaic-gate1-decide.js`.
+- `gate2-decision.json`: machine-readable PASS/FAIL/BLOCKED result from `mosaic-gate2-eval.js`.
 
 `docs/perf/mosaic-gate1.md` is the human-readable canonical decision report.
+`docs/perf/mosaic-gate2.md` is the human-readable Gate 2 runtime report.

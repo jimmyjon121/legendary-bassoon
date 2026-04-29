@@ -21,7 +21,9 @@ function transformSessionStoreSource() {
     .replace(/^import .*;\r?\n/gm, '')
     .replace('export const useChatV2SessionStore = create(', 'const useChatV2SessionStore = create(')
     .replace('export const CHAT_V2_BACKEND_OVERRIDES = ALLOWED_BACKEND_OVERRIDES;', 'const CHAT_V2_BACKEND_OVERRIDES = ALLOWED_BACKEND_OVERRIDES;')
-    .concat('\nmodule.exports = { useChatV2SessionStore, CHAT_V2_BACKEND_OVERRIDES };\n');
+    .replace('export const CHAT_V2_TASK_INTENTS = ALLOWED_TASK_INTENTS;', 'const CHAT_V2_TASK_INTENTS = ALLOWED_TASK_INTENTS;')
+    .replace('export const CHAT_V2_ADVANCED_KEYS = ALLOWED_ADVANCED_KEYS;', 'const CHAT_V2_ADVANCED_KEYS = ALLOWED_ADVANCED_KEYS;')
+    .concat('\nmodule.exports = { useChatV2SessionStore, CHAT_V2_BACKEND_OVERRIDES, CHAT_V2_TASK_INTENTS, CHAT_V2_ADVANCED_KEYS };\n');
 }
 
 function createZustandStub() {

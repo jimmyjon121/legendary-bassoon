@@ -39,14 +39,15 @@ export function createElectronRuntimeAdapter(deps = {}) {
     throw new Error('Electron API not available for Chat V2 runtime.');
   }
 
-  const resolveInferenceOptions = async (request = {}) => {
-    let options = {};
+  const resolveInferenceOptions = async (request = {}, controlOptions = {}) => {
+    let inferenceOptions = {};
+    const includeMetadata = Boolean(controlOptions.includeMetadata);
 
     if (typeof deps.getInferenceOptions === 'function') {
       try {
         const fromDeps = await deps.getInferenceOptions(request);
         if (fromDeps && typeof fromDeps === 'object') {
-          options = { ...options, ...fromDeps };
+          inferenceOptions = { ...inferenceOptions, ...fromDeps };
         }
       } catch (_) {
         // Non-blocking.
@@ -55,7 +56,7 @@ export function createElectronRuntimeAdapter(deps = {}) {
       try {
         const fromRuntime = await raw.getModelInferenceParams();
         if (fromRuntime && typeof fromRuntime === 'object') {
-          options = { ...options, ...fromRuntime };
+          inferenceOptions = { ...inferenceOptions, ...fromRuntime };
         }
       } catch (_) {
         // Non-blocking.
@@ -63,10 +64,11 @@ export function createElectronRuntimeAdapter(deps = {}) {
     }
 
     if (request?.options && typeof request.options === 'object') {
-      options = { ...options, ...request.options };
+      inferenceOptions = { ...inferenceOptions, ...request.options };
     }
 
-    return cleanInferenceOptions(options);
+    if (includeMetadata) return inferenceOptions;
+    return cleanInferenceOptions(inferenceOptions);
   };
 
   const normalizeBranchId = (value) => {
@@ -425,7 +427,7 @@ export function createElectronRuntimeAdapter(deps = {}) {
     },
 
     async getInferenceOptions(request = {}) {
-      return resolveInferenceOptions(request || {});
+      return resolveInferenceOptions(request || {}, { includeMetadata: true });
     },
 
     async generateChat(request = {}) {
@@ -433,7 +435,9 @@ export function createElectronRuntimeAdapter(deps = {}) {
       if (typeof send !== 'function') {
         throw new Error('Missing sendToLLM adapter.');
       }
-      const options = await resolveInferenceOptions(request);
+      const options = request?.options && Object.keys(request.options).length > 0
+        ? cleanInferenceOptions(request.options)
+        : await resolveInferenceOptions(request);
       const result = await send({
         model: request.model,
         messages: request.messages,
@@ -449,6 +453,8 @@ export function createElectronRuntimeAdapter(deps = {}) {
         forceModelFallback: request.forceModelFallback === true,
         priority: Number.isFinite(Number(request.priority)) ? Number(request.priority) : -20,
         ...(request.forceBackend ? { forceBackend: String(request.forceBackend).trim() } : {}),
+        ...(request.softBackendPreference ? { softBackendPreference: String(request.softBackendPreference).trim() } : {}),
+        ...(request.experiencePlan ? { experiencePlan: request.experiencePlan } : {}),
       });
       return result;
     },
@@ -456,7 +462,9 @@ export function createElectronRuntimeAdapter(deps = {}) {
     async streamChat(request, onEvent) {
       const stream = deps.streamChat || raw?.streamFromLLM;
       if (!stream) throw new Error('Missing streamFromLLM adapter.');
-      const options = await resolveInferenceOptions(request);
+      const options = request?.options && Object.keys(request.options).length > 0
+        ? cleanInferenceOptions(request.options)
+        : await resolveInferenceOptions(request);
 
       const safeOnEvent = (event) => {
         try { onEvent?.(event); } catch (err) {
@@ -479,6 +487,8 @@ export function createElectronRuntimeAdapter(deps = {}) {
           forceModelFallback: request.forceModelFallback === true,
           priority: Number.isFinite(Number(request.priority)) ? Number(request.priority) : -20,
           ...(request.forceBackend ? { forceBackend: String(request.forceBackend).trim() } : {}),
+          ...(request.softBackendPreference ? { softBackendPreference: String(request.softBackendPreference).trim() } : {}),
+          ...(request.experiencePlan ? { experiencePlan: request.experiencePlan } : {}),
         },
         (chunk) => {
           if (chunk?.error || chunk?.status === 'error') {

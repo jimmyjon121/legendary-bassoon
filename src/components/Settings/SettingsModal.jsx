@@ -65,6 +65,8 @@ export function SettingsModal() {
     llamaQuantizePath: '',
     pythonPath: '',
     searxngUrl: '',
+    discoveryNetworkAccess: 'on',
+    vaultModelGating: 'open',
   });
 
   useEffect(() => {
@@ -83,6 +85,8 @@ export function SettingsModal() {
           'tools.pythonPath',
           'searxngUrl',
           'keepModelLoaded',
+          'discoveryNetworkAccess',
+          'vaultModelGating',
         ]);
         
         if (batch) {
@@ -100,6 +104,8 @@ export function SettingsModal() {
             pythonPath: batch['tools.pythonPath'] || '',
             searxngUrl: batch.searxngUrl || '',
             keepModelLoaded: ['auto', 'always', 'timed'].includes(batch.keepModelLoaded) ? batch.keepModelLoaded : 'auto',
+            discoveryNetworkAccess: ['on', 'cache-only', 'off'].includes(batch.discoveryNetworkAccess) ? batch.discoveryNetworkAccess : 'on',
+            vaultModelGating: ['open', 'allowlist'].includes(batch.vaultModelGating) ? batch.vaultModelGating : 'open',
           }));
         }
       } catch (error) {
@@ -132,6 +138,8 @@ export function SettingsModal() {
         'tools.pythonPath': settings.pythonPath || '',
         searxngUrl: settings.searxngUrl || '',
         keepModelLoaded: settings.keepModelLoaded || 'auto',
+        discoveryNetworkAccess: settings.discoveryNetworkAccess || 'on',
+        vaultModelGating: settings.vaultModelGating || 'open',
       });
       saved = true;
     } catch (error) {
@@ -2047,6 +2055,39 @@ function PrivacySettings({ settings, setSettings, onClose }) {
               >
                 {updatingLocalOnly ? 'Updating...' : localOnly ? 'Enabled' : 'Disabled'}
               </button>
+            </div>
+          </div>
+
+          <div className="p-4 rounded-lg bg-forge-bg border border-forge-border space-y-4">
+            <div>
+              <label className="block text-sm text-text-primary mb-2">Catalogue discovery network access</label>
+              <select
+                value={settings.discoveryNetworkAccess || 'on'}
+                onChange={(event) => setSettings((prev) => ({ ...prev, discoveryNetworkAccess: event.target.value }))}
+                className="input"
+              >
+                <option value="on">On - online plus cache</option>
+                <option value="cache-only">Cache-only</option>
+                <option value="off">Off - installed metadata only</option>
+              </select>
+              <p className="text-xs text-text-muted mt-1">
+                Controls whether the model catalogue enriches installed models with online provider metadata.
+              </p>
+            </div>
+
+            <div>
+              <label className="block text-sm text-text-primary mb-2">Vault model gating</label>
+              <select
+                value={settings.vaultModelGating || 'open'}
+                onChange={(event) => setSettings((prev) => ({ ...prev, vaultModelGating: event.target.value }))}
+                className="input"
+              >
+                <option value="open">Open - show all installed models</option>
+                <option value="allowlist">Allow-list only</option>
+              </select>
+              <p className="text-xs text-text-muted mt-1">
+                Vault enrichment stays cache-only. Allow-list mode only shows models marked as vault allowed.
+              </p>
             </div>
           </div>
 

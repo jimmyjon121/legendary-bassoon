@@ -8,6 +8,7 @@ function formatNumber(value, suffix = '') {
 
 export function MosaicLab() {
   const [artifacts, setArtifacts] = useState(null);
+  const [probe, setProbe] = useState(null);
   const [error, setError] = useState(null);
 
   useEffect(() => {
@@ -22,6 +23,8 @@ export function MosaicLab() {
           return;
         }
         setArtifacts(result);
+        const probeResult = await window.electronAPI?.mosaicProbe?.({ requireCombinedBackends: true });
+        if (!cancelled) setProbe(probeResult || null);
       } catch (err) {
         if (!cancelled) setError(err?.message || String(err));
       }
@@ -42,6 +45,8 @@ export function MosaicLab() {
   if (!artifacts) return null;
   const profiles = artifacts.profiles || {};
   const decision = artifacts.decision || null;
+  const gate2 = artifacts.gate2 || null;
+  const gate2Status = gate2?.status || gate2?.decision || 'pending';
 
   return (
     <div className="fixed bottom-4 right-4 z-50 w-[420px] max-h-[70vh] overflow-auto rounded-2xl border border-violet-500/30 bg-black/92 p-4 text-xs text-zinc-100 shadow-2xl">
@@ -70,6 +75,39 @@ export function MosaicLab() {
           </div>
         </div>
       )}
+
+      <div className="mt-3 rounded-xl border border-white/10 bg-white/[0.03] p-3">
+        <div className="flex items-center justify-between gap-2">
+          <div className="font-medium">Gate 2 Runtime</div>
+          <div className={`rounded-full px-2 py-1 text-[10px] font-semibold ${
+            gate2Status === 'pass' ? 'bg-emerald-500/20 text-emerald-300'
+              : gate2Status === 'fail' ? 'bg-rose-500/20 text-rose-300'
+                : 'bg-amber-500/20 text-amber-200'
+          }`}>
+            {String(gate2Status).toUpperCase()}
+          </div>
+        </div>
+        <div className="mt-2 grid grid-cols-2 gap-2 text-zinc-400">
+          <div>Model</div>
+          <div className="text-right text-zinc-100">{gate2?.model || 'deepseek-coder:33b'}</div>
+          <div>Baseline TPS</div>
+          <div className="text-right text-zinc-100">{formatNumber(gate2?.baseline?.avgTokensPerSecond)}</div>
+          <div>Mosaic TPS</div>
+          <div className="text-right text-zinc-100">{formatNumber(gate2?.mosaic?.avgTokensPerSecond)}</div>
+          <div>Speedup</div>
+          <div className="text-right text-zinc-100">{formatNumber(gate2?.speedup, 'x')}</div>
+        </div>
+        {(gate2?.reason || probe?.blockedReason) && (
+          <div className="mt-2 text-[11px] text-amber-200">
+            {gate2?.reason || probe?.blockedReason}
+          </div>
+        )}
+        {probe && (
+          <div className="mt-2 text-[10px] text-zinc-500">
+            Probe: {probe.available ? 'ready' : 'blocked'} {probe.native ? '(native)' : '(js fallback)'}
+          </div>
+        )}
+      </div>
 
       <div className="mt-3 space-y-2">
         {Object.entries(profiles).map(([name, profile]) => (

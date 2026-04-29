@@ -16,6 +16,20 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 
+function traceNpuDebug(payload = {}) {
+  if (process.env.DEVFORGE_DEBUG_NPU_TRACE !== '1') return;
+  try {
+    const line = JSON.stringify({
+      source: 'npu-bridge',
+      ...payload,
+      timestamp: Date.now(),
+    }) + '\n';
+    fs.appendFileSync(path.join(process.cwd(), 'debug-npu-trace.log'), line);
+  } catch (_) {
+    // Debug tracing must never affect runtime behavior.
+  }
+}
+
 // Phase 1: ordered for Intel NPU 3 (~13 TOPS) on the target Copilot+ hardware.
 // Small models fit the compute budget and leave iGPU/RTX free for heavier work.
 // Anything >3B is deprioritized; users who explicitly want a bigger NPU model
@@ -1327,6 +1341,15 @@ except Exception as e:
    */
   async startServer(options = {}) {
     console.log('[NpuBridge] startServer called');
+    traceNpuDebug({
+      location: 'startServer-entry',
+      message: 'startServer entry',
+      data: {
+        device: options?.device || null,
+        hadServerProcess: !!this.serverProcess,
+        exitCode: this.serverProcess ? this.serverProcess.exitCode : null,
+      },
+    });
 
     if (this.serverProcess) {
       // Check if the managed process is still alive.
@@ -1434,6 +1457,11 @@ except Exception as e:
 
     return new Promise((resolve) => {
       console.log('[NpuBridge] Spawning server process...');
+      traceNpuDebug({
+        location: 'startServer-spawn',
+        message: 'about to spawn python server',
+        data: { device: options?.device || null, hadServerProcessBeforeSpawn: !!this.serverProcess },
+      });
 
       let resolvedDevice = options.device;
       if (!resolvedDevice) {
@@ -1458,6 +1486,11 @@ except Exception as e:
           },
           stdio: ['pipe', 'pipe', 'pipe'],
           windowsHide: true
+        });
+        traceNpuDebug({
+          location: 'startServer-spawned',
+          message: 'spawn returned, child PID assigned',
+          data: { pid: this.serverProcess?.pid || null, device: resolvedDevice },
         });
       } catch (spawnError) {
         console.error('[NpuBridge] Failed to spawn server process:', spawnError.message);

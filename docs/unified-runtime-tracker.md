@@ -9,17 +9,20 @@ Living document: breadcrumbs, decisions, learnings, and status for the multi-pha
 
 ## North Star
 
-Make DevForge feel like LM Studio for model picking and long context, *and* make this laptop's NPU + Intel Arc + RTX + 32 GB RAM all visibly contribute to every chat — not just sit idle while Ollama uses one chip.
+Make DevForge feel like LM Studio for everyday local model work: model picking, local GGUF loading, long-context control, warm/eject/unload, streaming recovery, per-model presets, and clear backend behavior should feel stable and understandable. The ambitious layer is local-first Smart Autopilot plus opt-in power controls; Mosaic and speculative decoding stay hidden labs until live speedup gates prove they help.
 
 ---
 
 ## Current Status
 
-- **Phase:** Phase 2 (NPU-Drafted Speculative Decoding) — **infrastructure shipped; perf gate open**
+- **Phase:** Phase 8 (backend decision timeline + last-good Autopilot hints) - **implemented / validation green**
 - **Week:** 1
-- **Blocked on:** live direct-vs-spec measurement and the NPU KV-cache reuse latency target; spec-decode is hard-disabled by default and requires `DEVFORGE_SPEC_DECODE_ENABLE=1` for experimental runs.
-- **Next concrete action:** Author the Phase 3 Mosaic build plan from `docs/perf/mosaic-gate1.md`, while keeping speculative decoding opt-in until a smaller tokenizer-matched drafter can avoid RTX residency contention.
-- **Gate status:** Release gate green; Phase 3 Gate 1 PASSED with corrected math (`6.225x` device-pool capacity); Phase 2 acceptance is recovered with `DEVFORGE_SPEC_DRAFTER=llamanode` (`avgAcceptance=1.000`) but the speedup gate remains open (`avgRealSpeedup=0.019x` for same-size self-spec).
+- **Shipping bar:** normal Chat V2 and local model workflows must stay LM Studio-quality: stable model picker, local GGUF loading, context picker, warm/eject/unload, per-model system prompts, backend override, streaming recovery, and fallbacks.
+- **Phase 4 state:** Smart Autopilot is implemented around the main-process `model-experience-resolver` and Chat V2 advanced controls, with the legacy optimizer kept as clean fallback.
+- **Lab state:** Mosaic Gate 2 failed live on `deepseek-coder:33b` (`4.7 TPS` baseline, `4.3 TPS` Mosaic, `0.915x` vs `1.5x` required), so Mosaic stays hidden behind `DEVFORGE_MOSAIC_DEV=1` + `DEVFORGE_MOSAIC_ENABLE=1`. Speculative decoding remains opt-in via `DEVFORGE_SPEC_DECODE_ENABLE=1`.
+- **Validation status:** `node scripts/backend-decision-timeline-smoke.js`, `node scripts/model-experience-autopilot-smoke.js`, `node scripts/model-load-confidence-smoke.js`, `npm run eval:release-gate`, `npm run build:app`, and `npm run lint -- --quiet` pass on 2026-04-27. Vite still reports existing large-chunk warnings.
+- **Manual smoke status:** normal-mode Chat V2 smoke is green with Mosaic env flags absent, including local GGUF direct load after the selector/store fix.
+- **Next concrete action:** manual-smoke the Phase 8 Load Confidence timeline / Use Last Good flow in Chat V2, then decide whether to polish Workbench plan-only UX or build the isolated eval runner.
 
 ---
 
@@ -160,6 +163,43 @@ Earlier Phase 2 notes assumed node-llama-cpp 3.18.1 fell back to CPU because the
 - **Mosaic correction.** v0.4.6's Gate 1 failure was a simulator math bug. The corrected pool-wide capacity calculation reports `capacityMultiplier=6.225x` at `100%` RTX-only speed, so Phase 3 moves to `gate1-passed`.
 - **Phase 2 acceptance recovered.** Added `LlamaNodeBackend.draftTokens()` and `DEVFORGE_SPEC_DRAFTER=llamanode`; a self-spec run on `qwen2.5:1.5b` now accepts 4/4 drafted tokens per batch (`avgAcceptance=1.000`, `failures=0`). Artifact: `scripts/.spec-eval-v048-acceptance.json`.
 - **Still opt-in.** Speedup remains unresolved (`avgRealSpeedup=0.019x`) because same-size self-spec cannot be faster and the smaller 0.5B drafter currently causes VRAM/residency contention on the 8GB RTX. The next Phase 2 attempt should focus on topology, not verifier correctness.
+
+### 2026-04-26 — Phase 3 hidden Mosaic MVP scaffold
+- **Quality bar.** Added the explicit LM Studio Quality Bar to `docs/mosaic-architecture.md`: normal chat/model workflows must not inherit Mosaic risk.
+- **Hidden runtime.** Added the `mosaic-coordinator` facade, Rust `napi-rs` scaffold, hidden `mosaic` backend, dev-only probe IPC, and Gate 2 status in MosaicLab. Backend registration and force-backend sanitization both require `DEVFORGE_MOSAIC_DEV=1` plus `DEVFORGE_MOSAIC_ENABLE=1`.
+- **Gate 2.** Added `scripts/mosaic-gate2-eval.js` and `scripts/mosaic-gate2-smoke.js`. Canonical target is `deepseek-coder:33b`; current artifact is BLOCKED until the hidden runtime flags/native runner are present.
+- **Native build + runner readiness.** Added `npm run build:native:mosaic`, `npm run eval:mosaic-probe`, package inclusion for `native/mosaic-coordinator/index.node`, and stricter runner capability probing.
+- **Live Gate 2 result.** Installed Rust/cargo and winget `llama.cpp` Vulkan runner, built `native/mosaic-coordinator/index.node`, refreshed Arc profile through live `Vulkan1`, and ran live Gate 2 on `deepseek-coder:33b`. Decision is **FAIL**: RTX+CPU baseline `4.7 TPS`, tuned Mosaic `4.3 TPS`, speedup `0.915x` vs required `1.5x`. Mosaic remains hidden/dev-only.
+
+### 2026-04-26 - Phase 5 leaving-off ledger
+- **Status.** Treat the tree as a Phase 3/4 handoff under stabilization, not a finished release. Phase 4 Autopilot is present; Phase 5 is reconciling truth, gates, UI explanation, recovery, and normal-mode smoke.
+- **Dirty tree buckets.** Phase 3 Mosaic: coordinator facade, hidden backend, native scaffold, Gate 2 scripts, and Gate 2 artifacts. Phase 4 Autopilot: resolver, IPC, Chat V2 option flow, session advanced controls, preset migration/UI, and Autopilot smoke. Startup visual work: `src/components/Startup/*` and related startup styling. OpenVINO/NPU changes: `scripts/openvino-model.json` and `scripts/start-npu-server.py`. Docs/artifacts: tracker, Mosaic architecture notes, profile JSON, and perf decisions.
+- **Validation status.** Static Mosaic and Autopilot smoke coverage exists and is part of release-gate. Fresh Phase 5 validation passed on 2026-04-26: `npm run eval:release-gate`, `npm run build:app`, `npm run lint -- --quiet`, `node scripts/model-experience-autopilot-smoke.js`, and `node scripts/mosaic-gate2-smoke.js`.
+- **Manual smoke.** Normal Chat V2 with `DEVFORGE_MOSAIC_DEV` and `DEVFORGE_MOSAIC_ENABLE` absent passed for normal stream, Ollama model switch, context picker clamp, warm/eject/unload, stream/retry after failure, preset save, Advanced drawer, reset to Auto, and local GGUF direct load. Local GGUF initially failed because the selector registered the file but selected the display name instead of the returned `gguf:<path>` id; patched in `ModelSelector`, `modelSlice`, and `llamanode-smoke`, then re-tested successfully.
+- **Model health preflight.** Chat V2 now has a compact readiness chip and expandable preflight detail surface for model selection, backend readiness, context cap, memory pressure, route status, warnings, and Autopilot diagnostics.
+- **Guided recovery.** Chat V2 error recovery now offers same-state retry, safe Auto/fallback retry, and unload/warm/retry, with blocked-state explanation pulled from preflight and Autopilot warnings.
+- **Containment.** Mosaic remains hidden because Gate 2 failed live; speculative decoding remains opt-in because its live speedup gate is not proven. Neither should alter normal chat, Autopilot, or model workflows.
+- **Next workstreams.** Stabilize release gates first, then continue with the Model Experience Workbench, local ideal-parameter profiles, better task detection, and longitudinal model telemetry.
+
+### 2026-04-26 - Phase 6 Model Experience Workbench MVP
+- **Workbench.** Added a Chat V2 Model Experience Workbench opened from the Autopilot/model-health strip with Plan, Profiles, Eval, History, and Save tabs.
+- **Local eval suite.** Added a bounded full local eval path over chat, code, reasoning, creative, and research-style prompts. Runs go through the inference orchestrator and Autopilot plan metadata rather than the legacy `model-testing-service`.
+- **Telemetry.** Added local SQLite Workbench run/result history with per-profile metrics, quality labels, backend trace, memory warning, output preview, and recommended profile calculation.
+- **Save/apply.** Winners can be applied to the current chat session or saved through the existing sanitized model preset path.
+- **Containment.** Workbench keeps Mosaic hidden behind existing env gates and does not enable speculative decoding.
+
+### 2026-04-27 - Phase 7 Model Load Confidence + First-Run Guidance
+- **Load confidence.** Added `electron/services/model-load-confidence.js` with local-only `ready` / `check` / `blocked` confidence resolution, stable readiness checks, local GGUF file/status detail, Safe Fit risk detection, warmup state, and last-known-good profile lookup.
+- **Chat V2 surface.** Replaced the loose health chip with Load Ready / Load Check / Load Blocked, plus an expanded detail panel for checks, warnings, local GGUF status, warm/reload/unload, Safe Fit, Reset Auto, and Reset Preset.
+- **Local memory.** Successful warmups and generations record last-known-good load profiles; failures record local failure outcomes. This is advisory only and does not route to cloud providers.
+- **Validation.** Added `scripts/model-load-confidence-smoke.js` to release-gate.
+
+### 2026-04-27 - Phase 8 Backend Decision Timeline + Last-Good Autopilot Hints
+- **Timeline storage.** Extended `model-load-confidence` with a local SQLite `model_backend_decisions` table, bounded timeline query, sanitized event payloads, and repeated-backend-failure memory.
+- **IPC/API.** Added `model:recordBackendDecision` and `model:getBackendDecisionTimeline`, bridged through preload and `electronAPI`.
+- **Autopilot hints.** `model-experience-resolver` now accepts `lastKnownGood` as a soft hint. It may lower context/batch/output/KV toward known-good values and set `softBackendPreference`; explicit session pins, preset pins, saved preset values, Mosaic, and spec decode still win or remain excluded.
+- **Chat V2 UX.** Load Confidence now shows a Backend Decision Timeline, Failure Memory, and a `Use Last Good` action that applies known-good context/batch/KV/output cap plus soft backend preference to the current chat session only.
+- **Validation.** Added `scripts/backend-decision-timeline-smoke.js` to release-gate. Fresh validation passed on 2026-04-27: targeted Phase 8 smoke, adjacent Autopilot/load-confidence smokes, full release gate, quiet lint, and production build.
 
 ---
 

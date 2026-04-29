@@ -5,6 +5,15 @@ function isSyntheticModel(value = '') {
   return String(value || '').trim().toLowerCase().startsWith('npu:');
 }
 
+function isGgufModel(value = '') {
+  return String(value || '').trim().toLowerCase().startsWith('gguf:');
+}
+
+function getGgufModelPath(value = '') {
+  const raw = String(value || '').trim();
+  return isGgufModel(raw) ? raw.slice(5).trim() : raw;
+}
+
 function getSyntheticModelTarget(value = '') {
   const raw = String(value || '').trim();
   if (!isSyntheticModel(raw)) return raw;
@@ -16,6 +25,13 @@ function getSyntheticModelDisplayName(value = '') {
   if (!target) return 'NPU model';
   const parts = target.split(/[\\/]/).filter(Boolean);
   return parts[parts.length - 1] || target;
+}
+
+function getGgufModelDisplayName(value = '') {
+  const target = getGgufModelPath(value);
+  if (!target) return 'Local GGUF';
+  const parts = target.split(/[\\/]/).filter(Boolean);
+  return (parts[parts.length - 1] || target).replace(/\.gguf$/i, '');
 }
 
 function buildSyntheticModelInfo(model = '', options = {}) {
@@ -47,6 +63,53 @@ function buildSyntheticModelInfo(model = '', options = {}) {
     backend: 'openvino-npu',
     synthetic: true,
     displayName: getSyntheticModelDisplayName(model),
+  };
+}
+
+function buildGgufModelInfo(model = '', options = {}) {
+  const path = getGgufModelPath(model);
+  const displayName = getGgufModelDisplayName(model);
+  const backend = Array.isArray(options?.backends)
+    ? options.backends.find((entry) => entry?.id === 'llamanode')
+    : null;
+  const available = backend ? backend.available !== false : true;
+
+  return {
+    success: true,
+    model,
+    family: 'gguf',
+    parameterSize: null,
+    quantizationLevel: null,
+    contextLength: 8192,
+    rawContextLength: 8192,
+    effectiveContextLength: 8192,
+    format: 'gguf',
+    parentModel: path || null,
+    template: null,
+    templateMode: 'native_chat',
+    supportsNativeChat: true,
+    baselineStatus: available ? 'healthy' : 'caution',
+    baselineReasons: available ? [] : ['llamanode_backend_unavailable'],
+    warnings: available ? [] : ['Local GGUF runtime is not available yet.'],
+    backend: 'llamanode',
+    synthetic: true,
+    displayName,
+  };
+}
+
+function normalizeGgufHealth(model = '', backends = []) {
+  const backend = Array.isArray(backends)
+    ? backends.find((entry) => entry?.id === 'llamanode')
+    : null;
+  const available = backend ? backend.available !== false : true;
+  return {
+    healthy: available,
+    status: available ? 'online' : (backend?.healthStatus || 'offline'),
+    models: 1,
+    error: available ? null : (backend?.error || 'Local GGUF runtime is unavailable'),
+    checkedAt: Date.now(),
+    model,
+    backend: 'llamanode',
   };
 }
 
@@ -166,6 +229,12 @@ const DEFAULT_LLM_RUNTIME = Object.freeze({
   requestedModel: null,
   effectiveModel: null,
   effectiveOptions: {},
+  lastExperiencePlan: null,
+  selectedTaskIntent: null,
+  overrideTrace: [],
+  clampReasons: [],
+  softBackendPreference: null,
+  backendDecisionSource: null,
   modeReasons: [],
   offloadEvidence: [],
   hardware: {
@@ -215,6 +284,16 @@ function normalizeRuntimeState(runtimeState, fallbacks = {}) {
     effectiveOptions: runtimeState?.effectiveOptions && typeof runtimeState.effectiveOptions === 'object'
       ? runtimeState.effectiveOptions
       : {},
+    lastExperiencePlan: runtimeState?.lastExperiencePlan || null,
+    selectedTaskIntent: runtimeState?.selectedTaskIntent || runtimeState?.lastExperiencePlan?.taskIntent || null,
+    overrideTrace: Array.isArray(runtimeState?.overrideTrace)
+      ? runtimeState.overrideTrace
+      : (Array.isArray(runtimeState?.lastExperiencePlan?.overrideTrace) ? runtimeState.lastExperiencePlan.overrideTrace : []),
+    clampReasons: Array.isArray(runtimeState?.clampReasons)
+      ? runtimeState.clampReasons
+      : (Array.isArray(runtimeState?.lastExperiencePlan?.clampReasons) ? runtimeState.lastExperiencePlan.clampReasons : []),
+    softBackendPreference: runtimeState?.softBackendPreference || null,
+    backendDecisionSource: runtimeState?.backendDecisionSource || runtimeState?.lastBackendDecision?.selectionSource || null,
     modeReasons: Array.isArray(runtimeState?.modeReasons) ? runtimeState.modeReasons : [],
     offloadEvidence: Array.isArray(runtimeState?.offloadEvidence) ? runtimeState.offloadEvidence.slice(-25) : [],
     hardware: {
@@ -321,13 +400,13 @@ export const createModelSlice = (set, get) => {
     const desiredModel = requestedModel !== undefined
       ? requestedModel
       : (get().currentModel || savedModel || null);
-    const resolvedModel = isSyntheticModel(desiredModel)
+    const resolvedModel = isSyntheticModel(desiredModel) || isGgufModel(desiredModel)
       ? desiredModel
       : resolveModelName(desiredModel, models);
     const didResolveChange = resolvedModel !== get().currentModel;
     const effectiveHealth = isSyntheticModel(resolvedModel)
       ? normalizeSyntheticHealth(resolvedModel, runtimeState, npuStatus)
-      : health;
+      : (isGgufModel(resolvedModel) ? normalizeGgufHealth(resolvedModel, backends) : health);
 
     if (persistResolvedSelection && api?.setSettings && resolvedModel !== desiredModel) {
       try {
@@ -409,7 +488,7 @@ export const createModelSlice = (set, get) => {
     resolveModelSelection: async (requestedModel, options = {}) => {
       const shouldRefresh = options.refresh !== false;
       let models = Array.isArray(get().availableModels) ? get().availableModels : [];
-      if (isSyntheticModel(requestedModel)) {
+      if (isSyntheticModel(requestedModel) || isGgufModel(requestedModel)) {
         return { modelName: requestedModel, models };
       }
       let modelName = resolveModelName(requestedModel, models);
@@ -438,6 +517,7 @@ export const createModelSlice = (set, get) => {
         forceRefresh = false,
       } = options;
       const syntheticModel = isSyntheticModel(model);
+      const ggufModel = isGgufModel(model);
 
       if (!model) {
         set({
@@ -480,6 +560,14 @@ export const createModelSlice = (set, get) => {
           npuStatus = null;
         }
         info = buildSyntheticModelInfo(model, { npuStatus });
+      } else if (ggufModel) {
+        let backends = [];
+        try {
+          backends = await api?.getBackends?.();
+        } catch {
+          backends = [];
+        }
+        info = buildGgufModelInfo(model, { backends });
       } else {
         const [infoResult, tuneResult] = await Promise.allSettled([
           api?.getModelInfo?.({ name: model, forceRefresh }),

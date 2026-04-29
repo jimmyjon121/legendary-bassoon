@@ -40,6 +40,9 @@ function main() {
   const ipcHandlers = read('electron/ipc-handlers.js');
   const preload = read('electron/preload.js');
   const ensureDeps = read('scripts/ensure-deps.js');
+  const modelSelector = read('src/components/ModelSelector/ModelSelector.jsx');
+  const modelSlice = read('src/stores/slices/modelSlice.js');
+  const electronApi = read('src/utils/electronAPI.js');
 
   // Dependency pin.
   assert(
@@ -203,6 +206,26 @@ function main() {
   assert(
     /unregisterLocalGguf:.*ipcRenderer\.invoke\('model:unregisterLocalGguf'/.test(preload),
     'preload must expose unregisterLocalGguf',
+    failures
+  );
+  assert(
+    /loadLocalGguf:.*safeCall\('loadLocalGguf'/.test(electronApi),
+    'renderer electronAPI wrapper must expose loadLocalGguf',
+    failures
+  );
+  assert(
+    (modelSelector.includes('window.electronAPI?.loadLocalGguf') || modelSelector.includes('electronAPI.loadLocalGguf'))
+      && modelSelector.includes('const finalModelId = res.id')
+      && modelSelector.includes('setModel(finalModelId)')
+      && !/const finalName = res\.name/.test(modelSelector),
+    'ModelSelector must select the returned gguf:<path> id instead of an Ollama display name',
+    failures
+  );
+  assert(
+    modelSlice.includes('function isGgufModel')
+      && modelSlice.includes('isGgufModel(desiredModel)')
+      && modelSlice.includes('buildGgufModelInfo'),
+    'model slice must preserve gguf:<path> selections outside Ollama tag resolution',
     failures
   );
 

@@ -203,6 +203,9 @@ export const api = {
   // Models
   scanSystemForModels: (options) => safeCall('scanSystemForModels', [options], { models: [], locations: [] }),
   bulkImportModels: (paths, options) => safeCall('bulkImportModels', [paths, options], { success: false }),
+  loadLocalGguf: (payload = {}) => safeCall('loadLocalGguf', [payload], { success: false }),
+  listLocalGgufs: () => safeCall('listLocalGgufs', [], { success: false, models: [] }),
+  unregisterLocalGguf: (payload = {}) => safeCall('unregisterLocalGguf', [payload], { success: false }),
   
   // Image Backend
   getImageBackendStatus: () => safeCall('getImageBackendStatus', [], { running: false }),
@@ -236,9 +239,11 @@ export const api = {
   isSpecDecodeDisabled: (payload = {}) =>
     safeCall('isSpecDecodeDisabled', [payload], { available: false, disabled: false }),
   isMosaicDevEnabled: () =>
-    safeCall('isMosaicDevEnabled', [], { enabled: false }),
+    safeCall('isMosaicDevEnabled', [], { enabled: false, runtimeEnabled: false }),
+  mosaicProbe: (payload = {}) =>
+    safeCall('mosaicProbe', [payload], { available: false, blockedReason: 'unavailable' }),
   readMosaicArtifacts: () =>
-    safeCall('readMosaicArtifacts', [], { success: false, profiles: {}, decision: null }),
+    safeCall('readMosaicArtifacts', [], { success: false, profiles: {}, decision: null, gate2: null }),
 
   // Power Mode
   getPowerModeStatus: () => safeCall('getPowerModeStatus', [], { enabled: false }),
@@ -259,6 +264,41 @@ export const api = {
   // Model Presets
   getModelPresets: (model, workspace) => safeCall('getModelPresets', [model, workspace], []),
   saveModelPreset: (preset) => safeCall('saveModelPreset', [preset], { success: false }),
+  resolveModelExperiencePlan: (payload = {}) =>
+    safeCall('resolveModelExperiencePlan', [payload], { success: false, plan: null, warnings: ['Resolver unavailable'], reasons: ['resolver-unavailable'] }),
+  resolveModelLoadConfidence: (payload = {}) =>
+    safeCall('resolveModelLoadConfidence', [payload], { success: false, status: 'blocked', checks: [], warnings: ['Load confidence unavailable'] }),
+  recordModelLoadOutcome: (payload = {}) =>
+    safeCall('recordModelLoadOutcome', [payload], { success: false }),
+  getLastKnownGoodModelLoad: (payload = {}) =>
+    safeCall('getLastKnownGoodModelLoad', [payload], null),
+  recordBackendDecision: (payload = {}) =>
+    safeCall('recordBackendDecision', [payload], { success: false }),
+  getBackendDecisionTimeline: (payload = {}) =>
+    safeCall('getBackendDecisionTimeline', [payload], []),
+  getModelSelectorInsights: (payload = {}) =>
+    safeCall('getModelSelectorInsights', [payload], { success: false, insights: {} }),
+  modelWorkbenchGetSnapshot: (payload = {}) =>
+    safeCall('modelWorkbenchGetSnapshot', [payload], { success: false, profiles: [], history: [], warnings: ['Workbench unavailable'] }),
+  modelWorkbenchBuildProfiles: (payload = {}) =>
+    safeCall('modelWorkbenchBuildProfiles', [payload], { success: false, profiles: [] }),
+  modelWorkbenchRunEval: (payload = {}) =>
+    safeCall('modelWorkbenchRunEval', [payload], { success: false, error: 'Workbench eval unavailable' }),
+  modelWorkbenchCancelEval: (payload = {}) =>
+    safeCall('modelWorkbenchCancelEval', [payload], { success: false }),
+  modelWorkbenchGetHistory: (payload = {}) =>
+    safeCall('modelWorkbenchGetHistory', [payload], []),
+  modelWorkbenchSaveWinner: (payload = {}) =>
+    safeCall('modelWorkbenchSaveWinner', [payload], { success: false }),
+  onModelWorkbenchProgress: (callback) => {
+    const raw = getAPI();
+    if (!raw?.onModelWorkbenchProgress || typeof callback !== 'function') return () => {};
+    try {
+      return raw.onModelWorkbenchProgress(callback);
+    } catch (_) {
+      return () => {};
+    }
+  },
 
   // Export
   exportConversation: (payload) => safeCall('exportConversation', [payload], { success: false }),
@@ -406,6 +446,16 @@ export const api = {
   createFolder: (folderPath) => safeCall('createFolder', [folderPath], false),
   checkPath: (targetPath) => safeCall('checkPath', [targetPath], { exists: false }),
   scanLMStudioModels: () => safeCall('scanLMStudioModels', [], { models: [], scannedPaths: [] }),
+  startModelDownload: (payload = {}) => safeCall('startModelDownload', [payload], { success: false }),
+  catalogSearch: (query, options = {}) => safeCall('catalogSearch', [query, options], { models: [], total: 0, providers: {} }),
+  catalogGetTrending: (options = {}) => safeCall('catalogGetTrending', [options], { models: [], providers: {} }),
+  catalogGetRecent: (options = {}) => safeCall('catalogGetRecent', [options], { models: [], providers: {} }),
+  catalogGetModelDetails: (provider, modelId) => safeCall('catalogGetModelDetails', [provider, modelId], null),
+  libraryGetAllModels: (options = {}) => safeCall('libraryGetAllModels', [options], []),
+  libraryAddModel: (modelData = {}) => safeCall('libraryAddModel', [modelData], null),
+  libraryUpdateModel: (id, updates = {}) => safeCall('libraryUpdateModel', [id, updates], false),
+  warmupModel: (model) => safeCall('warmupModel', [model], { success: false }),
+  unloadModel: () => safeCall('unloadModel', [], { success: false }),
   scanFolderForModels: (folderPath) => safeCall('scanFolderForModels', [folderPath], { models: [], error: null }),
 
   // Attachments (v2 first, legacy fallback)

@@ -37,7 +37,7 @@ export function StartupVisual({
   qualityTier = 'HIGH',
   reportFrameTime,
 }) {
-  const intensity = 0.25 + bootProgress * 0.75;
+  const intensity = 0.18 + bootProgress * 0.56;
   const phaseClass = phase >= 3 ? 'svlux--ready' : phase >= 2 ? 'svlux--alive' : phase >= 1 ? 'svlux--awakening' : 'svlux--dormant';
   const stageClass =
     bootProgress >= 0.8 ? 'svlux--stage4' :
@@ -99,8 +99,8 @@ export function StartupVisual({
     }));
   }, [config.nodes]);
 
-  const netOpacity = Math.max(0, Math.min(1, (bootProgress - 0.22) * 1.6));
-  const focusRipple = bootProgress > 0.88;
+  const netOpacity = Math.max(0, Math.min(0.82, (bootProgress - 0.28) * 1.35));
+  const focusRipple = bootProgress > 0.9;
 
   if (shouldUseUltra) {
     const quality = QUALITY_PRESETS[effectiveTier] || QUALITY_PRESETS.HIGH;
@@ -133,8 +133,11 @@ export function StartupVisual({
             </div>
           }
         >
+          {/* IMPORTANT: do NOT key on `effectiveTier` — the tier changing
+              would force a full unmount/remount of the WebGL canvas, which
+              produces a visible flash. Quality changes are picked up via
+              the `quality` prop dependency inside the component. */}
           <StartupVisualUltra
-            key={`ultra-${effectiveTier}`}
             progress={bootProgress}
             quality={quality}
             reportFrameTime={reportFrameTime}

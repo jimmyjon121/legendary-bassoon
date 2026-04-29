@@ -37,6 +37,12 @@ const checks = [
   { id: 'autonomy-build-options', command: 'node scripts/autonomy-build-options-smoke.js' },
   { id: 'autonomy-orchestrator-route', command: 'node scripts/autonomy-orchestrator-route-smoke.js' },
   { id: 'mosaic-gate1', command: 'node scripts/mosaic-gate1-smoke.js' },
+  { id: 'mosaic-gate2', command: 'node scripts/mosaic-gate2-smoke.js' },
+  { id: 'model-experience-autopilot', command: 'node scripts/model-experience-autopilot-smoke.js' },
+  { id: 'model-experience-workbench', command: 'node scripts/model-experience-workbench-smoke.js' },
+  { id: 'model-load-confidence', command: 'node scripts/model-load-confidence-smoke.js' },
+  { id: 'backend-decision-timeline', command: 'node scripts/backend-decision-timeline-smoke.js' },
+  { id: 'model-selector-catalogue', command: 'node scripts/model-selector-catalogue-smoke.js' },
 ];
 
 function runCheck(check) {

@@ -4,7 +4,7 @@ const fs = require('fs');
 const http = require('http');
 const os = require('os');
 const path = require('path');
-const { execFileSync } = require('child_process');
+const { execFileSync, spawnSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const MOSAIC_DIR = path.join(ROOT, 'docs/perf/mosaic');
@@ -166,6 +166,106 @@ function queryNvidiaSmi() {
   }
 }
 
+function discoverWingetLlamaCli() {
+  const packagesDir = path.join(process.env.LOCALAPPDATA || '', 'Microsoft', 'WinGet', 'Packages');
+  try {
+    return fs.readdirSync(packagesDir, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory() && entry.name.toLowerCase().startsWith('ggml.llamacpp_'))
+      .map((entry) => path.join(packagesDir, entry.name, 'llama-cli.exe'))
+      .find((candidate) => fs.existsSync(candidate)) || null;
+  } catch {
+    return null;
+  }
+}
+
+function resolveLlamaCliPath(runnerPath = null) {
+  const configured = runnerPath || process.env.DEVFORGE_MOSAIC_RUNNER || process.env.LLAMA_CPP_CLI_PATH;
+  if (configured && fs.existsSync(configured)) return configured;
+  return discoverWingetLlamaCli() || configured || 'llama-cli';
+}
+
+function resolveOllamaBlobPath(model) {
+  const result = spawnSync('ollama', ['show', model, '--modelfile'], {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: 30000,
+  });
+  if (result.error) return { success: false, error: result.error.message };
+  if (result.status !== 0) {
+    return { success: false, error: (result.stderr || result.stdout || '').trim() || `ollama show exited ${result.status}` };
+  }
+  const match = String(result.stdout || '').match(/^FROM\s+(.+)$/mi);
+  if (!match) return { success: false, error: 'Modelfile did not contain FROM path' };
+  const modelPath = match[1].trim().replace(/^"|"$/g, '');
+  if (!fs.existsSync(modelPath)) return { success: false, error: `Resolved model path does not exist: ${modelPath}`, modelPath };
+  return { success: true, modelPath };
+}
+
+function parseLlamaTokensPerSecond(output, elapsedMs) {
+  const text = String(output || '');
+  const matches = [
+    text.match(/([\d.]+)\s*tokens?\s*per\s*second/i),
+    text.match(/([\d.]+)\s*tok\/s/i),
+    text.match(/Generation:\s*([\d.]+)\s*t\/s/i),
+    text.match(/tg\s*=\s*[\d.]+\s*ms\s*\/\s*tok,\s*([\d.]+)\s*t\/s/i),
+  ].filter(Boolean);
+  if (matches.length > 0) {
+    const value = Number(matches[0][1]);
+    if (Number.isFinite(value) && value > 0) return value;
+  }
+  const approxTokens = Math.max(1, Math.round(text.length / 4));
+  return approxTokens / Math.max(0.001, elapsedMs / 1000);
+}
+
+function runLlamaCliGenerate({
+  runnerPath = null,
+  modelPath,
+  device = null,
+  prompt = 'Reply with one short sentence.',
+  numPredict = 8,
+  contextSize = 1024,
+  timeoutMs = 180000,
+} = {}) {
+  const runner = resolveLlamaCliPath(runnerPath);
+  const startedAt = Date.now();
+  const args = [
+    '-m', modelPath,
+    '-c', String(contextSize),
+    '-n', String(numPredict),
+    '--temp', '0',
+    '-p', prompt,
+    '-ngl', '99',
+    '--split-mode', 'layer',
+    '--fit', 'on',
+    '--single-turn',
+    '--simple-io',
+  ];
+  if (device) args.push('--device', device, '--tensor-split', '1');
+  const result = spawnSync(runner, args, {
+    encoding: 'utf8',
+    windowsHide: true,
+    timeout: timeoutMs,
+    maxBuffer: 8 * 1024 * 1024,
+  });
+  const elapsedMs = Date.now() - startedAt;
+  const combined = `${result.stdout || ''}\n${result.stderr || ''}`;
+  if (result.error) {
+    return { ok: false, runner, args, error: result.error.message, elapsedMs, tokensPerSecond: 0 };
+  }
+  const tokensPerSecond = parseLlamaTokensPerSecond(combined, elapsedMs);
+  if (result.status !== 0 && !(Number.isFinite(tokensPerSecond) && tokensPerSecond > 0)) {
+    return { ok: false, runner, args, error: combined.trim() || `llama-cli exited ${result.status}`, elapsedMs, tokensPerSecond: 0 };
+  }
+  return {
+    ok: true,
+    runner,
+    args,
+    elapsedMs,
+    tokensPerSecond,
+    warning: result.status !== 0 ? `llama-cli exited ${result.status} after emitting throughput` : null,
+  };
+}
+
 function makeProfile({
   device,
   model,
@@ -223,7 +323,10 @@ module.exports = {
   makeProfile,
   queryNvidiaSmi,
   requestJson,
+  resolveLlamaCliPath,
+  resolveOllamaBlobPath,
   runOllamaGenerate,
+  runLlamaCliGenerate,
   runOpenVinoGenerate,
   writeProfile,
 };

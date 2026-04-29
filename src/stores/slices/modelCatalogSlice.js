@@ -66,6 +66,14 @@ function dedupeCatalog(entries) {
   return map;
 }
 
+function entryHasAnySource(entry, sourceSet) {
+  if (!entry || !sourceSet) return false;
+  const sources = Array.isArray(entry.sources) && entry.sources.length > 0
+    ? entry.sources
+    : [entry.source];
+  return sources.some((source) => sourceSet.has(source));
+}
+
 async function fetchOllama() {
   const api = window.electronAPI;
   if (!api?.refreshModels && !api?.listModels) return [];
@@ -175,8 +183,19 @@ export const createModelCatalogSlice = (set, get) => ({
       return state.modelCatalogHydrateInflight;
     }
 
+    const wantedSources = Array.isArray(sources) && sources.length > 0
+      ? new Set(sources)
+      : null;
+
     const now = Date.now();
-    if (!force && state.modelCatalogStatus === 'ready' && (now - state.modelCatalogLastHydratedAt) < ttlMs) {
+    const allWantedSourcesFresh = wantedSources
+      ? Array.from(wantedSources).every((source) => {
+        const sourceState = state.modelCatalogSources?.[source];
+        return sourceState?.status === 'ready' && (now - Number(sourceState.fetchedAt || 0)) < ttlMs;
+      })
+      : true;
+
+    if (!force && state.modelCatalogStatus === 'ready' && allWantedSourcesFresh && (now - state.modelCatalogLastHydratedAt) < ttlMs) {
       return {
         models: Array.from(state.modelCatalog.values()),
         fromCache: true,
@@ -184,15 +203,13 @@ export const createModelCatalogSlice = (set, get) => ({
       };
     }
 
-    const wantedSources = Array.isArray(sources) && sources.length > 0
-      ? new Set(sources)
-      : null;
-
     const task = (async () => {
       set({ modelCatalogStatus: 'loading' });
 
       const errors = [];
-      const results = [];
+      const results = wantedSources
+        ? Array.from(state.modelCatalog.values()).filter((entry) => !entryHasAnySource(entry, wantedSources))
+        : [];
       const next = { ...state.modelCatalogSources };
 
       const runFetch = async (key, fetchFn, onSuccess) => {

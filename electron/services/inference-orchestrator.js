@@ -6,9 +6,11 @@
 const OllamaBackend = require('./backends/ollama-backend');
 const LlamaCppBackend = require('./backends/llamacpp-backend');
 const LlamaNodeBackend = require('./backends/llamanode-backend');
+const MosaicBackend = require('./backends/mosaic-backend');
 const OpenVinoBackend = require('./backends/openvino-backend');
 const { isGgufModelId } = require('./backends/llamanode-backend');
 const { getLaneCandidates } = require('./lane-registry');
+const { isMosaicRuntimeEnabled } = require('./mosaic-coordinator');
 const hardwareDetection = require('./hardware-detection');
 const JobQueue = require('./job-queue');
 const { getPowerMode } = require('./power-mode');
@@ -300,6 +302,16 @@ class InferenceOrchestrator {
         useVulkan: true,
         priority: 3,
       }));
+    }
+
+    // Phase 3 Mosaic is a hidden R&D backend. It never appears in normal
+    // profile ordering and is registered only when both dev flags are set,
+    // so LM Studio-quality everyday chat/model flows remain non-experimental.
+    if (isMosaicRuntimeEnabled()) {
+      this.backends.set('mosaic', new MosaicBackend({
+        priority: 50,
+      }));
+      console.log('[Orchestrator] Mosaic dev flags enabled — registered hidden mosaic backend');
     }
 
     // Phase 1: NPU and Intel Arc iGPU are registered whenever the hardware
@@ -1548,6 +1560,62 @@ class InferenceOrchestrator {
       }
     }
 
+    // Autopilot can suggest a backend, but it is not a pin. It only wins
+    // when the user has not chosen a global preferred backend and the
+    // suggested backend is compatible and healthy.
+    const softBackendPreference = String(payload.softBackendPreference || '').trim();
+    if (softBackendPreference && (!this.preferredBackendId || this.preferredBackendId === 'auto')) {
+      const softBackend = this.backends.get(softBackendPreference);
+      const softIsOpenVino = softBackendPreference.includes('openvino');
+      const modelNeedsOllama = this._isOllamaOnlyModel(payload.model);
+
+      if (!softBackend) {
+        rejectedCandidates.push({
+          backendId: softBackendPreference,
+          reason: 'soft_backend_missing',
+        });
+      } else if (softIsOpenVino && modelNeedsOllama) {
+        rejectedCandidates.push({
+          backendId: softBackendPreference,
+          reason: 'soft_backend_incompatible_model',
+          error: payload.model || null,
+        });
+      } else {
+        let health = await this._safeBackendHealth(softBackend);
+        if (!health.available && softIsOpenVino) {
+          const started = await this._tryStartNpuServer({
+            workload: lane,
+            profile: this.profile,
+            preferredModel: payload.model || null,
+          });
+          if (started) health = await this._safeBackendHealth(softBackend);
+        }
+        if (health.available) {
+          return {
+            backend: softBackend,
+            fallbackReason: null,
+            decisionEvidence: buildDecision({
+              selectedBackend: softBackend.id,
+              fallbackReason: null,
+              candidateOrder: [softBackend.id],
+              scored: [{ backendId: softBackend.id, score: 93, index: 0 }],
+              rejected: rejectedCandidates,
+              selectionSource: 'softBackendPreference',
+              extra: {
+                softBackendPreference: softBackend.id,
+              },
+            }),
+          };
+        }
+        rejectedCandidates.push({
+          backendId: softBackend.id,
+          reason: 'soft_backend_unavailable',
+          healthStatus: health?.status || 'unavailable',
+          error: health?.error || null,
+        });
+      }
+    }
+
     if (this.preferredBackendId && this.preferredBackendId !== 'auto') {
       const modelName = String(payload.model || '').trim();
       const preferredIsNpu = this.preferredBackendId.includes('npu') || this.preferredBackendId.includes('openvino');
@@ -2469,6 +2537,8 @@ class InferenceOrchestrator {
         executionMode: payload.executionPlan?.executionMode || 'direct',
         lastExecutionMode: payload.executionPlan?.executionMode || 'direct',
         modeReasons: Array.isArray(payload.executionPlan?.reasons) ? payload.executionPlan.reasons : [],
+        experiencePlan: payload.experiencePlan || payload.executionPlan?.experiencePlan || null,
+        softBackendPreference: payload.softBackendPreference || payload.executionPlan?.softBackendPreference || null,
         backendId: backend.id,
         timestamp: Date.now(),
       };
@@ -2942,6 +3012,16 @@ class InferenceOrchestrator {
       effectiveModel: this.lastExecutionPlan?.effectiveModel || null,
       effectiveOptions: this.lastExecutionPlan?.effectiveOptions || {},
       modeReasons: Array.isArray(this.lastExecutionPlan?.modeReasons) ? this.lastExecutionPlan.modeReasons : [],
+      lastExperiencePlan: this.lastExecutionPlan?.experiencePlan || null,
+      selectedTaskIntent: this.lastExecutionPlan?.experiencePlan?.taskIntent || null,
+      overrideTrace: Array.isArray(this.lastExecutionPlan?.experiencePlan?.overrideTrace)
+        ? this.lastExecutionPlan.experiencePlan.overrideTrace
+        : [],
+      clampReasons: Array.isArray(this.lastExecutionPlan?.experiencePlan?.clampReasons)
+        ? this.lastExecutionPlan.experiencePlan.clampReasons
+        : [],
+      softBackendPreference: this.lastExecutionPlan?.softBackendPreference || null,
+      backendDecisionSource: this.lastBackendDecision?.selectionSource || null,
       offloadEvidence: evidenceRows,
       hardware: {
         gpuCount: this.hardware?.gpus?.length || 0,

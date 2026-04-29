@@ -1,93 +1,479 @@
-import React, { useEffect, useRef, useMemo } from 'react';
-import { X, Search, RefreshCw, Check, Cpu, HardDrive, FolderSearch, Loader, Code, MessageSquare, Sparkles, BookOpen, Bot, Zap } from 'lucide-react';
-import { useAppStore } from '../../stores/appStore';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  BarChart3,
+  Bot,
+  Check,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Cpu,
+  Download,
+  FolderSearch,
+  Info,
+  Layers,
+  List,
+  Loader,
+  Pin,
+  Play,
+  Plus,
+  RefreshCw,
+  Search,
+  Settings,
+  Sparkles,
+  Star,
+  Upload,
+  X,
+  Zap,
+} from 'lucide-react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { motion } from 'framer-motion';
 import { ErrorBoundary } from '../ErrorBoundary';
-import { parseModelName } from '../../services/modelOptimizer';
+import { useAppStore } from '../../stores/appStore';
 import { api as electronAPI } from '../../utils/electronAPI';
+import { ModelExperienceWorkbench } from '../../chat-v2/ui/ModelExperienceWorkbench';
+import {
+  DEVICE_PIN_OPTIONS,
+  SOURCE_LABELS,
+  buildLibraryIndex,
+  buildSmartGroups,
+  estimateFit,
+  formatBytes,
+  groupModels,
+  hasEnoughSuccessfulOutcomes,
+  normalizeSelectorModel,
+  scoreModel,
+} from './modelSelectorCatalogue';
 
-const AGENTIC_FAMILY_HINTS = [
-  'qwen',
-  'llama',
-  'mistral',
-  'mixtral',
-  'deepseek',
-  'gemma',
-  'phi',
-  'command-r',
-  'nemotron',
+const QUANT_FILTERS = ['all', 'Q4', 'Q5', 'Q6', 'Q8', 'F16'];
+const SORT_OPTIONS = [
+  { id: 'recommended', label: 'Recommended' },
+  { id: 'recent', label: 'Recent' },
+  { id: 'speed', label: 'Speed' },
+  { id: 'size', label: 'Size' },
+  { id: 'name', label: 'Name' },
 ];
 
-const AGENTIC_SIGNAL_TERMS = [
-  'agent',
-  'tool',
-  'function',
-  'search',
-  'research',
-  'reasoning',
-  'analysis',
-  'instruct',
-  'coder',
-  'long context',
-  '128k',
-  '200k',
-];
-
-function getAgenticModelScore(modelName = '') {
-  const parsed = parseModelName(modelName || '');
-  const name = String(modelName || '').toLowerCase();
-  const family = String(parsed?.family || '').toLowerCase();
-  const combined = `${name} ${family}`;
-  let score = 0;
-
-  for (const term of AGENTIC_SIGNAL_TERMS) {
-    if (combined.includes(term)) score += 1;
+function recordSelectorEvent(type, payload = {}) {
+  try {
+    const key = 'devforge:modelSelectorTelemetry';
+    const current = JSON.parse(window.localStorage.getItem(key) || '[]');
+    current.push({ type, payload, at: Date.now() });
+    window.localStorage.setItem(key, JSON.stringify(current.slice(-200)));
+  } catch (_) {
+    // Local-only telemetry is best-effort.
   }
-  for (const hint of AGENTIC_FAMILY_HINTS) {
-    if (combined.includes(hint)) {
-      score += 2;
-      break;
-    }
-  }
-  if (name.includes('code') || name.includes('coder')) score += 1;
-  if (name.includes('instruct')) score += 1;
-  if (name.includes('r1') || name.includes('reason')) score += 2;
-
-  return score;
 }
 
-function quantBucketFromParsed(parsed) {
-  const q = parsed?.quantization;
-  if (!q) return null;
-  const u = String(q).toUpperCase();
-  if (u.startsWith('Q4')) return 'Q4';
-  if (u.startsWith('Q5')) return 'Q5';
-  if (u.startsWith('Q6')) return 'Q6';
-  if (u.startsWith('Q8')) return 'Q8';
-  if (u.startsWith('F16') || u.startsWith('FP16')) return 'F16';
-  return null;
+function renderToken(value, fallback = 'auto') {
+  if (value == null || value === '') return fallback;
+  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return String(value);
+  if (typeof value === 'object') {
+    return String(value.id || value.name || value.label || value.type || fallback);
+  }
+  return fallback;
 }
 
-function VramFitDot({ sizeBytes, vramTotalMB }) {
-  const vramGb = vramTotalMB > 0 ? vramTotalMB / 1024 : 0;
-  const sizeGb = Number(sizeBytes) > 0 ? Number(sizeBytes) / (1024 ** 3) : 0;
-  if (!vramGb || !sizeGb) return null;
-  const est = sizeGb * 1.2;
-  let cls = 'bg-emerald-400';
-  let title = 'Estimated VRAM fit: comfortable (model×1.2 ≤ VRAM)';
-  if (est > vramGb && sizeGb <= vramGb) {
-    cls = 'bg-amber-400';
-    title = 'Estimated VRAM fit: tight (raw size ≤ VRAM, headroom may be low)';
-  } else if (sizeGb > vramGb) {
-    cls = 'bg-red-500';
-    title = 'Estimated VRAM fit: likely over capacity';
-  }
+function SourceStatusPill({ source, state }) {
+  const status = state?.status || 'idle';
+  const tone = status === 'ready'
+    ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-200'
+    : status === 'error'
+      ? 'border-rose-500/25 bg-rose-500/10 text-rose-200'
+      : status === 'loading'
+        ? 'border-sky-500/25 bg-sky-500/10 text-sky-200'
+        : 'border-white/10 bg-white/[0.03] text-text-muted';
   return (
-    <span
-      title={title}
-      className={`inline-block h-2 w-2 shrink-0 rounded-full ${cls}`}
-      aria-hidden
-    />
+    <span title={state?.error || status} className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] ${tone}`}>
+      {status === 'loading' && <Loader size={10} className="animate-spin" />}
+      {SOURCE_LABELS[source] || source}: {status}
+    </span>
+  );
+}
+
+function FitBar({ fit }) {
+  const pct = fit?.availableGb > 0 ? Math.min(100, (fit.projectedGb / fit.availableGb) * 100) : 0;
+  const tone = fit?.status === 'comfortable'
+    ? 'bg-emerald-400'
+    : fit?.status === 'tight'
+      ? 'bg-amber-400'
+      : fit?.status === 'blocked'
+        ? 'bg-rose-500'
+        : 'bg-sky-400';
+  return (
+    <div className="min-w-[140px]">
+      <div className="h-1.5 overflow-hidden rounded-full bg-white/10">
+        <div className={`h-full ${tone}`} style={{ width: `${pct || 12}%` }} />
+      </div>
+      <div className="mt-1 text-[10px] text-text-muted">
+        {fit?.label || 'Fit unknown'}
+        {fit?.projectedGb > 0 && fit?.availableGb > 0
+          ? ` · ${fit.projectedGb.toFixed(1)}/${fit.availableGb.toFixed(1)} GB`
+          : ''}
+      </div>
+    </div>
+  );
+}
+
+function CapabilityBadges({ caps = [], limit = 4 }) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      {caps.slice(0, limit).map((cap) => (
+        <span key={cap} className="rounded-md border border-white/10 bg-white/[0.04] px-1.5 py-0.5 text-[10px] text-text-secondary">
+          {cap}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function VariantRow({
+  model,
+  active,
+  focused,
+  compareActive,
+  onUse,
+  onDetails,
+  onCompare,
+  onWorkbench,
+  onPin,
+  onAlias,
+}) {
+  const insight = model.insight || {};
+  const outcome = insight.outcomeSummary || {};
+  const plan = insight.experiencePlan?.plan || {};
+  const specPair = insight.specPair;
+  return (
+    <div
+      role="option"
+      aria-selected={focused || active}
+      className={`rounded-lg border p-3 transition ${
+        active
+          ? 'border-cyan-400/35 bg-cyan-500/10'
+          : focused
+            ? 'border-white/25 bg-white/[0.06]'
+            : 'border-white/10 bg-black/15 hover:border-white/20 hover:bg-white/[0.04]'
+      }`}
+    >
+      <div className="flex items-start gap-3">
+        <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-white/10 bg-white/[0.04]">
+          {model.source === 'npu' ? <Zap size={18} className="text-violet-300" /> : <Bot size={18} className="text-cyan-300" />}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex min-w-0 items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex min-w-0 items-center gap-2">
+                <p className="truncate text-sm font-semibold text-text-primary">{model.displayName}</p>
+                {active && <Check size={14} className="shrink-0 text-cyan-300" />}
+                {model.alias && <Star size={13} className="shrink-0 text-amber-300" />}
+              </div>
+              <p className="mt-0.5 truncate font-mono text-[11px] text-text-muted" title={model.rawName}>
+                {model.rawName}
+              </p>
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <span className="rounded-md border border-cyan-400/25 bg-cyan-500/10 px-2 py-1 text-[11px] font-semibold text-cyan-200">
+                {model.score}
+              </span>
+              <button type="button" onClick={() => onDetails(model)} className="rounded-md p-1.5 text-text-muted hover:bg-white/10 hover:text-text-primary" title="Details">
+                <Info size={14} />
+              </button>
+            </div>
+          </div>
+
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] text-text-secondary">{model.variantLabel}</span>
+            <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] text-text-secondary">{formatBytes(model.sizeBytes)}</span>
+            {model.contextLength && (
+              <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-0.5 text-[10px] text-text-secondary">ctx {model.contextLength.toLocaleString()}</span>
+            )}
+            {specPair?.draftModelId && (
+              <span title={`Draft: ${specPair.draftModelId}`} className="inline-flex items-center gap-1 rounded-md border border-violet-400/25 bg-violet-500/10 px-2 py-0.5 text-[10px] text-violet-200">
+                <Zap size={10} /> Spec
+              </span>
+            )}
+            <CapabilityBadges caps={model.capabilities} />
+          </div>
+
+          <div className="mt-3 grid gap-3 md:grid-cols-[1fr_auto]">
+            <div className="min-w-0">
+              <p className="line-clamp-2 text-[12px] leading-5 text-text-secondary">{model.description}</p>
+              <p className="mt-1 truncate text-[11px] text-text-muted">
+                Autopilot: {renderToken(plan.explicitBackendPin || plan.softBackendPreference)} · ctx {renderToken(plan.effectiveOptions?.num_ctx || model.contextLength)}
+              </p>
+              <p className="mt-1 text-[11px] text-text-muted">
+                Last runs: {outcome.successCount || 0} success / {outcome.failureCount || 0} fail
+                {outcome.avgTokensPerSecond ? ` · ${outcome.avgTokensPerSecond.toFixed(1)} TPS` : ''}
+                {outcome.avgFirstTokenMs ? ` · ${Math.round(outcome.avgFirstTokenMs)} ms TTFT` : ''}
+              </p>
+            </div>
+            <FitBar fit={model.fit} />
+          </div>
+
+          <div className="mt-3 flex flex-wrap items-center gap-2">
+            <button type="button" onClick={() => onUse(model)} className="btn btn-primary px-3 py-1.5 text-xs">
+              <Play size={13} /> Use
+            </button>
+            <button type="button" onClick={() => onWorkbench(model)} className="btn btn-secondary px-3 py-1.5 text-xs">
+              <BarChart3 size={13} /> Workbench
+            </button>
+            <button type="button" onClick={() => onCompare(model)} className={`btn btn-secondary px-3 py-1.5 text-xs ${compareActive ? 'border-cyan-400/35 text-cyan-200' : ''}`}>
+              <Layers size={13} /> Compare
+            </button>
+            <button type="button" onClick={() => onPin(model)} className="btn btn-secondary px-3 py-1.5 text-xs">
+              <Pin size={13} /> Pin
+            </button>
+            <button type="button" onClick={() => onAlias(model)} className="btn btn-secondary px-3 py-1.5 text-xs">
+              <Star size={13} /> Alias
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function StateBanner({ state, selectorError, onStartOllama, onOpenHub, onUseLocal, onRefresh }) {
+  if (state === 'online-enriched' && !selectorError) return null;
+  const copy = {
+    loading: ['Loading catalogue', 'Checking local runtimes and cached metadata.'],
+    empty: ['No models found', 'Start Ollama, open the hub, or register a local GGUF.'],
+    'offline-cached': ['Offline catalogue', 'Using cached and installed metadata only.'],
+    'installed-only': ['Installed catalogue', 'Online enrichment is cache-only or unavailable.'],
+    'source-error': ['Partial catalogue', selectorError || 'One or more model sources failed to refresh.'],
+  }[state] || ['Catalogue status', selectorError || 'Ready'];
+  return (
+    <div className="mx-4 mt-3 rounded-lg border border-amber-400/25 bg-amber-500/10 p-3">
+      <p className="text-xs font-semibold text-amber-100">{copy[0]}</p>
+      <p className="mt-1 text-xs text-text-secondary">{copy[1]}</p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        <button type="button" onClick={onStartOllama} className="btn btn-secondary px-3 py-1.5 text-xs">Start Ollama</button>
+        <button type="button" onClick={onOpenHub} className="btn btn-secondary px-3 py-1.5 text-xs">Open Model Hub</button>
+        <button type="button" onClick={onUseLocal} className="btn btn-secondary px-3 py-1.5 text-xs">Use local GGUF</button>
+        <button type="button" onClick={onRefresh} className="btn btn-secondary px-3 py-1.5 text-xs"><RefreshCw size={12} /> Refresh</button>
+      </div>
+    </div>
+  );
+}
+
+function AddModelMenu({ open, onToggle, onOpenHub, onUseLocal, onOpenNpu }) {
+  const run = (action) => {
+    onToggle(false);
+    action?.();
+  };
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={() => onToggle(!open)}
+        className="btn btn-secondary px-3 py-2 text-xs"
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <Plus size={14} /> Add model
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label="Add model"
+          className="absolute right-0 z-30 mt-2 w-64 overflow-hidden rounded-lg border border-forge-border bg-forge-panel shadow-2xl"
+        >
+          <button type="button" role="menuitem" onClick={() => run(onOpenHub)} className="flex w-full items-start gap-3 px-3 py-2.5 text-left hover:bg-white/[0.05]">
+            <Download size={15} className="mt-0.5 text-cyan-300" />
+            <span>
+              <span className="block text-xs font-medium text-text-primary">Pull Ollama variant</span>
+              <span className="block text-[11px] text-text-muted">Open the existing Model Hub pull flow.</span>
+            </span>
+          </button>
+          <button type="button" role="menuitem" onClick={() => run(onOpenHub)} className="flex w-full items-start gap-3 px-3 py-2.5 text-left hover:bg-white/[0.05]">
+            <Download size={15} className="mt-0.5 text-violet-300" />
+            <span>
+              <span className="block text-xs font-medium text-text-primary">HuggingFace GGUF</span>
+              <span className="block text-[11px] text-text-muted">Open the browser/download flow already used by Hub.</span>
+            </span>
+          </button>
+          <button type="button" role="menuitem" onClick={() => run(onUseLocal)} className="flex w-full items-start gap-3 px-3 py-2.5 text-left hover:bg-white/[0.05]">
+            <Upload size={15} className="mt-0.5 text-emerald-300" />
+            <span>
+              <span className="block text-xs font-medium text-text-primary">Import local GGUF</span>
+              <span className="block text-[11px] text-text-muted">Register a model file from disk.</span>
+            </span>
+          </button>
+          <button type="button" role="menuitem" onClick={() => run(onOpenNpu)} className="flex w-full items-start gap-3 px-3 py-2.5 text-left hover:bg-white/[0.05]">
+            <Settings size={15} className="mt-0.5 text-amber-300" />
+            <span>
+              <span className="block text-xs font-medium text-text-primary">Open NPU converter</span>
+              <span className="block text-[11px] text-text-muted">Launch the existing Settings converter surface.</span>
+            </span>
+          </button>
+          <button type="button" role="menuitem" onClick={() => run(onOpenHub)} className="flex w-full items-start gap-3 border-t border-forge-border px-3 py-2.5 text-left hover:bg-white/[0.05]">
+            <FolderSearch size={15} className="mt-0.5 text-text-secondary" />
+            <span>
+              <span className="block text-xs font-medium text-text-primary">Open Model Hub</span>
+              <span className="block text-[11px] text-text-muted">Browse all existing discovery flows.</span>
+            </span>
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CompareDrawer({ models, onClose, onUse, onWorkbench }) {
+  if (!models.length) return null;
+  return (
+    <div role="dialog" aria-label="Compare selected models" className="absolute inset-y-0 right-0 z-20 w-full max-w-xl border-l border-forge-border bg-forge-panel shadow-2xl">
+      <div className="flex items-center justify-between border-b border-forge-border p-4">
+        <div>
+          <p className="text-sm font-semibold text-text-primary">Compare</p>
+          <p className="text-xs text-text-muted">{models.length} selected variants</p>
+        </div>
+        <button type="button" onClick={onClose} className="rounded-md p-2 text-text-muted hover:bg-white/10 hover:text-text-primary" aria-label="Close compare drawer">
+          <X size={16} />
+        </button>
+      </div>
+      <div className="grid grid-cols-1 gap-3 overflow-y-auto p-4 md:grid-cols-2">
+        {models.map((model) => {
+          const outcome = model.insight?.outcomeSummary || {};
+          return (
+            <div key={model.id} className="rounded-lg border border-white/10 bg-black/20 p-3">
+              <p className="truncate text-sm font-semibold text-text-primary">{model.displayName}</p>
+              <p className="mt-0.5 truncate font-mono text-[10px] text-text-muted">{model.rawName}</p>
+              <div className="mt-3 space-y-1 text-xs text-text-secondary">
+                <p>Variant: {model.variantLabel}</p>
+                <p>Source: {model.sourceLabel}</p>
+                <p>Size: {formatBytes(model.sizeBytes)}</p>
+                <p>Context: {model.contextLength ? model.contextLength.toLocaleString() : 'unknown'}</p>
+                <p>Fit: {model.fit?.label || 'unknown'}</p>
+                <p>History: {outcome.successCount || 0} success / {outcome.failureCount || 0} fail</p>
+                <p>Speed: {outcome.avgTokensPerSecond ? `${outcome.avgTokensPerSecond.toFixed(1)} TPS` : 'no runs yet'}</p>
+              </div>
+              <div className="mt-3 flex gap-2">
+                <button type="button" onClick={() => onUse(model)} className="btn btn-primary flex-1 px-2 py-1.5 text-xs">Use</button>
+                <button type="button" onClick={() => onWorkbench(model)} className="btn btn-secondary flex-1 px-2 py-1.5 text-xs">Workbench</button>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function DetailsDrawer({ model, onClose, onCopy, onAlias, onFavorite, onRate }) {
+  if (!model) return null;
+  return (
+    <div role="dialog" aria-label="Model details" className="absolute inset-y-0 right-0 z-20 w-full max-w-lg border-l border-forge-border bg-forge-panel shadow-2xl">
+      <div className="flex items-center justify-between border-b border-forge-border p-4">
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold text-text-primary">{model.displayName}</p>
+          <p className="truncate font-mono text-[11px] text-text-muted">{model.rawName}</p>
+        </div>
+        <button type="button" onClick={onClose} className="rounded-md p-2 text-text-muted hover:bg-white/10 hover:text-text-primary" aria-label="Close details drawer">
+          <X size={16} />
+        </button>
+      </div>
+      <div className="space-y-4 overflow-y-auto p-4 text-sm">
+        <section>
+          <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">What it does</p>
+          <p className="mt-1 text-text-secondary">{model.description}</p>
+        </section>
+        <section>
+          <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Identity</p>
+          <div className="mt-2 space-y-1 text-xs text-text-secondary">
+            <p>Family: {model.familyName}</p>
+            <p>Variant: {model.variantLabel}</p>
+            <p>Parent/base: {model.parentModel || 'none recorded'}</p>
+            <p>Source: {model.sourceLabel}</p>
+            <p>Format: {model.format || 'unknown'}</p>
+          </div>
+        </section>
+        <section>
+          <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Raw ID</p>
+          <button type="button" onClick={() => onCopy(model.rawId)} className="mt-2 flex w-full items-center gap-2 rounded-lg border border-white/10 bg-black/20 p-2 text-left font-mono text-[11px] text-text-secondary hover:border-white/20">
+            <Copy size={13} /> <span className="truncate">{model.rawId}</span>
+          </button>
+        </section>
+        <section>
+          <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Caveats</p>
+          <div className="mt-2 flex flex-wrap gap-1">
+            {(model.caveats.length ? model.caveats : ['No caveats recorded.']).map((caveat) => (
+              <span key={caveat} className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-text-secondary">{caveat}</span>
+            ))}
+          </div>
+        </section>
+        <section>
+          <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Your rating</p>
+          <div className="mt-2 flex gap-1" role="radiogroup" aria-label="Model rating">
+            {[1, 2, 3, 4, 5].map((value) => {
+              const active = Number(model.library?.rating || 0) >= value;
+              return (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={active}
+                  onClick={() => onRate(model, value)}
+                  className={`rounded-md border px-2 py-1 text-xs ${active ? 'border-amber-400/35 bg-amber-500/10 text-amber-200' : 'border-white/10 text-text-muted hover:bg-white/[0.04]'}`}
+                  title={`${value} star${value === 1 ? '' : 's'}`}
+                >
+                  <Star size={13} />
+                </button>
+              );
+            })}
+          </div>
+        </section>
+        <div className="flex gap-2">
+          <button type="button" onClick={() => onAlias(model)} className="btn btn-secondary flex-1 text-xs">Alias</button>
+          <button type="button" onClick={() => onFavorite(model)} className="btn btn-secondary flex-1 text-xs">Favorite</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PinDialog({ model, onClose, onSave }) {
+  const [pin, setPin] = useState(model?.insight?.activePreset?.device_pin || '');
+  if (!model) return null;
+  return (
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/60 p-4">
+      <div role="dialog" aria-label="Pin model device" className="w-full max-w-sm rounded-xl border border-forge-border bg-forge-panel p-4 shadow-2xl">
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-semibold text-text-primary">Pin device</p>
+          <button type="button" onClick={onClose} className="rounded-md p-1.5 text-text-muted hover:bg-white/10"><X size={14} /></button>
+        </div>
+        <p className="mt-1 truncate text-xs text-text-muted">{model.displayName}</p>
+        <select value={pin} onChange={(event) => setPin(event.target.value)} className="input mt-4 w-full py-2 text-sm">
+          {DEVICE_PIN_OPTIONS.map((option) => (
+            <option key={option.id} value={option.id}>{option.label}</option>
+          ))}
+        </select>
+        <div className="mt-4 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="btn btn-secondary text-xs">Cancel</button>
+          <button type="button" onClick={() => onSave(model, pin)} className="btn btn-primary text-xs">Save</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AliasDialog({ model, onClose, onSave }) {
+  const [alias, setAlias] = useState(model?.alias || '');
+  if (!model) return null;
+  return (
+    <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/60 p-4">
+      <div role="dialog" aria-label="Edit model alias" className="w-full max-w-sm rounded-xl border border-forge-border bg-forge-panel p-4 shadow-2xl">
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-semibold text-text-primary">Model alias</p>
+          <button type="button" onClick={onClose} className="rounded-md p-1.5 text-text-muted hover:bg-white/10"><X size={14} /></button>
+        </div>
+        <p className="mt-1 truncate font-mono text-[11px] text-text-muted">{model.rawName}</p>
+        <input value={alias} onChange={(event) => setAlias(event.target.value)} className="input mt-4 w-full py-2 text-sm" placeholder="Friendly name" autoFocus />
+        <div className="mt-4 flex justify-end gap-2">
+          <button type="button" onClick={onClose} className="btn btn-secondary text-xs">Cancel</button>
+          <button type="button" onClick={() => onSave(model, alias)} className="btn btn-primary text-xs">Save</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -101,62 +487,66 @@ export function ModelSelector({ onClose }) {
   const setModel = useAppStore((s) => s.setModel);
   const refreshModels = useAppStore((s) => s.refreshModels);
   const setPreferredBackend = useAppStore((s) => s.setPreferredBackend);
-  const currentWorkspace = useAppStore(s => s.currentWorkspace);
-  const isResearchWorkspace = currentWorkspace === 'research';
-  const isNsfwWorkspace = currentWorkspace === 'nsfw';
+  const currentWorkspace = useAppStore((s) => s.currentWorkspace);
+  const hydrateModelCatalog = useAppStore((s) => s.hydrateModelCatalog);
+  const invalidateModelCatalog = useAppStore((s) => s.invalidateModelCatalog);
+  const modelCatalog = useAppStore((s) => s.modelCatalog);
+  const modelCatalogStatus = useAppStore((s) => s.modelCatalogStatus);
+  const modelCatalogSources = useAppStore((s) => s.modelCatalogSources);
+  const modelCatalogLastError = useAppStore((s) => s.modelCatalogLastError);
+  const storeNpuStatus = useAppStore((s) => s.npuStatus);
+  const toggleModelHub = useAppStore((s) => s.toggleModelHub);
+  const toggleSettings = useAppStore((s) => s.toggleSettings);
 
-  const [searchQuery, setSearchQuery] = React.useState('');
-  const [quantFilter, setQuantFilter] = React.useState('all');
-  const [sortKey, setSortKey] = React.useState('recent');
-  const [isRefreshing, setIsRefreshing] = React.useState(false);
-  const [localError, setLocalError] = React.useState(null);
-  const [modelTab, setModelTab] = React.useState(isResearchWorkspace ? 'agentic' : 'all');
-  const [localModels, setLocalModels] = React.useState([]);
-  const [isLoadingLocal, setIsLoadingLocal] = React.useState(true);
-  const [isCreatingFromLocal, setIsCreatingFromLocal] = React.useState(false);
-  const [creatingModelName, setCreatingModelName] = React.useState(null);
-  const [lmStudioModels, setLmStudioModels] = React.useState([]);
-  const [isScanningLMStudio, setIsScanningLMStudio] = React.useState(false);
-  const [npuStatus, setNpuStatus] = React.useState({ npuAvailable: false, openvinoInstalled: false });
-  const [npuModels, setNpuModels] = React.useState([]);
-  const [isLoadingNpu, setIsLoadingNpu] = React.useState(true);
-  const [vramTotalMB, setVramTotalMB] = React.useState(0);
-  // Phase 2: speculative-decoding pair availability per model. We resolve
-  // it lazily as the visible list changes so the chip stays accurate
-  // even after refreshes without spamming IPC for hundreds of entries.
-  const [specPairCache, setSpecPairCache] = React.useState({});
+  const [searchQuery, setSearchQuery] = useState('');
+  const [quantFilter, setQuantFilter] = useState('all');
+  const [sortKey, setSortKey] = useState('recent');
+  const [viewMode, setViewMode] = useState('catalogue');
+  const [groupingEnabled, setGroupingEnabled] = useState(true);
+  const [modelTab, setModelTab] = useState(currentWorkspace === 'research' ? 'agentic' : 'all');
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [localError, setLocalError] = useState(null);
+  const [localModels, setLocalModels] = useState([]);
+  const [lmStudioModels, setLmStudioModels] = useState([]);
+  const [npuModels, setNpuModels] = useState([]);
+  const [npuStatus, setNpuStatus] = useState({ npuAvailable: false, openvinoInstalled: false });
+  const [ollamaRuntimeStatus, setOllamaRuntimeStatus] = useState(null);
+  const [isLoadingLocal, setIsLoadingLocal] = useState(true);
+  const [isScanningLMStudio, setIsScanningLMStudio] = useState(false);
+  const [isLoadingNpu, setIsLoadingNpu] = useState(true);
+  const [isCreatingFromLocal, setIsCreatingFromLocal] = useState(false);
+  const [creatingModelName, setCreatingModelName] = useState(null);
+  const [vramTotalMB, setVramTotalMB] = useState(0);
+  const [vramFreeMB, setVramFreeMB] = useState(0);
+  const [libraryModels, setLibraryModels] = useState([]);
+  const [insights, setInsights] = useState({});
+  const [networkMode, setNetworkMode] = useState(currentWorkspace === 'nsfw' ? 'cache-only' : 'on');
+  const [compareIds, setCompareIds] = useState([]);
+  const [detailModel, setDetailModel] = useState(null);
+  const [pinModel, setPinModel] = useState(null);
+  const [aliasModel, setAliasModel] = useState(null);
+  const [workbenchModel, setWorkbenchModel] = useState(null);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+  const [focusedIndex, setFocusedIndex] = useState(0);
+
   const containerRef = useRef(null);
+  const searchRef = useRef(null);
+  const listParentRef = useRef(null);
 
-  // Close on outside click
-  useEffect(() => {
-    const handleClickOutside = (e) => {
-      if (containerRef.current && !containerRef.current.contains(e.target)) {
-        onClose();
-      }
-    };
-    
-    document.addEventListener('mousedown', handleClickOutside);
-    return () => document.removeEventListener('mousedown', handleClickOutside);
-  }, [onClose]);
-
-  // Close on Escape
-  useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.key === 'Escape') onClose();
-    };
-    
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [onClose]);
+  const isVaultWorkspace = currentWorkspace === 'nsfw';
+  const selectorError = localError || modelCatalogLastError || (String(error || '').trim() || null);
 
   const loadLocalModels = React.useCallback(async () => {
     setIsLoadingLocal(true);
     try {
-      await window.electronAPI?.scanModels?.();
+      const modelsDirectory = await electronAPI.getSettings('modelsDirectory');
+      if (modelsDirectory) {
+        await window.electronAPI?.scanModels?.(modelsDirectory);
+      }
       const ggufModels = await window.electronAPI?.getModelsByFormat?.('gguf');
       setLocalModels(Array.isArray(ggufModels) ? ggufModels : []);
-    } catch (error) {
-      console.error('Failed to load local models:', error);
+    } catch (err) {
+      console.error('Failed to load local models:', err);
       setLocalModels([]);
     } finally {
       setIsLoadingLocal(false);
@@ -166,14 +556,10 @@ export function ModelSelector({ onClose }) {
   const scanLMStudio = React.useCallback(async () => {
     setIsScanningLMStudio(true);
     try {
-      const result = await window.electronAPI?.scanLMStudioModels();
-      if (result?.models) {
-        setLmStudioModels(result.models);
-      } else {
-        setLmStudioModels([]);
-      }
-    } catch (error) {
-      console.error('Failed to scan LM Studio:', error);
+      const result = await electronAPI.scanLMStudioModels();
+      setLmStudioModels(Array.isArray(result?.models) ? result.models : []);
+    } catch (err) {
+      console.error('Failed to scan LM Studio:', err);
       setLmStudioModels([]);
     } finally {
       setIsScanningLMStudio(false);
@@ -183,28 +569,23 @@ export function ModelSelector({ onClose }) {
   const loadNpuModels = React.useCallback(async (options = {}) => {
     setIsLoadingNpu(true);
     try {
-      const status = await window.electronAPI?.getNpuStatus?.({ force: options.force === true });
+      const status = await electronAPI.getNpuStatus({ force: options.force === true });
       setNpuStatus({
         npuAvailable: Boolean(status?.npuAvailable),
         openvinoInstalled: Boolean(status?.openvinoInstalled),
         serverRunning: Boolean(status?.serverRunning),
         configuredModel: status?.model || status?.modelPath || null,
       });
-
-      const models = [];
-      const configuredModel = status?.model || status?.modelPath;
-      if (configuredModel) {
-        models.push({
-          id: configuredModel,
-          name: configuredModel.split('/').pop().replace(/-ov$/, '').replace(/-fp16$/, ''),
-          fullId: configuredModel,
-          serverRunning: Boolean(status?.serverRunning),
-        });
-      }
-      setNpuModels(models);
+      const configured = status?.model || status?.modelPath;
+      setNpuModels(configured ? [{
+        id: `npu:${configured}`,
+        name: String(configured).split(/[\\/]/).pop().replace(/-ov$/, '').replace(/-fp16$/, ''),
+        fullId: configured,
+        serverRunning: Boolean(status?.serverRunning),
+      }] : []);
       return status || null;
-    } catch (error) {
-      console.error('[ModelSelector] Failed to load NPU status:', error);
+    } catch (err) {
+      console.error('[ModelSelector] Failed to load NPU status:', err);
       setNpuStatus({ npuAvailable: false, openvinoInstalled: false, serverRunning: false, configuredModel: null });
       setNpuModels([]);
       return null;
@@ -213,107 +594,83 @@ export function ModelSelector({ onClose }) {
     }
   }, []);
 
-  const invalidateModelCatalog = useAppStore((s) => s.invalidateModelCatalog);
+  const refreshLibrary = React.useCallback(async () => {
+    const rows = await electronAPI.libraryGetAllModels({ sortBy: 'lastUsed', sortDir: 'desc', limit: 500 });
+    setLibraryModels(Array.isArray(rows) ? rows : []);
+  }, []);
 
-  const handleRefresh = async () => {
+  const loadOllamaRuntimeStatus = React.useCallback(async () => {
+    try {
+      const status = await electronAPI.getOllamaStatus();
+      setOllamaRuntimeStatus(status || null);
+      return status || null;
+    } catch (_) {
+      setOllamaRuntimeStatus(null);
+      return null;
+    }
+  }, []);
+
+  const handleRefresh = React.useCallback(async () => {
     setIsRefreshing(true);
     setLocalError(null);
     try {
-      // Explicit user refresh: blow the catalog cache so hydrate actually
-      // re-fetches every source.
       invalidateModelCatalog?.();
-      const [result] = await Promise.all([
+      const [result, ollamaStatus] = await Promise.all([
         refreshModels(),
+        loadOllamaRuntimeStatus(),
         loadLocalModels(),
         scanLMStudio(),
         loadNpuModels({ force: true }),
+        refreshLibrary(),
         hydrateModelCatalog?.({ force: true }),
       ]);
       const health = result?.llmHealth || useAppStore.getState().llmHealth || llmHealth;
-      if (!health?.healthy) {
-        setLocalError(health?.error || 'Ollama backend is not available. Make sure Ollama is running on http://localhost:11434');
+      if (!health?.healthy && ollamaStatus?.running !== false) {
+        setLocalError(health?.error || 'Ollama backend is not available.');
       }
-    } catch (error) {
-      console.error('Failed to refresh models:', error);
-      setLocalError(error.message || 'Failed to connect to Ollama. Make sure it is running.');
+      recordSelectorEvent('refresh-all');
+    } catch (err) {
+      console.error('Failed to refresh models:', err);
+      setLocalError(err.message || 'Failed to refresh models.');
     } finally {
       setIsRefreshing(false);
     }
-  };
+  }, [hydrateModelCatalog, invalidateModelCatalog, llmHealth, loadLocalModels, loadNpuModels, loadOllamaRuntimeStatus, refreshLibrary, refreshModels, scanLMStudio]);
 
-  // Single consolidated hydrate on mount — no more 4 parallel useEffects
-  // firing fetches. The model catalog slice TTL-caches results so remounts
-  // within 30s hit the cache instead of re-fetching every source.
-  const hydrateModelCatalog = useAppStore((s) => s.hydrateModelCatalog);
-  const modelCatalogStatus = useAppStore((s) => s.modelCatalogStatus);
-  const modelCatalog = useAppStore((s) => s.modelCatalog);
-  const storeNpuStatus = useAppStore((s) => s.npuStatus);
-
-  const catalogLastUsedAt = React.useCallback((modelName) => {
-    const want = String(modelName || '');
-    if (!want) return 0;
-    for (const entry of modelCatalog.values()) {
-      if (String(entry?.name || '') === want) {
-        const ts = entry?.meta?.lastUsedAt;
-        return Number.isFinite(Number(ts)) ? Number(ts) : 0;
-      }
-    }
-    return 0;
-  }, [modelCatalog]);
-
-  React.useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const raw = await window.electronAPI?.getSettings?.('modelSelectorPrefs');
-        const prefs = raw && typeof raw === 'object' ? raw : {};
-        if (cancelled) return;
-        if (prefs.sort === 'size' || prefs.sort === 'name' || prefs.sort === 'recent') {
-          setSortKey(prefs.sort);
-        }
-      } catch (_) { /* noop */ }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  const persistModelSelectorSort = React.useCallback(async (next) => {
-    setSortKey(next);
-    try {
-      const raw = await window.electronAPI?.getSettings?.('modelSelectorPrefs');
-      const prev = raw && typeof raw === 'object' ? raw : {};
-      await window.electronAPI?.setSettings?.('modelSelectorPrefs', { ...prev, sort: next });
-    } catch (_) { /* noop */ }
-  }, []);
+  useEffect(() => {
+    const onMouseDown = (event) => {
+      if (containerRef.current && !containerRef.current.contains(event.target)) onClose();
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    return () => document.removeEventListener('mousedown', onMouseDown);
+  }, [onClose]);
 
   useEffect(() => {
     let cancelled = false;
-    // Hydrate once on mount. Catalog slice dedupes concurrent callers and
-    // TTL-caches the result, so repeated opens don't thrash the backends.
-    hydrateModelCatalog?.({ force: false }).catch((err) => {
-      if (!cancelled) {
-        console.warn('[ModelSelector] Catalog hydrate failed:', err?.message || err);
-      }
-    });
-
-    // Component-local views still populate from the direct scanners for now
-    // (hub consolidation completes in Phase 1). These complete alongside the
-    // slice hydrate without adding round-trips.
+    (async () => {
+      try {
+        const prefs = await electronAPI.getSettings('modelSelectorPrefs');
+        if (cancelled || !prefs || typeof prefs !== 'object') return;
+        if (SORT_OPTIONS.some((option) => option.id === prefs.sort)) setSortKey(prefs.sort);
+        if (typeof prefs.groupingEnabled === 'boolean') setGroupingEnabled(prefs.groupingEnabled);
+      } catch (_) {}
+    })();
+    hydrateModelCatalog?.({ force: false }).catch((err) => console.warn('[ModelSelector] Catalog hydrate failed:', err?.message || err));
     loadLocalModels();
+    loadOllamaRuntimeStatus();
     scanLMStudio();
-    loadNpuModels({ force: false }).catch(() => {});
-
-    window.electronAPI?.getHardwareStats?.().then((stats) => {
+    loadNpuModels({ force: false });
+    refreshLibrary();
+    electronAPI.getHardwareStats().then((stats) => {
       if (cancelled) return;
       const gpu = stats?.gpus?.[0];
       if (gpu?.vramTotal > 0) setVramTotalMB(gpu.vramTotal);
+      if (gpu?.vramFree > 0) setVramFreeMB(gpu.vramFree);
+      if (!gpu?.vramFree && gpu?.vramTotal && gpu?.vramUsed) setVramFreeMB(Math.max(0, gpu.vramTotal - gpu.vramUsed));
     }).catch(() => {});
-
     return () => { cancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []); // Intentionally [] — hydration is a mount-time action, not a reactive effect.
+  }, [hydrateModelCatalog, loadLocalModels, loadNpuModels, loadOllamaRuntimeStatus, refreshLibrary, scanLMStudio]);
 
-  // Project the NPU status from the catalog slice into local UI state when
-  // available so all surfaces share one source of truth.
   useEffect(() => {
     if (!storeNpuStatus) return;
     setNpuStatus({
@@ -324,636 +681,751 @@ export function ModelSelector({ onClose }) {
     });
   }, [storeNpuStatus]);
 
+  const persistPrefs = React.useCallback(async (patch) => {
+    try {
+      const prev = await electronAPI.getSettings('modelSelectorPrefs');
+      await electronAPI.setSettings('modelSelectorPrefs', { ...(prev || {}), ...patch });
+    } catch (_) {}
+  }, []);
+
+  const rawEntries = useMemo(() => {
+    const map = new Map();
+    const add = (entry) => {
+      if (!entry?.id && !entry?.name) return;
+      const key = String(entry.id || entry.name);
+      if (!map.has(key)) map.set(key, entry);
+      else map.set(key, { ...map.get(key), ...entry, meta: { ...(map.get(key).meta || {}), ...(entry.meta || {}) } });
+    };
+    availableModels.forEach((model) => add({
+      id: model.name || model.id,
+      name: model.name || model.id,
+      source: 'ollama',
+      sizeBytes: model.size ?? null,
+      meta: model.details ? { details: model.details } : {},
+    }));
+    Array.from(modelCatalog.values()).forEach(add);
+    localModels.forEach((model) => add({
+      id: model.id || (model.path ? `gguf:${model.path}` : model.name),
+      name: model.name || model.filename || model.path,
+      source: 'llamanode',
+      sizeBytes: model.sizeBytes || model.size || null,
+      meta: { path: model.path, filename: model.filename },
+    }));
+    lmStudioModels.forEach((model) => add({
+      id: model.path ? `lmstudio:${model.path}` : `lmstudio:${model.name}`,
+      name: model.name || model.filename,
+      source: 'lmstudio',
+      sizeBytes: model.size || null,
+      meta: { path: model.path, filename: model.filename, parentFolder: model.parentFolder },
+    }));
+    npuModels.forEach((model) => add({
+      id: `npu:${model.fullId}`,
+      name: model.name,
+      source: 'npu',
+      meta: { fullId: model.fullId, serverRunning: model.serverRunning, format: 'OpenVINO' },
+    }));
+    return Array.from(map.values());
+  }, [availableModels, lmStudioModels, localModels, modelCatalog, npuModels]);
+
   useEffect(() => {
-    if (isResearchWorkspace) {
-      setModelTab('agentic');
-    }
-  }, [isResearchWorkspace]);
-
-  const handleSelectNpuModel = async (npuModel) => {
-    try {
-      // Switch backend to openvino-npu
-      await setPreferredBackend?.('openvino-npu');
-      // Start server if not running
-      if (!npuModel.serverRunning) {
-        await window.electronAPI?.startNpuServer?.({ device: 'NPU' });
+    let cancelled = false;
+    if (rawEntries.length === 0) return undefined;
+    const compact = rawEntries.slice(0, 250).map((entry) => ({
+      id: entry.id,
+      name: entry.name,
+      source: entry.source,
+      sizeBytes: entry.sizeBytes,
+      meta: entry.meta,
+    }));
+    electronAPI.getModelSelectorInsights({ models: compact, workspace: currentWorkspace }).then((result) => {
+      if (cancelled) return;
+      if (result?.success) {
+        setInsights(result.insights || {});
+        setNetworkMode(result.networkMode || (currentWorkspace === 'nsfw' ? 'cache-only' : 'on'));
       }
-      // Store a synthetic model name the engine can identify as NPU
-      await setModel(`npu:${npuModel.fullId}`);
-      onClose();
-    } catch (err) {
-      console.error('[ModelSelector] Failed to select NPU model:', err);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, [currentWorkspace, rawEntries]);
+
+  const libraryIndex = useMemo(() => buildLibraryIndex(libraryModels), [libraryModels]);
+  const enoughHistory = hasEnoughSuccessfulOutcomes(insights);
+  const effectiveSortKey = sortKey === 'recommended' && !enoughHistory ? 'recent' : sortKey;
+
+  const normalizedModels = useMemo(() => {
+    const contextTokens = llmRuntimeState?.effectiveOptions?.num_ctx || currentModelInfo?.effectiveContextLength || currentModelInfo?.contextLength || 4096;
+    const models = rawEntries.map((entry) => {
+      const normalized = normalizeSelectorModel(entry, { libraryIndex });
+      const insight = insights[normalized.id] || insights[normalized.rawName] || {};
+      const fit = estimateFit(normalized, contextTokens, vramFreeMB, vramTotalMB);
+      const score = scoreModel({ ...normalized, insight, fit }, {
+        preset: effectiveSortKey === 'speed' ? 'recommended' : 'recommended',
+        insights,
+        workspace: currentWorkspace,
+        contextTokens,
+        freeVramMB: vramFreeMB,
+        totalVramMB: vramTotalMB,
+      });
+      return { ...normalized, insight, fit, score };
+    });
+    return models;
+  }, [currentModelInfo, currentWorkspace, effectiveSortKey, insights, libraryIndex, llmRuntimeState, rawEntries, vramFreeMB, vramTotalMB]);
+
+  const filteredModels = useMemo(() => {
+    const query = searchQuery.trim().toLowerCase();
+    let list = normalizedModels.filter((model) => {
+      const matchesQuery = !query
+        || model.displayName.toLowerCase().includes(query)
+        || model.rawName.toLowerCase().includes(query)
+        || model.familyName.toLowerCase().includes(query)
+        || model.capabilities.some((cap) => cap.toLowerCase().includes(query));
+      const matchesQuant = quantFilter === 'all' || model.quant?.startsWith(quantFilter);
+      const matchesTab = modelTab !== 'agentic' || model.capabilities.some((cap) => ['Code', 'Reasoning'].includes(cap)) || model.score >= 60;
+      const vaultOpen = !isVaultWorkspace || model.insight?.catalogEnrichment?.vaultModelGating !== 'allowlist' || model.insight?.activePreset?.vault_allowed === true;
+      return matchesQuery && matchesQuant && matchesTab && vaultOpen;
+    });
+    if (effectiveSortKey === 'name') list = list.sort((a, b) => a.displayName.localeCompare(b.displayName));
+    else if (effectiveSortKey === 'size') list = list.sort((a, b) => Number(b.sizeBytes || 0) - Number(a.sizeBytes || 0));
+    else if (effectiveSortKey === 'speed') list = list.sort((a, b) => Number(b.insight?.outcomeSummary?.avgTokensPerSecond || 0) - Number(a.insight?.outcomeSummary?.avgTokensPerSecond || 0));
+    else if (effectiveSortKey === 'recent') {
+      list = list.sort((a, b) => {
+        const tb = new Date(b.library?.lastUsed || b.meta?.lastUsedAt || b.insight?.outcomeSummary?.lastSuccessAt || 0).getTime();
+        const ta = new Date(a.library?.lastUsed || a.meta?.lastUsedAt || a.insight?.outcomeSummary?.lastSuccessAt || 0).getTime();
+        if (tb !== ta) return tb - ta;
+        return b.score - a.score;
+      });
+    } else {
+      list = list.sort((a, b) => b.score - a.score);
     }
-  };
+    return list;
+  }, [effectiveSortKey, isVaultWorkspace, modelTab, normalizedModels, quantFilter, searchQuery]);
 
-  const handleUseLocalModel = async (model) => {
+  const familyGroups = useMemo(() => groupModels(filteredModels), [filteredModels]);
+  const smartGroups = useMemo(() => buildSmartGroups(filteredModels), [filteredModels]);
+  const focusedModel = filteredModels[Math.min(focusedIndex, Math.max(0, filteredModels.length - 1))] || null;
+  const currentNormalized = normalizedModels.find((model) => model.id === currentModel || model.rawName === currentModel) || null;
+  const suggested = filteredModels[0] || null;
+  const alternatives = filteredModels.filter((model) => model.id !== suggested?.id).slice(0, 3);
+
+  const catalogueItems = groupingEnabled ? familyGroups : filteredModels;
+  const virtualizer = useVirtualizer({
+    count: catalogueItems.length,
+    getScrollElement: () => listParentRef.current,
+    estimateSize: () => groupingEnabled ? 236 : 178,
+    overscan: 5,
+    getItemKey: (index) => groupingEnabled ? familyGroups[index]?.key || index : filteredModels[index]?.id || index,
+  });
+  const virtualItems = virtualizer.getVirtualItems();
+
+  useEffect(() => {
+    setFocusedIndex(0);
+  }, [searchQuery, quantFilter, viewMode, groupingEnabled]);
+
+  const useLocalGgufPath = React.useCallback(async () => {
+    const filePath = await electronAPI.selectFile({
+      filters: [{ name: 'GGUF models', extensions: ['gguf'] }, { name: 'All files', extensions: ['*'] }],
+    });
+    if (!filePath) return;
+    await handleUseLocalModel({ path: filePath, name: filePath.split(/[\\/]/).pop()?.replace(/\.gguf$/i, '') || 'local-model' });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const handleUseLocalModel = React.useCallback(async (model) => {
     setIsCreatingFromLocal(true);
-    setCreatingModelName(model.name || model.filename);
+    setCreatingModelName(model.name || model.filename || model.displayName);
     setLocalError(null);
-
     try {
-      const baseName = (model.name || model.filename || 'local-model')
-        .toLowerCase()
-        .replace(/[^a-z0-9_.-]+/g, '-');
-      // Use a flat name without slashes so it matches Ollama tags output
-      const ollamaName = `local-${baseName}`;
-
-      const res = await window.electronAPI?.createOllamaModelFromFile({
-        name: ollamaName,
+      const displayName = model.name || model.filename || model.displayName || 'local-model';
+      const res = await electronAPI.loadLocalGguf({
+        displayName,
+        name: displayName,
         path: model.path,
       });
-
-      if (!res?.success) {
-        throw new Error(res?.error || 'Failed to create Ollama model from local file');
-      }
-
-      // Refresh Ollama models and select the newly created one
-      await Promise.all([refreshModels(), loadLocalModels()]);
-      const finalName = res.name || ollamaName;
-      const setResult = await setModel(finalName);
-      if (setResult?.success !== false) {
-        onClose();
-      }
-    } catch (error) {
-      console.error('Failed to use local model:', error);
-      setLocalError(error.message || 'Failed to create model from local file');
+      if (!res?.success) throw new Error(res?.error || 'Failed to register local GGUF');
+      const finalModelId = res.id || (res.path ? `gguf:${res.path}` : null);
+      if (!finalModelId) throw new Error('Local GGUF registered without a selectable model id');
+      await Promise.all([
+        loadLocalModels(),
+        hydrateModelCatalog?.({ force: true, sources: ['llamanode'] }),
+      ]);
+      const setResult = await setModel(finalModelId);
+      if (setResult?.success !== false) onClose();
+      recordSelectorEvent('use-local-gguf', { model: displayName });
+    } catch (err) {
+      console.error('Failed to use local model:', err);
+      setLocalError(err.message || 'Failed to register local GGUF');
     } finally {
       setIsCreatingFromLocal(false);
       setCreatingModelName(null);
     }
-  };
+  }, [hydrateModelCatalog, loadLocalModels, onClose, setModel]);
 
-  const agenticModelCount = useMemo(
-    () => availableModels.filter((model) => getAgenticModelScore(model?.name || '') >= 3).length,
-    [availableModels]
-  );
-
-  const filteredModels = useMemo(() => {
-    const query = searchQuery.toLowerCase();
-    let list = availableModels
-      .filter((model) => model.name?.toLowerCase().includes(query))
-      .map((model) => {
-        const parsed = parseModelName(model?.name || '');
-        return {
-          model,
-          score: getAgenticModelScore(model?.name || ''),
-          quantBucket: quantBucketFromParsed(parsed),
-        };
-      });
-
-    if (quantFilter !== 'all') {
-      list = list.filter((entry) => entry.quantBucket === quantFilter);
+  const handleUseModel = React.useCallback(async (model) => {
+    if (!model) return;
+    try {
+      if (model.source === 'lmstudio') {
+        await handleUseLocalModel({ path: model.path, name: model.displayName, filename: model.rawName });
+        return;
+      }
+      if (model.source === 'npu') {
+        await setPreferredBackend?.('openvino-npu');
+        const fullId = model.meta?.fullId || model.rawId?.replace(/^npu:/, '');
+        if (!model.meta?.serverRunning) await electronAPI.startNpuServer({ device: 'NPU' });
+        const result = await setModel(`npu:${fullId}`);
+        if (result?.success !== false) onClose();
+        return;
+      }
+      const result = await setModel(model.rawId || model.rawName);
+      if (result?.success !== false) onClose();
+      recordSelectorEvent('use-model', { source: model.source, family: model.familyKey });
+    } catch (err) {
+      console.error('[ModelSelector] Failed to use model:', err);
+      setLocalError(err.message || 'Failed to use model');
     }
+  }, [handleUseLocalModel, onClose, setModel, setPreferredBackend]);
 
-    if (modelTab === 'agentic') {
-      list = list.filter((entry) => entry.score >= 3);
-    }
+  const toggleCompare = React.useCallback((model) => {
+    if (!model) return;
+    setCompareIds((prev) => {
+      if (prev.includes(model.id)) return prev.filter((id) => id !== model.id);
+      return [...prev, model.id].slice(-3);
+    });
+    recordSelectorEvent('compare-toggle', { model: model.familyKey });
+  }, []);
 
-    const scorePrimary = modelTab === 'agentic' || isResearchWorkspace;
-    if (scorePrimary) {
-      list.sort((a, b) => {
-        const scoreDiff = b.score - a.score;
-        if (scoreDiff !== 0) return scoreDiff;
-        if (sortKey === 'name') return String(a.model?.name || '').localeCompare(String(b.model?.name || ''));
-        if (sortKey === 'size') return (Number(b.model?.size) || 0) - (Number(b.model?.size) || 0);
-        const tb = catalogLastUsedAt(b.model?.name);
-        const ta = catalogLastUsedAt(a.model?.name);
-        if (tb !== ta) return tb - ta;
-        return String(a.model?.name || '').localeCompare(String(b.model?.name || ''));
-      });
-    } else if (sortKey === 'name') {
-      list.sort((a, b) => String(a.model?.name || '').localeCompare(String(b.model?.name || '')));
-    } else if (sortKey === 'size') {
-      list.sort((a, b) => (Number(b.model?.size) || 0) - (Number(a.model?.size) || 0));
+  const savePin = React.useCallback(async (model, pin) => {
+    const active = model.insight?.activePreset || {};
+    const preset = {
+      ...active,
+      id: active.id || `selector-pin-${Date.now()}`,
+      model_name: model.rawId || model.rawName,
+      workspace: currentWorkspace,
+      is_default: true,
+      device_pin: pin || null,
+      task_intent: active.task_intent || 'auto',
+      advanced_options: active.advanced_options || {},
+    };
+    await electronAPI.saveModelPreset(preset);
+    setPinModel(null);
+    const result = await electronAPI.getModelSelectorInsights({ models: rawEntries, workspace: currentWorkspace });
+    if (result?.success) setInsights(result.insights || {});
+    recordSelectorEvent('pin-device', { pin });
+  }, [currentWorkspace, rawEntries]);
+
+  const saveAlias = React.useCallback(async (model, alias) => {
+    const trimmed = String(alias || '').trim();
+    if (model.library?.id) {
+      await electronAPI.libraryUpdateModel(model.library.id, { alias: trimmed || null });
     } else {
-      list.sort((a, b) => {
-        const tb = catalogLastUsedAt(b.model?.name);
-        const ta = catalogLastUsedAt(a.model?.name);
-        if (tb !== ta) return tb - ta;
-        return String(a.model?.name || '').localeCompare(String(b.model?.name || ''));
+      await electronAPI.libraryAddModel({
+        name: model.rawName,
+        path: model.path || null,
+        filename: model.path ? model.path.split(/[\\/]/).pop() : model.rawName,
+        size: model.sizeBytes || 0,
+        format: model.format || null,
+        modelType: model.capabilities?.[0] || 'chat',
+        provider: model.source,
+        providerId: model.rawId,
+        alias: trimmed || null,
+        tags: model.capabilities || [],
       });
     }
+    await refreshLibrary();
+    setAliasModel(null);
+    recordSelectorEvent('alias-save', { hasAlias: Boolean(trimmed) });
+  }, [refreshLibrary]);
 
-    return list;
-  }, [availableModels, catalogLastUsedAt, isResearchWorkspace, modelTab, quantFilter, searchQuery, sortKey]);
-
-  // Resolve speculative-decoding pair info for whatever's currently
-  // visible. We only ask the orchestrator about ids we haven't already
-  // resolved, so opening the selector doesn't spam IPC.
-  useEffect(() => {
-    let cancelled = false;
-    const unresolved = filteredModels
-      .map((entry) => entry?.model?.name)
-      .filter((name) => name && !(name in specPairCache));
-    if (unresolved.length === 0) return undefined;
-
-    (async () => {
-      const updates = {};
-      for (const name of unresolved) {
-        try {
-          const result = await electronAPI.getDraftFor(name);
-          if (cancelled) return;
-          updates[name] = (result && result.success && result.pair) ? result.pair : null;
-        } catch {
-          updates[name] = null;
-        }
-      }
-      if (!cancelled && Object.keys(updates).length > 0) {
-        setSpecPairCache((prev) => ({ ...prev, ...updates }));
-      }
-    })();
-
-    return () => { cancelled = true; };
-  }, [filteredModels, specPairCache]);
-
-  const filteredLocalModels = localModels.filter(model => {
-    const query = searchQuery.toLowerCase();
-    return (
-      !query ||
-      model.name?.toLowerCase().includes(query) ||
-      model.filename?.toLowerCase().includes(query)
-    );
-  });
-
-  const formatSize = (bytes) => {
-    if (!bytes) return 'Unknown';
-    const gb = bytes / (1024 * 1024 * 1024);
-    return `${gb.toFixed(1)} GB`;
-  };
-
-  const getRuntimeBadge = React.useCallback((modelName) => {
-    const lower = String(modelName || '').toLowerCase();
-    if (lower.includes('openvino') || lower.startsWith('ov-')) {
-      return { label: 'NPU ready', className: 'bg-emerald-500/20 text-emerald-300', canConvert: false };
+  const favoriteModel = React.useCallback(async (model) => {
+    if (model.library?.id) {
+      await electronAPI.libraryUpdateModel(model.library.id, { favorite: !model.library.favorite });
+    } else {
+      await electronAPI.libraryAddModel({
+        name: model.rawName,
+        path: model.path || null,
+        filename: model.path ? model.path.split(/[\\/]/).pop() : model.rawName,
+        size: model.sizeBytes || 0,
+        format: model.format || null,
+        modelType: model.capabilities?.[0] || 'chat',
+        provider: model.source,
+        providerId: model.rawId,
+        favorite: true,
+        tags: model.capabilities || [],
+      });
     }
-    return { label: 'GPU', className: 'bg-emerald-500/15 text-emerald-300', canConvert: false };
-  }, []);
+    await refreshLibrary();
+  }, [refreshLibrary]);
 
-  // Get model type info for display
-  const getModelTypeInfo = useMemo(() => (modelName) => {
-    const parsed = parseModelName(modelName);
-    const typeConfig = {
-      code: { icon: Code, color: 'text-blue-400', bg: 'bg-blue-500/20', label: 'Code' },
-      chat: { icon: MessageSquare, color: 'text-green-400', bg: 'bg-green-500/20', label: 'Chat' },
-      creative: { icon: Sparkles, color: 'text-purple-400', bg: 'bg-purple-500/20', label: 'Creative' },
-      instruct: { icon: BookOpen, color: 'text-amber-400', bg: 'bg-amber-500/20', label: 'Instruct' },
-    };
-    
-    // Determine type from family
-    const familyTypes = {
-      codellama: 'code', 'deepseek-coder': 'code', starcoder: 'code', 
-      codegemma: 'code', qwen2coder: 'code', deepseek: 'code',
-      nous: 'creative', hermes: 'creative', openhermes: 'creative', 
-      dolphin: 'creative', neural: 'creative',
-      zephyr: 'instruct', openchat: 'instruct', orca: 'instruct',
-      wizard: 'instruct', command: 'instruct',
-    };
-    
-    const modelType = familyTypes[parsed.family] || 'chat';
-    return { ...typeConfig[modelType], parsed };
-  }, []);
+  const rateModel = React.useCallback(async (model, rating) => {
+    const safeRating = Math.max(0, Math.min(5, Number(rating) || 0));
+    if (model.library?.id) {
+      await electronAPI.libraryUpdateModel(model.library.id, { rating: safeRating });
+    } else {
+      await electronAPI.libraryAddModel({
+        name: model.rawName,
+        path: model.path || null,
+        filename: model.path ? model.path.split(/[\\/]/).pop() : model.rawName,
+        size: model.sizeBytes || 0,
+        format: model.format || null,
+        modelType: model.capabilities?.[0] || 'chat',
+        provider: model.source,
+        providerId: model.rawId,
+        rating: safeRating,
+        tags: model.capabilities || [],
+      });
+    }
+    await refreshLibrary();
+    recordSelectorEvent('rate-model', { rating: safeRating });
+  }, [refreshLibrary]);
 
-  const selectorError = useMemo(() => {
-    if (localError) return localError;
-    const globalError = String(error || '').trim();
-    if (!globalError) return null;
-    const looksLikeConnectivityIssue = /(ollama|connect|connection|backend|offline|localhost|127\.0\.0\.1|econn|network)/i.test(globalError);
-    return looksLikeConnectivityIssue ? globalError : null;
-  }, [error, localError]);
+  const openHub = React.useCallback(() => {
+    toggleModelHub?.();
+    onClose();
+    recordSelectorEvent('open-hub');
+  }, [onClose, toggleModelHub]);
+
+  const openSettings = React.useCallback(() => {
+    toggleSettings?.();
+    onClose();
+  }, [onClose, toggleSettings]);
+
+  const handleKeyDown = React.useCallback((event) => {
+    if (event.key === 'Escape') {
+      onClose();
+      return;
+    }
+    if (event.key === '/' && document.activeElement !== searchRef.current) {
+      event.preventDefault();
+      searchRef.current?.focus();
+      return;
+    }
+    if (document.activeElement === searchRef.current) return;
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      setFocusedIndex((idx) => Math.min(filteredModels.length - 1, idx + 1));
+    } else if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      setFocusedIndex((idx) => Math.max(0, idx - 1));
+    } else if (event.key === 'Enter') {
+      event.preventDefault();
+      handleUseModel(focusedModel);
+    } else if (event.key === ' ') {
+      event.preventDefault();
+      toggleCompare(focusedModel);
+    } else if (event.key.toLowerCase() === 'p') {
+      event.preventDefault();
+      if (focusedModel) setPinModel(focusedModel);
+    } else if (event.key.toLowerCase() === 'w') {
+      event.preventDefault();
+      if (focusedModel) setWorkbenchModel(focusedModel);
+    }
+  }, [filteredModels.length, focusedModel, handleUseModel, onClose, toggleCompare]);
+
+  useEffect(() => {
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [handleKeyDown]);
+
+  const compareModels = compareIds.map((id) => normalizedModels.find((model) => model.id === id)).filter(Boolean);
+  const isOllamaOffline = Boolean(ollamaRuntimeStatus?.installed && ollamaRuntimeStatus?.running === false);
+  const state = modelCatalogStatus === 'loading'
+    ? 'loading'
+    : filteredModels.length === 0
+      ? 'empty'
+      : isOllamaOffline
+        ? 'offline-cached'
+      : selectorError
+        ? 'source-error'
+        : networkMode === 'cache-only' || networkMode === 'off'
+          ? 'installed-only'
+          : 'online-enriched';
 
   return (
-    <ErrorBoundary scope="ModelSelector">
+    <ErrorBoundary>
       <motion.div
-        ref={containerRef}
-        initial={{ opacity: 0, y: -10 }}
-        animate={{ opacity: 1, y: 0 }}
-        exit={{ opacity: 0, y: -10 }}
-        className="fixed inset-x-0 top-0 z-50 flex justify-center"
+        initial={{ opacity: 0 }}
+        animate={{ opacity: 1 }}
+        exit={{ opacity: 0 }}
+        className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
       >
-        <div className="m-4 w-full max-w-lg rounded-xl bg-forge-surface border border-forge-border shadow-[0_22px_64px_-40px_rgba(0,0,0,0.92)] overflow-hidden">
-          {/* Header */}
-          <div className={`flex items-center justify-between px-4 py-3 border-b ${isNsfwWorkspace ? 'border-rose-500/20 bg-rose-950/20' : 'border-forge-border'}`}>
-          <div className="flex items-center gap-2">
-            <Cpu size={18} className={isNsfwWorkspace ? 'text-rose-400' : 'text-workspace-casual'} />
-            <h3 className="font-medium text-text-primary">{isNsfwWorkspace ? 'Select Model (Vault)' : 'Select Model'}</h3>
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={handleRefresh}
-              disabled={isRefreshing}
-              className="p-1.5 rounded-lg text-text-muted hover:text-text-secondary hover:bg-forge-hover transition-colors"
-              title="Refresh models"
-            >
-              <RefreshCw size={16} className={isRefreshing ? 'animate-spin' : ''} />
-            </button>
-            <button
-              onClick={onClose}
-              className="p-1.5 rounded-lg text-text-muted hover:text-text-secondary hover:bg-forge-hover transition-colors"
-            >
-              <X size={16} />
-            </button>
-          </div>
-        </div>
-
-        {/* Search */}
-        <div className="p-3 border-b border-forge-border">
-          <div className="flex flex-wrap gap-1 mb-2">
-            {[
-              { id: 'all', label: 'All' },
-              { id: 'Q4', label: 'Q4' },
-              { id: 'Q5', label: 'Q5' },
-              { id: 'Q6', label: 'Q6' },
-              { id: 'Q8', label: 'Q8' },
-              { id: 'F16', label: 'F16' },
-            ].map((chip) => (
-              <button
-                key={chip.id}
-                type="button"
-                onClick={() => setQuantFilter(chip.id)}
-                className={`h-7 px-2 rounded-md text-[10px] font-medium transition-colors ${
-                  quantFilter === chip.id
-                    ? 'bg-sky-500/25 text-sky-200 border border-sky-500/35'
-                    : 'text-text-muted hover:text-text-secondary border border-transparent'
-                }`}
-              >
-                {chip.label}
-              </button>
-            ))}
-          </div>
-          <div className="relative">
-            <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
-            <input
-              type="text"
-              placeholder="Search models..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="input pl-9 py-2 text-sm"
-              autoFocus
-            />
-          </div>
-          <div className="mt-2 flex items-center gap-2">
-            <label htmlFor="model-selector-sort" className="text-[10px] text-text-muted shrink-0">Sort</label>
-            <select
-              id="model-selector-sort"
-              value={sortKey}
-              onChange={(e) => persistModelSelectorSort(e.target.value)}
-              className="flex-1 min-w-0 input py-1.5 text-xs"
-            >
-              <option value="recent">Recent</option>
-              <option value="size">Size</option>
-              <option value="name">Name</option>
-            </select>
-          </div>
-          <div className="mt-2 flex items-center gap-1 rounded-lg border border-forge-border bg-forge-bg p-1">
-            {[
-              { id: 'all', label: 'All Models' },
-              { id: 'agentic', label: 'Agentic Research' },
-            ].map((tab) => (
-              <button
-                key={tab.id}
-                type="button"
-                onClick={() => setModelTab(tab.id)}
-                className={`h-7 px-2.5 rounded-md text-[11px] transition-colors ${
-                  modelTab === tab.id
-                    ? 'bg-sky-500/20 text-sky-300 border border-sky-500/30'
-                    : 'text-text-muted hover:text-text-secondary'
-                }`}
-              >
-                {tab.label}
-              </button>
-            ))}
-          </div>
-          {isResearchWorkspace && (
-            <p className="mt-1 text-[11px] text-sky-300/85">
-              Research workspace active: agentic models are prioritized.
-            </p>
-          )}
-          {isNsfwWorkspace && (
-            <p className="mt-1 text-[11px] text-rose-300/85">
-              Vault active. Use the Models tab for unrestricted downloads.
-            </p>
-          )}
-        </div>
-
-        {/* Error Display */}
-        {selectorError && (
-          <div className="mx-3 mt-3 p-3 bg-status-error/10 border border-status-error/30 rounded-lg">
-            <p className="text-xs text-status-error font-medium">Connection Error</p>
-            <p className="text-xs text-text-muted mt-1">{selectorError}</p>
-          </div>
-        )}
-
-        {/* Models List */}
-        <div className="max-h-96 overflow-y-auto">
-          {currentModel && (Array.isArray(currentModelInfo?.warnings) && currentModelInfo.warnings.length > 0) && (
-            <div className="mx-2 mb-2 p-3 rounded-lg border border-amber-400/25 bg-amber-500/10 text-amber-100 text-xs">
-              <p className="font-medium mb-1">Current model warning</p>
-              <p>{currentModelInfo.warnings[0]}</p>
-              {llmRuntimeState?.effectiveModel && llmRuntimeState.effectiveModel !== currentModel && (
-                <p className="mt-1 text-amber-200/90">
-                  Casual is currently using `{llmRuntimeState.effectiveModel}` as the effective runtime model.
+        <div
+          ref={containerRef}
+          className="relative flex h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl border border-forge-border bg-forge-panel shadow-2xl"
+        >
+          <header className="border-b border-forge-border bg-forge-bg/70 p-4">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h2 className="text-lg font-semibold text-text-primary">Model Catalogue</h2>
+                <p className="text-xs text-text-muted">
+                  Catalogue-first browsing with aliases, variants, local history, and Autopilot suggestions.
                 </p>
-              )}
-            </div>
-          )}
-
-          {/* Ollama models section */}
-          <div className="p-2">
-            <p className="text-xs font-semibold text-text-muted mb-1">
-              {modelTab === 'agentic' ? 'Agentic Research Models' : 'Ollama Models'}
-            </p>
-            {filteredModels.length === 0 ? (
-              <div className="p-4 text-center border border-dashed border-forge-border rounded-lg">
-                <Cpu size={24} className="mx-auto text-text-muted mb-2" />
-                <p className="text-xs text-text-secondary">
-                  {modelTab === 'agentic' ? 'No agentic research models found' : 'No Ollama models found'}
-                </p>
-                <p className="text-[11px] text-text-muted mt-1">
-                  {modelTab === 'agentic'
-                    ? 'Try another search or switch to All Models.'
-                    : 'Make sure Ollama is running and has models installed'}
-                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="rounded-md border border-white/10 bg-white/[0.04] px-2 py-1 text-[10px] text-text-secondary">
+                  Network: {networkMode}
+                </span>
+                <AddModelMenu
+                  open={addMenuOpen}
+                  onToggle={setAddMenuOpen}
+                  onOpenHub={openHub}
+                  onUseLocal={useLocalGgufPath}
+                  onOpenNpu={openSettings}
+                />
                 <button
+                  type="button"
                   onClick={handleRefresh}
-                  className="btn btn-secondary mt-3 text-xs"
+                  disabled={isRefreshing}
+                  className="rounded-md p-2 text-text-muted transition hover:bg-forge-hover hover:text-text-primary disabled:opacity-50"
+                  title="Refresh catalogue"
                 >
-                  <RefreshCw size={12} />
-                  Refresh
+                  <RefreshCw size={16} className={isRefreshing ? 'animate-spin' : ''} />
+                </button>
+                <button type="button" onClick={onClose} className="rounded-md p-2 text-text-muted transition hover:bg-forge-hover hover:text-text-primary" aria-label="Close model selector">
+                  <X size={18} />
                 </button>
               </div>
-            ) : (
-              <div className="space-y-1">
-                {filteredModels.map((entry) => {
-                  const model = entry.model;
-                  const typeInfo = getModelTypeInfo(model.name);
-                  const TypeIcon = typeInfo.icon;
-                  const isAgentic = entry.score >= 3;
-                  const runtimeBadge = getRuntimeBadge(model.name);
-                  const specPair = specPairCache[model.name];
-                  const specSupported = !!(specPair && specPair.draftModelId && specPair.score >= 0.7);
-                  return (
-                    <div
-                      key={model.name}
-                      className={`
-                        w-full flex items-center gap-3 px-3 py-2.5 rounded-lg
-                        transition-colors text-left
-                        ${currentModel === model.name 
-                          ? isNsfwWorkspace ? 'bg-rose-500/20 border border-rose-500/30' : 'bg-workspace-casual/20 border border-workspace-casual/30'
-                          : 'hover:bg-forge-hover border border-transparent'
-                        }
-                      `}
-                    >
-                      <button
-                        onClick={async () => {
-                          const setResult = await setModel(model.name);
-                          if (setResult?.success !== false) {
-                            onClose();
-                          }
-                        }}
-                        className="flex items-center gap-3 flex-1 min-w-0 text-left"
-                      >
-                        <div className={`flex-shrink-0 w-10 h-10 rounded-lg ${typeInfo.bg} border border-forge-border flex items-center justify-center`}>
-                          <TypeIcon size={18} className={typeInfo.color} />
-                        </div>
-
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-text-primary truncate">
-                            {model.name}
-                          </p>
-                          <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                            {isAgentic && (
-                              <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/20 text-sky-300 font-medium flex items-center gap-1">
-                                <Bot size={10} />
-                                Agentic
-                              </span>
-                            )}
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded ${typeInfo.bg} ${typeInfo.color} font-medium`}>
-                              {typeInfo.label}
-                            </span>
-                            <span className={`text-[10px] px-1.5 py-0.5 rounded font-medium ${runtimeBadge.className}`}>
-                              {runtimeBadge.label}
-                            </span>
-                            {specSupported && (
-                              <span
-                                className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/20 text-violet-300 font-medium flex items-center gap-1"
-                                title={`Speculative decoding pair: ${specPair.draftModelId} (${specPair.family || 'override'})`}
-                              >
-                                <Zap size={10} />
-                                Spec
-                              </span>
-                            )}
-                            <span className="text-xs text-text-muted flex items-center gap-1">
-                              <VramFitDot sizeBytes={model.size} vramTotalMB={vramTotalMB} />
-                              <HardDrive size={10} />
-                              {formatSize(model.size)}
-                            </span>
-                            {typeInfo.parsed.size && (
-                              <span className="text-xs text-text-muted">
-                                {typeInfo.parsed.size}
-                              </span>
-                            )}
-                            {typeInfo.parsed.quantization && (
-                              <span className="text-[10px] text-text-muted opacity-70">
-                                {typeInfo.parsed.quantization}
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                      </button>
-
-                      <div className="flex items-center gap-2 flex-shrink-0">
-                        {currentModel === model.name && (
-                          <Check size={16} className={`flex-shrink-0 ${isNsfwWorkspace ? 'text-rose-400' : 'text-workspace-casual'}`} />
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* LM Studio models section */}
-          <div className="p-2 border-t border-forge-border/60 mt-1">
-            <div className="flex items-center justify-between mb-1">
-              <p className="text-xs font-semibold text-text-muted flex items-center gap-1">
-                <span className="text-base">🗂️</span> LM Studio Models
-              </p>
-              <button
-                onClick={scanLMStudio}
-                disabled={isScanningLMStudio}
-                className="p-1 rounded text-text-muted hover:text-text-secondary hover:bg-forge-hover transition-colors"
-                title="Rescan LM Studio folders"
-              >
-                {isScanningLMStudio ? (
-                  <Loader size={12} className="animate-spin" />
-                ) : (
-                  <FolderSearch size={12} />
-                )}
-              </button>
             </div>
-            {isScanningLMStudio ? (
-              <div className="p-3 text-center text-xs text-text-muted">
-                <Loader size={14} className="animate-spin mx-auto mb-1" />
-                Scanning LM Studio folders...
-              </div>
-            ) : lmStudioModels.length === 0 ? (
-              <div className="p-3 text-xs text-text-muted">
-                No LM Studio models found. Models are typically in <code className="bg-forge-bg px-1 rounded">~/.lmstudio/models</code>
-              </div>
-            ) : (
-              <div className="space-y-1 max-h-40 overflow-y-auto">
-                {lmStudioModels
-                  .filter(m => !searchQuery || m.name.toLowerCase().includes(searchQuery.toLowerCase()))
-                  .map((model, idx) => (
-                  <button
-                    key={idx}
-                    onClick={() => handleUseLocalModel({ 
-                      path: model.path, 
-                      name: model.name,
-                      filename: model.name 
-                    })}
-                    className={`
-                      w-full flex items-center gap-3 px-3 py-2 rounded-lg
-                      transition-colors text-left hover:bg-forge-hover border border-transparent
-                    `}
-                    disabled={isCreatingFromLocal}
-                  >
-                    <div className="flex-shrink-0 w-9 h-9 rounded-lg bg-gradient-to-br from-blue-500/20 to-purple-500/20 border border-blue-500/30 flex items-center justify-center">
-                      <span className="text-sm">🗂️</span>
-                    </div>
-                    
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs font-medium text-text-primary truncate">
-                        {model.name}
-                      </p>
-                      <p className="text-[11px] text-text-muted truncate flex items-center gap-1">
-                        <span>{model.sizeFormatted}</span>
-                        <span className="opacity-50">•</span>
-                        <span>{model.parentFolder}</span>
-                      </p>
-                    </div>
 
-                    <span className="text-[11px] text-blue-400 flex-shrink-0">
-                      {isCreatingFromLocal && creatingModelName === model.name
-                        ? 'Creating…'
-                        : 'Use'}
-                    </span>
-                  </button>
+            <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_auto_auto]">
+              <div className="relative">
+                <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
+                <input
+                  ref={searchRef}
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  className="input w-full py-2 pl-9 text-sm"
+                  placeholder="Search names, raw IDs, capabilities..."
+                  autoFocus
+                />
+              </div>
+              <select
+                value={sortKey}
+                onChange={(event) => {
+                  setSortKey(event.target.value);
+                  persistPrefs({ sort: event.target.value });
+                }}
+                className="input py-2 text-sm"
+              >
+                {SORT_OPTIONS.map((option) => (
+                  <option key={option.id} value={option.id}>{option.label}</option>
+                ))}
+              </select>
+              <div className="flex items-center gap-1 rounded-lg border border-forge-border bg-forge-bg p-1">
+                <button type="button" onClick={() => setViewMode('catalogue')} className={`h-8 rounded-md px-2 text-xs ${viewMode === 'catalogue' ? 'bg-cyan-500/15 text-cyan-200' : 'text-text-muted hover:text-text-primary'}`}>
+                  <Layers size={13} className="inline" /> Catalogue
+                </button>
+                <button type="button" onClick={() => setViewMode('browse')} className={`h-8 rounded-md px-2 text-xs ${viewMode === 'browse' ? 'bg-cyan-500/15 text-cyan-200' : 'text-text-muted hover:text-text-primary'}`}>
+                  <List size={13} className="inline" /> Browse All
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-2">
+              {QUANT_FILTERS.map((chip) => (
+                <button
+                  key={chip}
+                  type="button"
+                  onClick={() => setQuantFilter(chip)}
+                  className={`h-7 rounded-md px-2 text-[10px] font-medium ${
+                    quantFilter === chip
+                      ? 'border border-sky-500/35 bg-sky-500/20 text-sky-200'
+                      : 'border border-transparent text-text-muted hover:text-text-secondary'
+                  }`}
+                >
+                  {chip === 'all' ? 'All quants' : chip}
+                </button>
+              ))}
+              <button
+                type="button"
+                onClick={() => {
+                  setGroupingEnabled((prev) => {
+                    persistPrefs({ groupingEnabled: !prev });
+                    return !prev;
+                  });
+                }}
+                className="h-7 rounded-md border border-white/10 px-2 text-[10px] text-text-secondary hover:bg-white/[0.04]"
+              >
+                {groupingEnabled ? 'Grouped variants' : 'Flat rows'}
+              </button>
+              <button
+                type="button"
+                onClick={() => setModelTab((prev) => (prev === 'agentic' ? 'all' : 'agentic'))}
+                className={`h-7 rounded-md border px-2 text-[10px] ${modelTab === 'agentic' ? 'border-cyan-400/30 bg-cyan-500/10 text-cyan-200' : 'border-white/10 text-text-secondary'}`}
+              >
+                Agentic Research
+              </button>
+              <div className="ml-auto flex flex-wrap gap-1">
+                {Object.entries(modelCatalogSources || {}).map(([source, sourceState]) => (
+                  <SourceStatusPill
+                    key={source}
+                    source={source}
+                    state={source === 'ollama' && isOllamaOffline
+                      ? { status: 'error', error: 'Ollama is stopped; cached models remain available.' }
+                      : sourceState}
+                  />
                 ))}
               </div>
-            )}
-          </div>
-
-          {/* NPU / OpenVINO models section */}
-          {npuStatus.openvinoInstalled && (
-            <div className="p-2 border-t border-forge-border/60 mt-1">
-              <div className="flex items-center justify-between mb-1">
-                <p className="text-xs font-semibold text-text-muted flex items-center gap-1.5">
-                  <span className={`w-1.5 h-1.5 rounded-full ${npuStatus.serverRunning ? 'bg-status-success' : 'bg-status-warning'}`} />
-                  NPU Models (OpenVINO)
-                </p>
-                <span className="text-[10px] text-text-muted">{npuStatus.serverRunning ? 'Server running' : 'Server offline'}</span>
-              </div>
-              {isLoadingNpu ? (
-                <div className="p-3 text-center text-xs text-text-muted">
-                  <Loader size={12} className="animate-spin inline mr-1" />Checking NPU…
-                </div>
-              ) : npuModels.length === 0 ? (
-                <div className="p-3 text-xs text-text-muted">
-                  No NPU model configured yet. Go to <span className="text-amber-400">Settings → Models → NPU Model Converter</span> and click a pre-converted model to load it.
-                </div>
-              ) : (
-                <div className="space-y-1">
-                  {npuModels.filter(m => !searchQuery || m.name.toLowerCase().includes(searchQuery.toLowerCase())).map((npuModel) => {
-                    const isActive = currentModel === `npu:${npuModel.fullId}`;
-                    return (
-                      <button
-                        key={npuModel.id}
-                        onClick={() => handleSelectNpuModel(npuModel)}
-                        className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg transition-colors text-left border ${
-                          isActive
-                            ? 'bg-violet-500/10 border-violet-500/30'
-                            : 'hover:bg-forge-hover border-transparent'
-                        }`}
-                      >
-                        <div className="flex-shrink-0 w-9 h-9 rounded-lg bg-violet-500/10 border border-violet-500/30 flex items-center justify-center">
-                          <span className="text-base">⚡</span>
-                        </div>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-medium text-text-primary truncate flex items-center gap-1.5">
-                            {npuModel.name}
-                            {isActive && <Check size={11} className="text-violet-400 shrink-0" />}
-                          </p>
-                          <p className="text-[11px] text-violet-400/80 truncate">
-                            NPU • OpenVINO • {npuModel.serverRunning ? 'Ready' : 'Will start server'}
-                          </p>
-                        </div>
-                        <span className="text-[11px] text-violet-400 flex-shrink-0">
-                          {isActive ? 'Active' : 'Use NPU'}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-              )}
             </div>
+          </header>
+
+          <StateBanner
+            state={state}
+            selectorError={selectorError}
+            onStartOllama={async () => { await electronAPI.startOllama(); await handleRefresh(); }}
+            onOpenHub={openHub}
+            onUseLocal={useLocalGgufPath}
+            onRefresh={handleRefresh}
+          />
+
+          {viewMode === 'catalogue' && (
+            <>
+              <section className="grid gap-3 border-b border-forge-border p-4 lg:grid-cols-3">
+                <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Now</p>
+                  <p className="mt-2 truncate text-sm font-semibold text-text-primary">{currentNormalized?.displayName || currentModel || 'No model selected'}</p>
+                  <p className="mt-1 text-xs text-text-muted">
+                    {renderToken(llmRuntimeState?.currentBackend)} · ctx {renderToken(llmRuntimeState?.effectiveOptions?.num_ctx || currentModelInfo?.effectiveContextLength)}
+                  </p>
+                  {Array.isArray(currentModelInfo?.warnings) && currentModelInfo.warnings.length > 0 && (
+                    <p className="mt-2 line-clamp-2 text-xs text-amber-200">{currentModelInfo.warnings[0]}</p>
+                  )}
+                  <div className="mt-3 flex gap-2">
+                    <button type="button" onClick={() => electronAPI.unloadModel()} className="btn btn-secondary px-2 py-1.5 text-xs">Eject</button>
+                    <button type="button" onClick={() => electronAPI.warmupModel(currentModel)} className="btn btn-secondary px-2 py-1.5 text-xs">Warmup</button>
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-cyan-400/20 bg-cyan-500/10 p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-cyan-200">Suggested</p>
+                  <p className="mt-2 truncate text-sm font-semibold text-text-primary">{suggested?.displayName || 'No suggestion yet'}</p>
+                  <p className="mt-1 line-clamp-2 text-xs text-text-secondary">
+                    {suggested ? `${suggested.fit?.label || 'Fit unknown'} · ${suggested.capabilities.join(', ')}` : 'Run a refresh or add a model to populate suggestions.'}
+                  </p>
+                  {suggested && (
+                    <div className="mt-3 flex gap-2">
+                      <button type="button" onClick={() => handleUseModel(suggested)} className="btn btn-primary px-2 py-1.5 text-xs">Use</button>
+                      <button type="button" onClick={() => setWorkbenchModel(suggested)} className="btn btn-secondary px-2 py-1.5 text-xs">Workbench</button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
+                  <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Alternatives</p>
+                  <div className="mt-2 space-y-2">
+                    {alternatives.length === 0 ? (
+                      <p className="text-xs text-text-muted">No alternatives yet.</p>
+                    ) : alternatives.map((model) => (
+                      <button key={model.id} type="button" onClick={() => setDetailModel(model)} className="flex w-full items-center justify-between gap-2 rounded-md border border-white/10 bg-black/10 px-2 py-1.5 text-left hover:border-white/20">
+                        <span className="truncate text-xs text-text-secondary">{model.displayName}</span>
+                        <span className="text-[10px] text-cyan-200">{model.score}</span>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              </section>
+
+              {smartGroups.length > 0 && (
+                <section className="border-b border-forge-border px-4 py-3">
+                  <div className="mb-2 flex items-center gap-2">
+                    <Sparkles size={14} className="text-cyan-300" />
+                    <p className="text-xs font-semibold text-text-secondary">Smart groups</p>
+                  </div>
+                  <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
+                    {smartGroups.map((group) => (
+                      <div key={group.id} className="rounded-lg border border-white/10 bg-black/15 p-2">
+                        <p className="text-xs font-semibold text-text-primary">{group.title}</p>
+                        <p className="text-[10px] text-text-muted">{group.models.length} shown</p>
+                        <div className="mt-2 flex flex-wrap gap-1">
+                          {group.models.slice(0, 3).map((model) => (
+                            <button key={model.id} type="button" onClick={() => setDetailModel(model)} className="max-w-full truncate rounded-md bg-white/[0.05] px-1.5 py-0.5 text-[10px] text-text-secondary">
+                              {model.displayName}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              )}
+
+              <main ref={listParentRef} role="listbox" aria-label="Model catalogue" className="min-h-0 flex-1 overflow-y-auto p-4">
+                {catalogueItems.length === 0 ? (
+                  <div className="rounded-lg border border-dashed border-forge-border p-8 text-center">
+                    <Cpu size={28} className="mx-auto text-text-muted" />
+                    <p className="mt-3 text-sm font-medium text-text-secondary">No matching models</p>
+                    <p className="mt-1 text-xs text-text-muted">Try a different search, quant filter, or source refresh.</p>
+                  </div>
+                ) : (
+                  <div className="relative w-full" style={{ height: `${virtualizer.getTotalSize()}px` }}>
+                    {virtualItems.map((virtualRow) => {
+                      if (groupingEnabled) {
+                        const group = familyGroups[virtualRow.index];
+                        if (!group) return null;
+                        const expanded = detailModel?.familyKey === group.key;
+                        const variants = expanded ? group.variants : group.variants.slice(0, 4);
+                        return (
+                          <div
+                            key={virtualRow.key}
+                            ref={virtualizer.measureElement}
+                            data-index={virtualRow.index}
+                            className="absolute left-0 top-0 w-full pb-3"
+                            style={{ transform: `translateY(${virtualRow.start}px)` }}
+                          >
+                            <section className="rounded-xl border border-white/10 bg-black/15 p-3">
+                              <button type="button" onClick={() => setDetailModel(expanded ? null : group.variants[0])} className="mb-3 flex w-full items-center justify-between gap-3 text-left">
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-2">
+                                    {expanded ? <ChevronDown size={14} className="text-text-muted" /> : <ChevronRight size={14} className="text-text-muted" />}
+                                    <p className="truncate text-sm font-semibold text-text-primary">{group.familyName}</p>
+                                    <span className="rounded-md border border-white/10 px-1.5 py-0.5 text-[10px] text-text-muted">{group.variants.length} variants</span>
+                                  </div>
+                                  <p className="mt-1 line-clamp-1 text-xs text-text-muted">{group.description}</p>
+                                </div>
+                                <CapabilityBadges caps={group.capabilities} limit={3} />
+                              </button>
+                              <div className="space-y-2">
+                                {variants.map((model) => (
+                                  <VariantRow
+                                    key={model.id}
+                                    model={model}
+                                    active={currentModel === model.rawId || currentModel === model.rawName}
+                                    focused={focusedModel?.id === model.id}
+                                    compareActive={compareIds.includes(model.id)}
+                                    onUse={handleUseModel}
+                                    onDetails={setDetailModel}
+                                    onCompare={toggleCompare}
+                                    onWorkbench={setWorkbenchModel}
+                                    onPin={setPinModel}
+                                    onAlias={setAliasModel}
+                                  />
+                                ))}
+                              </div>
+                            </section>
+                          </div>
+                        );
+                      }
+                      const model = filteredModels[virtualRow.index];
+                      if (!model) return null;
+                      return (
+                        <div
+                          key={virtualRow.key}
+                          ref={virtualizer.measureElement}
+                          data-index={virtualRow.index}
+                          className="absolute left-0 top-0 w-full pb-3"
+                          style={{ transform: `translateY(${virtualRow.start}px)` }}
+                        >
+                          <VariantRow
+                            model={model}
+                            active={currentModel === model.rawId || currentModel === model.rawName}
+                            focused={focusedModel?.id === model.id}
+                            compareActive={compareIds.includes(model.id)}
+                            onUse={handleUseModel}
+                            onDetails={setDetailModel}
+                            onCompare={toggleCompare}
+                            onWorkbench={setWorkbenchModel}
+                            onPin={setPinModel}
+                            onAlias={setAliasModel}
+                          />
+                        </div>
+                      );
+                    })}
+                  </div>
+                )}
+              </main>
+            </>
           )}
 
-          {/* Local GGUF models section */}
-          <div className="p-2 border-t border-forge-border/60 mt-1">
-            <p className="text-xs font-semibold text-text-muted mb-1">DevForge Imported Models</p>
-            {isLoadingLocal ? (
-              <div className="p-4 text-center text-xs text-text-muted">
-                Loading local models…
-              </div>
-            ) : filteredLocalModels.length === 0 ? (
-              <div className="p-3 text-xs text-text-muted">
-                No imported models. Go to Settings → LLM Backend to import models.
-              </div>
-            ) : (
-              <div className="space-y-1">
-                {filteredLocalModels.map((model) => (
-                  <button
-                    key={model.id}
-                    onClick={() => handleUseLocalModel(model)}
-                    className={`
-                      w-full flex items-center gap-3 px-3 py-2 rounded-lg
-                      transition-colors text-left hover:bg-forge-hover border border-transparent
-                    `}
-                    disabled={isCreatingFromLocal}
-                  >
-                    <div className="flex-shrink-0 w-9 h-9 rounded-lg bg-forge-elevated border border-forge-border flex items-center justify-center">
-                      <Cpu size={16} className="text-workspace-casual" />
+          {viewMode === 'browse' && (
+            <main className="min-h-0 flex-1 overflow-y-auto p-4">
+              {[
+                { id: 'ollama', title: modelTab === 'agentic' ? 'Agentic Research Models' : 'Ollama Models', models: filteredModels.filter((model) => model.source === 'ollama') },
+                { id: 'lmstudio', title: 'LM Studio Models', models: filteredModels.filter((model) => model.source === 'lmstudio'), action: scanLMStudio, busy: isScanningLMStudio },
+                { id: 'npu', title: 'NPU Models (OpenVINO)', models: filteredModels.filter((model) => model.source === 'npu'), hidden: !npuStatus.openvinoInstalled, busy: isLoadingNpu },
+                { id: 'llamanode', title: 'DevForge Imported Models', models: filteredModels.filter((model) => model.source === 'llamanode'), busy: isLoadingLocal || isCreatingFromLocal },
+              ].filter((section) => !section.hidden).map((section) => (
+                <section key={section.id} className="mb-4 rounded-xl border border-white/10 bg-black/15 p-3">
+                  <div className="mb-3 flex items-center justify-between gap-3">
+                    <div>
+                      <p className="text-xs font-semibold text-text-secondary">{section.title}</p>
+                      <p className="text-[10px] text-text-muted">{section.models.length} visible</p>
                     </div>
-                    
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs font-medium text-text-primary truncate">
-                        {model.name || model.filename}
-                      </p>
-                      <p className="text-[11px] text-text-muted truncate">
-                        GGUF • {model.sizeFormatted}
-                      </p>
+                    {section.action && (
+                      <button type="button" onClick={section.action} className="rounded-md p-1.5 text-text-muted hover:bg-white/10 hover:text-text-primary">
+                        {section.busy ? <Loader size={14} className="animate-spin" /> : <FolderSearch size={14} />}
+                      </button>
+                    )}
+                  </div>
+                  {section.models.length === 0 ? (
+                    <div className="rounded-lg border border-dashed border-white/10 p-4 text-xs text-text-muted">
+                      {section.id === 'ollama' ? 'No Ollama models found. Start Ollama, refresh, or open the Model Hub.' : `No ${section.title.toLowerCase()} found.`}
                     </div>
-
-                    <span className="text-[11px] text-workspace-casual flex-shrink-0">
-                      {isCreatingFromLocal && creatingModelName === (model.name || model.filename)
-                        ? 'Creating…'
-                        : 'Use via Ollama'}
-                    </span>
+                  ) : (
+                    <div className="space-y-2">
+                      {section.models.map((model) => (
+                        <VariantRow
+                          key={model.id}
+                          model={model}
+                          active={currentModel === model.rawId || currentModel === model.rawName}
+                          focused={focusedModel?.id === model.id}
+                          compareActive={compareIds.includes(model.id)}
+                          onUse={handleUseModel}
+                          onDetails={setDetailModel}
+                          onCompare={toggleCompare}
+                          onWorkbench={setWorkbenchModel}
+                          onPin={setPinModel}
+                          onAlias={setAliasModel}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </section>
+              ))}
+              {!npuStatus.openvinoInstalled && (
+                <section className="rounded-xl border border-white/10 bg-black/15 p-3">
+                  <p className="text-xs font-semibold text-text-secondary">NPU Models (OpenVINO)</p>
+                  <p className="mt-2 text-xs text-text-muted">OpenVINO is not configured yet. Use Settings to activate the NPU model converter.</p>
+                  <button type="button" onClick={openSettings} className="btn btn-secondary mt-3 text-xs">
+                    <Settings size={13} /> Open Settings
                   </button>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
+                </section>
+              )}
+            </main>
+          )}
 
-        {/* Footer */}
-        <div className="px-4 py-3 border-t border-forge-border bg-forge-bg/50">
-          <p className="text-xs text-text-muted text-center">
-            {availableModels.length} Ollama • {agenticModelCount} agentic picks • {lmStudioModels.length} LM Studio • {localModels.length} imported{npuModels.length > 0 ? ` • ${npuModels.length} NPU` : ''}
-          </p>
-        </div>
+          <footer className="border-t border-forge-border bg-forge-bg/60 px-4 py-3">
+            <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-text-muted">
+              <span>
+                {availableModels.length} Ollama · {lmStudioModels.length} LM Studio · {localModels.length} imported{npuModels.length ? ` · ${npuModels.length} NPU` : ''}
+                {isCreatingFromLocal && creatingModelName ? ` · registering ${creatingModelName}` : ''}
+              </span>
+              <span>
+                Keyboard: / search · arrows navigate · Enter use · Space compare · P pin · W workbench
+              </span>
+            </div>
+          </footer>
+
+          {compareModels.length > 0 && (
+            <CompareDrawer models={compareModels} onClose={() => setCompareIds([])} onUse={handleUseModel} onWorkbench={setWorkbenchModel} />
+          )}
+          <DetailsDrawer
+            model={detailModel && !compareModels.length ? detailModel : null}
+            onClose={() => setDetailModel(null)}
+            onCopy={(text) => navigator.clipboard?.writeText?.(text)}
+            onAlias={setAliasModel}
+            onFavorite={favoriteModel}
+            onRate={rateModel}
+          />
+          <PinDialog model={pinModel} onClose={() => setPinModel(null)} onSave={savePin} />
+          <AliasDialog model={aliasModel} onClose={() => setAliasModel(null)} onSave={saveAlias} />
+          <ModelExperienceWorkbench
+            open={Boolean(workbenchModel)}
+            onClose={() => setWorkbenchModel(null)}
+            model={workbenchModel?.rawId || workbenchModel?.rawName}
+            workspace={currentWorkspace}
+            experiencePlan={workbenchModel?.insight?.experiencePlan?.plan || null}
+            runtimeState={llmRuntimeState}
+            warnings={workbenchModel?.insight?.experiencePlan?.warnings || []}
+            onApplySession={() => {}}
+            onResetAuto={() => {}}
+          />
         </div>
       </motion.div>
     </ErrorBoundary>

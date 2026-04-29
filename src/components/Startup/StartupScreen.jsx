@@ -1,5 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import './startup.css';
+import { StartupVisual } from './StartupVisual';
+import { useAdaptiveStartupQuality } from './useAdaptiveStartupQuality';
 
 /**
  * StartupScreen - Premium, cinematic boot sequence.
@@ -24,6 +26,35 @@ const STATUS_BADGES = {
   complete: 'RDY',
 };
 
+// Cinematic visible phase ladder. The detailed IPC status remains intact
+// below; this is intentionally simpler so the startup reads like a boot
+// ritual instead of a technical checklist.
+const PHASE_TRACK = [
+  { id: 'wake', label: 'WAKE' },
+  { id: 'scan', label: 'SCAN' },
+  { id: 'forge', label: 'FORGE' },
+  { id: 'ready', label: 'READY' },
+];
+
+const PHASE_INDEX = PHASE_TRACK.reduce((acc, p, i) => {
+  acc[p.id] = i;
+  return acc;
+}, {});
+
+function resolveVisiblePhase(statusStep, progress = 0) {
+  if (statusStep === 'complete' || progress >= 0.95) return 'ready';
+  if (statusStep === 'ollama' || statusStep === 'healthMonitor' || progress >= 0.58) return 'forge';
+  if (statusStep === 'database' || statusStep === 'npu' || statusStep === 'imageBackend' || progress >= 0.25) return 'scan';
+  return 'wake';
+}
+
+const SYSTEM_ONLINE_LABELS = {
+  gpu: 'GPU ONLINE',
+  ram: 'MEMORY READY',
+  cpu: 'CPU LINKED',
+  npu: 'NPU READY',
+};
+
 function inferStatusStep(text) {
   const value = String(text || '').toLowerCase();
   if (!value) return 'init';
@@ -43,7 +74,7 @@ function WindowControls() {
 }
 
 // Ring progress indicator
-function ProgressRing({ progress, size = 120, strokeWidth = 2.5, celebrate = false, severity = 'normal', pulse = false }) {
+function ProgressRing({ progress, size = 120, strokeWidth = 2.5, celebrate = false, severity = 'normal', pulse = false, phase = 'wake' }) {
   const radius = (size - strokeWidth) / 2;
   const circumference = 2 * Math.PI * radius;
   const offset = circumference - progress * circumference;
@@ -58,6 +89,12 @@ function ProgressRing({ progress, size = 120, strokeWidth = 2.5, celebrate = fal
   const shimmerLength = circumference * 0.18;
   const shimmerStart = offset + circumference * 0.12;
   const shimmerEnd = offset - circumference * 0.45;
+  const apertureRadius = radius - 13;
+  const apertureCircumference = 2 * Math.PI * apertureRadius;
+  const apertureVisible = Math.max(0, Math.min(1, (t - 0.18) / 0.42));
+  const apertureOffset = apertureCircumference * (1 - Math.max(0.08, t));
+  const tickCount = 28;
+  const tickOpacity = Math.max(0, Math.min(1, (t - 0.24) / 0.32));
 
   const particleCount = 6;
   const showParticles = progress > 0.05 && progress < 1;
@@ -70,13 +107,63 @@ function ProgressRing({ progress, size = 120, strokeWidth = 2.5, celebrate = fal
     'su-ring-wrap',
     pulse ? 'is-pulse' : '',
     celebrate ? 'is-complete' : '',
+    `is-phase-${phase}`,
     severity === 'error' ? 'is-error' : '',
     severity === 'warning' ? 'is-warning' : '',
   ].filter(Boolean).join(' ');
 
   return (
     <div className={ringClass}>
-      <svg className="su-ring" width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+      <svg
+        className="su-ring"
+        width={size}
+        height={size}
+        viewBox={`0 0 ${size} ${size}`}
+        style={{ '--aperture-visible': apertureVisible, '--tick-visible': tickOpacity }}
+      >
+        {/* Forging aperture ticks */}
+        <g className="su-ring-ticks" transform={`translate(${size / 2} ${size / 2})`}>
+          {Array.from({ length: tickCount }, (_, i) => {
+            const angle = (360 / tickCount) * i;
+            const longTick = i % 7 === 0;
+            return (
+              <line
+                key={i}
+                x1={0}
+                y1={-(radius - (longTick ? 12 : 9))}
+                x2={0}
+                y2={-(radius - 4)}
+                transform={`rotate(${angle})`}
+              />
+            );
+          })}
+        </g>
+        {/* Inner aperture seal */}
+        <circle
+          className="su-ring-aperture su-ring-aperture--inner"
+          cx={size / 2} cy={size / 2} r={apertureRadius}
+          fill="none"
+          stroke={`url(#${gradientId})`}
+          strokeWidth={1}
+          strokeDasharray={`${apertureCircumference * 0.18} ${apertureCircumference * 0.08}`}
+          strokeDashoffset={apertureOffset}
+        />
+        <circle
+          className="su-ring-aperture su-ring-aperture--outer"
+          cx={size / 2} cy={size / 2} r={radius + 6}
+          fill="none"
+          stroke={`url(#${gradientId})`}
+          strokeWidth={0.8}
+          strokeDasharray={`${circumference * 0.12} ${circumference * 0.14}`}
+          strokeDashoffset={-offset * 0.35}
+        />
+        {/* DF reactor seal: intentionally geometric and quiet until completion. */}
+        <g className={`su-ring-seal ${celebrate ? 'is-locked' : ''}`} transform={`translate(${size / 2} ${size / 2})`}>
+          <circle className="su-ring-seal__halo" r={22} />
+          <path className="su-ring-seal__stroke" d="M -13 -16 L -13 16 L -2 16 C 8 16 14 9 14 0 C 14 -9 8 -16 -2 -16 Z" />
+          <path className="su-ring-seal__stroke" d="M -2 -16 L 15 -16 M -2 0 L 10 0 M -2 16 L -2 -16" />
+          <path className="su-ring-seal__spark" d="M 0 -27 L 0 -21 M 0 21 L 0 27 M -27 0 L -21 0 M 21 0 L 27 0" />
+        </g>
         {/* Track */}
         <circle
           cx={size / 2} cy={size / 2} r={radius}
@@ -165,6 +252,8 @@ export function StartupScreen({ onComplete }) {
   const [isExiting, setIsExiting] = useState(false);
   const [entered, setEntered] = useState(false);
   const [hardware, setHardware] = useState(null);
+  const [hardwareRaw, setHardwareRaw] = useState(null);
+  const [reducedMotion, setReducedMotion] = useState(false);
   const [showSpecs, setShowSpecs] = useState(false);
   const [ringPulse, setRingPulse] = useState(false);
   const [ringCelebrate, setRingCelebrate] = useState(false);
@@ -173,6 +262,10 @@ export function StartupScreen({ onComplete }) {
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [etaSeconds, setEtaSeconds] = useState(null);
   const [appVersion, setAppVersion] = useState('v0.1.0');
+  // Lock tier upgrades during the boot screen — the surface only lives for
+  // a few seconds, so any mid-flight upgrade would cost a visible WebGL
+  // canvas remount (the source of the bright flash users were seeing).
+  const { tier: qualityTier, reportFrameTime } = useAdaptiveStartupQuality(hardwareRaw, { lockUpgrades: true });
 
   const rootRef = useRef(null);
   const targetProgressRef = useRef(0);
@@ -302,6 +395,18 @@ export function StartupScreen({ onComplete }) {
           specs: { gpu, ram, cpu, npu },
           metrics,
         });
+        // Adapt the raw hardware shape to what useAdaptiveStartupQuality
+        // expects (gpu.name + gpu.vram + ram.total + cpu.cores + npu.detected),
+        // so the WebGL/CSS visual can pick a sensible quality tier early.
+        setHardwareRaw({
+          gpu: {
+            name: gpuName,
+            vram: vramGB > 0 ? `${vramGB}GB` : null,
+          },
+          ram: hw.memory?.totalGB ? { total: `${hw.memory.totalGB}GB` } : null,
+          cpu: hw.cpu?.cores?.physical ? { cores: hw.cpu.cores.physical } : null,
+          npu: hw.npu?.detected ? { detected: true } : null,
+        });
       } catch {
         setHardware({
           specs: { gpu: 'GPU', ram: 'RAM', cpu: 'CPU', npu: null },
@@ -340,8 +445,10 @@ export function StartupScreen({ onComplete }) {
   useEffect(() => {
     const media = window.matchMedia?.('(prefers-reduced-motion: reduce)');
     const applyMotionPreference = () => {
-      motionReducedRef.current = Boolean(media?.matches);
-      if (motionReducedRef.current && rootRef.current) {
+      const reduced = Boolean(media?.matches);
+      motionReducedRef.current = reduced;
+      setReducedMotion(reduced);
+      if (reduced && rootRef.current) {
         rootRef.current.style.setProperty('--su-parallax-x', '0px');
         rootRef.current.style.setProperty('--su-parallax-y', '0px');
       }
@@ -533,7 +640,7 @@ export function StartupScreen({ onComplete }) {
         return val;
       });
 
-      if (nextProgress >= 0.7 && !showSpecs) {
+      if (nextProgress >= 0.35 && !showSpecs) {
         setShowSpecs(true);
       }
 
@@ -597,7 +704,7 @@ export function StartupScreen({ onComplete }) {
     if (isExiting || completedRef.current) return;
     completedRef.current = true;
     setIsExiting(true);
-    if (onComplete) setTimeout(() => onComplete(), 600);
+    if (onComplete) setTimeout(() => onComplete(), 700);
   }, [isExiting, onComplete]);
 
   const handleRetryStartup = useCallback(() => {
@@ -679,17 +786,43 @@ export function StartupScreen({ onComplete }) {
       '--su-accent-h1': `${hue1}`,
       '--su-accent-h2': `${hue2}`,
       '--su-progress': `${t}`,
+      '--su-glow': `${0.18 + 0.42 * t}`,
     };
   }, [bootProgress]);
+
+  const visiblePhase = useMemo(() => resolveVisiblePhase(statusStep, bootProgress), [statusStep, bootProgress]);
+
+  // Drive the StartupVisual phase prop from progress + the active step.
+  // 0 dormant, 1 awakening, 2 alive, 3 ready.
+  const visualPhase = useMemo(() => {
+    if (visiblePhase === 'ready') return 3;
+    if (visiblePhase === 'forge') return 2;
+    if (visiblePhase === 'scan') return 1;
+    return 0;
+  }, [visiblePhase]);
+
+  const phaseProgress = useMemo(() => {
+    const idx = PHASE_INDEX[visiblePhase] ?? 0;
+    return PHASE_TRACK.map((step, i) => {
+      const stepProgress = idx > i
+        ? 1
+        : (idx === i ? Math.max(0.15, Math.min(1, bootProgress)) : 0);
+      return { ...step, active: i === idx, complete: i < idx, progress: stepProgress };
+    });
+  }, [visiblePhase, bootProgress]);
+
+  const showSovereignLine = visiblePhase === 'ready' || bootProgress >= 0.92 || ringCelebrate;
 
   const severityClass = startupSeverity === 'error'
     ? 'su--error'
     : (startupSeverity === 'warning' ? 'su--warning' : '');
 
+  const readyClass = showSovereignLine ? 'su--runtime-ready' : '';
+
   return (
     <div
       ref={rootRef}
-      className={`su ${entered ? 'su--entered' : ''} ${isExiting ? 'su--exit' : ''} ${severityClass}`}
+      className={`su ${entered ? 'su--entered' : ''} ${isExiting ? 'su--exit' : ''} ${severityClass} ${readyClass}`}
       style={rootStyle}
       aria-busy={!isExiting && bootProgress < 1}
     >
@@ -697,25 +830,27 @@ export function StartupScreen({ onComplete }) {
       <div className="su-titlebar" />
       <WindowControls />
 
-      {/* Ambient background */}
+      {/* Ambient background — rich layered visual with quality adaptation
+          and reduced-motion fallback. The parallax wrapper still receives
+          the pointer offset so the whole backdrop drifts gently. */}
       <div className="su-bg">
         <div className="su-bg-parallax">
-          <div className="su-bg-orb su-bg-orb--1" />
-          <div className="su-bg-orb su-bg-orb--2" />
-          <div className="su-bg-orb su-bg-orb--3" />
+          <StartupVisual
+            bootProgress={bootProgress}
+            phase={visualPhase}
+            reducedMotion={reducedMotion}
+            qualityTier={qualityTier}
+            reportFrameTime={reportFrameTime}
+          />
         </div>
       </div>
 
       {/* Center content */}
       <div className="su-center">
-        <div className="su-brand-meta" aria-hidden="true">
-          <span className="su-brand-mark">DF</span>
-          <span className="su-brand-version">{appVersion}</span>
-        </div>
-
-        {/* Progress ring + percentage */}
+        {/* Progress ring + percentage. Soft backdrop disc keeps the ring
+            readable against the layered WebGL backdrop without going opaque. */}
         <div
-          className="su-ring-shell"
+          className={`su-ring-shell ${ringCelebrate ? 'is-sealed' : ''}`}
           role="progressbar"
           aria-label="Application startup progress"
           aria-valuemin={0}
@@ -723,9 +858,11 @@ export function StartupScreen({ onComplete }) {
           aria-valuenow={pct}
           aria-valuetext={`${pct}%`}
         >
-          <ProgressRing progress={bootProgress} size={140} strokeWidth={2} celebrate={ringCelebrate} severity={startupSeverity} pulse={ringPulse} />
+          <span className="su-ring-disc" aria-hidden="true" />
+          <ProgressRing progress={bootProgress} size={140} strokeWidth={2} celebrate={ringCelebrate} severity={startupSeverity} pulse={ringPulse} phase={visiblePhase} />
           <div className="su-ring-inner">
             <span className={`su-pct ${ringCelebrate ? 'is-celebrating' : ''}`}>{pct}</span>
+            <span className="su-pct-mark" aria-hidden="true">%</span>
           </div>
         </div>
 
@@ -754,6 +891,30 @@ export function StartupScreen({ onComplete }) {
           )}
           {etaLabel && <span className="su-status-eta">ETA {etaLabel}</span>}
           <span className="su-status-time">{elapsedLabel}</span>
+        </div>
+
+        {/* Cinematic phase ladder. Aria-hidden because the spoken status line
+            above already conveys real startup progress. */}
+        <ol className="su-phase-track" aria-hidden="true">
+          {phaseProgress.map((step) => (
+            <li
+              key={step.id}
+              className={[
+                'su-phase-step',
+                step.complete ? 'is-complete' : '',
+                step.active ? 'is-active' : '',
+              ].filter(Boolean).join(' ')}
+              style={{ '--phase-fill': step.progress }}
+            >
+              <span className="su-phase-dot" />
+              <span className="su-phase-label">{step.label}</span>
+            </li>
+          ))}
+        </ol>
+
+        <div className={`su-sovereign-line ${showSovereignLine ? 'su-sovereign-line--visible' : ''}`} aria-hidden="true">
+          <span className="su-sovereign-dot" />
+          <span>Sovereign runtime initialized</span>
         </div>
 
         {startupIssue && (
@@ -789,7 +950,10 @@ export function StartupScreen({ onComplete }) {
           {specs.map((spec, i) => (
             <span key={spec.key} className="su-spec" style={{ animationDelay: `${i * 0.08}s` }}>
               <span className="su-spec-icon">{spec.icon}</span>
-              <span className="su-spec-label">{spec.label}</span>
+              <span className="su-spec-copy">
+                <span className="su-spec-label">{SYSTEM_ONLINE_LABELS[spec.key] || spec.icon}</span>
+                <span className="su-spec-detail">{spec.label}</span>
+              </span>
             </span>
           ))}
           {miniMetrics.length > 0 && (
@@ -801,6 +965,14 @@ export function StartupScreen({ onComplete }) {
           )}
         </div>
       )}
+
+      {/* Quiet version stamp in the bottom-left, mirror of the Skip button.
+          Replaces the old floating brand-meta above the ring so the ring
+          can own the upper centerline. */}
+      <div className="su-version-stamp" aria-hidden="true">
+        <span className="su-version-mark">DEVFORGE</span>
+        <span className="su-version-tag">{appVersion}</span>
+      </div>
 
       {/* Skip */}
       <button className="su-skip" onClick={handleSkip}>

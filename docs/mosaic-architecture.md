@@ -2,6 +2,18 @@
 
 Mosaic is the Phase 3 R&D path for deciding whether DevForge should build a custom multi-device coordinator that can place model layers across the RTX 5050 Laptop GPU, Intel Arc 140T iGPU, Intel NPU 3, CPU, and pinned system RAM. Gate 1 is deliberately a simulator gate: no runtime is promoted until measured profiles project enough capacity and enough speed.
 
+## LM Studio Quality Bar
+
+Mosaic is not allowed to make the daily app feel experimental. Normal chat,
+model selection, direct GGUF loading, context controls, model eject/unload,
+per-model system prompts, backend overrides, streaming stability, and fallback
+behavior must remain at LM Studio quality while Mosaic stays hidden behind
+`DEVFORGE_MOSAIC_DEV=1` and `DEVFORGE_MOSAIC_ENABLE=1`.
+
+Any Mosaic failure must either stay inside dev-only diagnostics or fall back to
+the existing runtime without changing normal backend routing. Speculative
+decoding remains a separate opt-in path behind `DEVFORGE_SPEC_DECODE_ENABLE=1`.
+
 ## Gate 1 Decision Rule
 
 Gate 1 **passes** only when the simulator projects both:
@@ -63,4 +75,22 @@ The simulator treats a model as evenly sized decoder layers. It combines measure
 
 ## Post-Gate Work
 
-If Gate 1 passes, a separate Phase 3 build plan decides the native coordinator language (Node N-API vs Rust `napi-rs`) and the actual layer execution design. If Gate 1 fails, the tracker marks Mosaic cancelled and DevForge stays on the v0.4 classic runtime track.
+Gate 1 passed in v0.4.8, so Phase 3 proceeds as a hidden MVP. The coordinator
+language is Rust `napi-rs`, with a JS facade that returns clean blocked states
+when the native addon or combined CUDA+Vulkan runner is not available.
+
+Gate 2 uses `deepseek-coder:33b` as the installed 32B-class Q4 target. It
+passes only if live Mosaic throughput is at least `1.5x` the RTX+CPU partial
+offload baseline on the same model, prompts, context, and runner. If Gate 2
+blocks or fails, Mosaic remains dev-only.
+
+Native build wiring is available through `npm run build:native:mosaic`, which
+copies the Rust `napi-rs` addon to `native/mosaic-coordinator/index.node`.
+Runner readiness can be checked with `npm run eval:mosaic-probe -- <llama-cli>`.
+The probe blocks runners that do not expose the Gate 2 CLI contract (`-p`,
+context size, GPU layers, split mode, tensor split, temperature, and device
+assignment for combined execution).
+
+Current live Gate 2 result on this machine is **FAIL**: `deepseek-coder:33b`
+baseline measured `4.7 TPS`, tuned Mosaic measured `4.3 TPS`, for `0.915x`
+speedup against the required `1.5x`. Mosaic stays hidden/dev-only.

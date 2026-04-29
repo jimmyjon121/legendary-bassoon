@@ -601,15 +601,17 @@ async function createWindow() {
     maximizable: true,
     minimizable: true,
     fullscreenable: true,
-    titleBarStyle: 'hidden',
-    ...(isMac ? { trafficLightPosition: { x: 15, y: 15 } } : {}),
+    ...(isWin ? {
+      // DevForge renders its own titlebar/window controls. A framed Windows
+      // titlebar overlay draws native controls on top of them, causing the
+      // duplicated top-right buttons users were seeing.
+      frame: false,
+    } : {
+      titleBarStyle: 'hidden',
+      ...(isMac ? { trafficLightPosition: { x: 15, y: 15 } } : {}),
+    }),
     ...(isWin ? {
       thickFrame: true,
-      titleBarOverlay: {
-        color: '#00000000',
-        symbolColor: '#999999',
-        height: 48,
-      },
     } : {}),
     webPreferences: {
       nodeIntegration: false,

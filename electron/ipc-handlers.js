@@ -36,6 +36,9 @@ const vaultLore = require('./services/vault-lore');
 const audioLayer = require('./services/audio-layer');
 const hapticBridge = require('./services/haptic-bridge');
 const characterEvolution = require('./services/character-evolution');
+const mosaicCoordinator = require('./services/mosaic-coordinator');
+const { createModelExperienceWorkbench } = require('./services/model-experience-workbench');
+const { createModelLoadConfidence } = require('./services/model-load-confidence');
 
 // =============================================================================
 // LAZY SERVICE LOADING - Services are loaded on-demand for faster startup
@@ -80,6 +83,7 @@ const {
   buildExecutionPlan,
   getNormalizedModelInfo,
 } = require('./services/llm-execution-resolver');
+const modelExperienceResolver = require('./services/model-experience-resolver');
 
 // =============================================================================
 // LAZY SERVICE GETTERS - Only load when first accessed
@@ -775,6 +779,9 @@ async function initDatabase(userDataPath, store = null) {
       workspace TEXT,
       is_default INTEGER DEFAULT 0,
       device_pin TEXT,
+      task_intent TEXT,
+      advanced_options TEXT,
+      vault_allowed INTEGER DEFAULT 0,
       created_at DATETIME DEFAULT CURRENT_TIMESTAMP
     )
   `);
@@ -788,6 +795,9 @@ async function initDatabase(userDataPath, store = null) {
       : [];
     const hasCreatedAt = columns.includes('created_at');
     const hasDevicePin = columns.includes('device_pin');
+    const hasTaskIntent = columns.includes('task_intent');
+    const hasAdvancedOptions = columns.includes('advanced_options');
+    const hasVaultAllowed = columns.includes('vault_allowed');
 
     if (!hasCreatedAt) {
       try {
@@ -801,6 +811,27 @@ async function initDatabase(userDataPath, store = null) {
         db.run(`ALTER TABLE model_presets ADD COLUMN device_pin TEXT`);
       } catch (migrationErr) {
         console.warn('[DB] model_presets.device_pin migration skipped:', migrationErr.message);
+      }
+    }
+    if (!hasTaskIntent) {
+      try {
+        db.run(`ALTER TABLE model_presets ADD COLUMN task_intent TEXT`);
+      } catch (migrationErr) {
+        console.warn('[DB] model_presets.task_intent migration skipped:', migrationErr.message);
+      }
+    }
+    if (!hasAdvancedOptions) {
+      try {
+        db.run(`ALTER TABLE model_presets ADD COLUMN advanced_options TEXT`);
+      } catch (migrationErr) {
+        console.warn('[DB] model_presets.advanced_options migration skipped:', migrationErr.message);
+      }
+    }
+    if (!hasVaultAllowed) {
+      try {
+        db.run(`ALTER TABLE model_presets ADD COLUMN vault_allowed INTEGER DEFAULT 0`);
+      } catch (migrationErr) {
+        console.warn('[DB] model_presets.vault_allowed migration skipped:', migrationErr.message);
       }
     }
   } catch (migrationErr) {
@@ -1793,6 +1824,70 @@ function sanitizeOptionSet(rawOptions = {}) {
   return next;
 }
 
+function sanitizeExperiencePlan(rawPlan = null) {
+  if (!rawPlan || typeof rawPlan !== 'object' || Array.isArray(rawPlan)) return null;
+  const profile = rawPlan.profile && typeof rawPlan.profile === 'object'
+    ? {
+      model: String(rawPlan.profile.model || '').slice(0, 256) || null,
+      family: String(rawPlan.profile.family || 'chat').slice(0, 80),
+      paramBillions: Number.isFinite(Number(rawPlan.profile.paramBillions)) ? Number(rawPlan.profile.paramBillions) : null,
+      quantization: String(rawPlan.profile.quantization || 'unknown').slice(0, 40),
+      contextLimit: Number.isFinite(Number(rawPlan.profile.contextLimit)) ? Number(rawPlan.profile.contextLimit) : null,
+      workspace: String(rawPlan.profile.workspace || '').slice(0, 40) || null,
+      primaryStrength: String(rawPlan.profile.primaryStrength || '').slice(0, 40) || null,
+    }
+    : null;
+  const taskIntent = modelExperienceResolver.normalizeTaskIntent(rawPlan.taskIntent || 'auto');
+  const tuningMode = String(rawPlan.tuningMode || 'auto').trim().toLowerCase() === 'advanced'
+    ? 'advanced'
+    : 'auto';
+  const softBackendPreference = modelExperienceResolver.normalizeBackend(rawPlan.softBackendPreference);
+  const explicitBackendPin = modelExperienceResolver.normalizeBackend(rawPlan.explicitBackendPin);
+  const lastGoodHint = rawPlan.lastGoodHint && typeof rawPlan.lastGoodHint === 'object'
+    ? {
+      backend: modelExperienceResolver.normalizeBackend(rawPlan.lastGoodHint.backend),
+      context: Number.isFinite(Number(rawPlan.lastGoodHint.context)) ? Number(rawPlan.lastGoodHint.context) : null,
+      batch: Number.isFinite(Number(rawPlan.lastGoodHint.batch)) ? Number(rawPlan.lastGoodHint.batch) : null,
+      kvCacheType: String(rawPlan.lastGoodHint.kvCacheType || '').slice(0, 40) || null,
+      numPredict: Number.isFinite(Number(rawPlan.lastGoodHint.numPredict)) ? Number(rawPlan.lastGoodHint.numPredict) : null,
+      createdAt: String(rawPlan.lastGoodHint.createdAt || '').slice(0, 80) || null,
+    }
+    : null;
+  const safeArray = (value) => Array.isArray(value)
+    ? value.map((item) => String(item || '').slice(0, 160)).filter(Boolean).slice(0, 20)
+    : [];
+
+  return {
+    id: String(rawPlan.id || '').slice(0, 80) || null,
+    source: String(rawPlan.source || 'model-experience-autopilot').slice(0, 80),
+    model: String(rawPlan.model || '').slice(0, 256) || null,
+    workspace: String(rawPlan.workspace || '').slice(0, 40) || null,
+    taskIntent,
+    tuningMode,
+    profile,
+    effectiveOptions: sanitizeOptionSet(rawPlan.effectiveOptions || {}),
+    softBackendPreference,
+    explicitBackendPin,
+    lastGoodHint,
+    warnings: safeArray(rawPlan.warnings),
+    reasons: safeArray(rawPlan.reasons),
+    overrideTrace: safeArray(rawPlan.overrideTrace),
+    clampReasons: safeArray(rawPlan.clampReasons),
+    summary: rawPlan.summary && typeof rawPlan.summary === 'object'
+      ? {
+        taskIntent: modelExperienceResolver.normalizeTaskIntent(rawPlan.summary.taskIntent || taskIntent),
+        tuningMode,
+        modelFamily: String(rawPlan.summary.modelFamily || profile?.family || 'chat').slice(0, 80),
+        context: Number.isFinite(Number(rawPlan.summary.context)) ? Number(rawPlan.summary.context) : null,
+        softBackendPreference,
+        explicitBackendPin,
+        warningCount: Number.isFinite(Number(rawPlan.summary.warningCount)) ? Number(rawPlan.summary.warningCount) : 0,
+      }
+      : null,
+    createdAt: Number.isFinite(Number(rawPlan.createdAt)) ? Number(rawPlan.createdAt) : Date.now(),
+  };
+}
+
 function sanitizeInferenceInput(rawPayload = {}) {
   if (!rawPayload || typeof rawPayload !== 'object') {
     throw new Error('Inference payload must be an object');
@@ -1853,8 +1948,13 @@ function sanitizeInferenceInput(rawPayload = {}) {
     'openvino-hybrid',
     'llamacpp-vulkan',
   ]);
+  if (mosaicCoordinator.isMosaicRuntimeEnabled()) {
+    ALLOWED_FORCE_BACKENDS.add('mosaic');
+  }
   const rawForceBackend = typeof rawPayload.forceBackend === 'string' ? rawPayload.forceBackend.trim() : '';
   const forceBackend = rawForceBackend && ALLOWED_FORCE_BACKENDS.has(rawForceBackend) ? rawForceBackend : null;
+  const softBackendPreference = modelExperienceResolver.normalizeBackend(rawPayload.softBackendPreference);
+  const experiencePlan = sanitizeExperiencePlan(rawPayload.experiencePlan || null);
 
   return {
     model,
@@ -1873,6 +1973,8 @@ function sanitizeInferenceInput(rawPayload = {}) {
     forceCompatMode: rawPayload.forceCompatMode === true,
     forceModelFallback: rawPayload.forceModelFallback === true,
     forceBackend,
+    softBackendPreference,
+    experiencePlan,
     tools,
   };
 }
@@ -2366,6 +2468,79 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     return { success: true };
   });
 
+  ipcMain.handle('model:resolveExperiencePlan', async (_, payload = {}) => {
+    const safePayload = payload && typeof payload === 'object' ? payload : {};
+    const model = String(safePayload.model || '').trim();
+    const workspace = String(safePayload.workspace || 'casual').trim() || 'casual';
+    if (!model) {
+      return {
+        success: false,
+        error: 'Model is required',
+        profile: null,
+        plan: null,
+        warnings: ['Model is required'],
+        reasons: ['missing-model'],
+      };
+    }
+
+    let profile = safePayload.profile && typeof safePayload.profile === 'object'
+      ? safePayload.profile
+      : null;
+    let profileError = null;
+    try {
+      const manager = await ensureModelExperienceManager();
+      if (manager?.analyzeModel) {
+        profile = await manager.analyzeModel(model);
+      }
+    } catch (error) {
+      profileError = error?.message || String(error);
+    }
+
+    let runtimeState = safePayload.runtimeState && typeof safePayload.runtimeState === 'object'
+      ? safePayload.runtimeState
+      : null;
+    try {
+      runtimeState = orchestrator?.getRuntimeState?.() || runtimeState;
+    } catch (_) {
+      // Non-blocking: resolver has metadata and safe defaults.
+    }
+
+    let preset = null;
+    try {
+      preset = getActiveModelPreset(model, workspace);
+    } catch (error) {
+      console.warn('[ModelExperience] Failed to read active preset:', error?.message || error);
+    }
+
+    let lastKnownGood = safePayload.lastKnownGood && typeof safePayload.lastKnownGood === 'object'
+      ? safePayload.lastKnownGood
+      : null;
+    try {
+      if (!lastKnownGood && modelLoadConfidence?.getLastKnownGood) {
+        lastKnownGood = modelLoadConfidence.getLastKnownGood({ model, workspace });
+      }
+    } catch (_) {
+      lastKnownGood = null;
+    }
+
+    const result = modelExperienceResolver.resolveModelExperiencePlan({
+      ...safePayload,
+      model,
+      workspace,
+      profile,
+      preset,
+      lastKnownGood,
+      runtimeState,
+      performanceProfile: safePayload.performanceProfile || runtimeState?.profile || store?.get?.('performanceProfile') || 'balanced',
+    });
+
+    if (profileError && result?.warnings && Array.isArray(result.warnings)) {
+      result.warnings.push(`MAEE profile unavailable: ${profileError}`);
+    }
+
+    return result;
+  });
+
   // Sovereignty Status - reports whether app is running in local-only mode
   ipcMain.handle('sovereignty:getStatus', async () => {
     const settings = store.get('settings') || {};
@@ -2408,6 +2583,8 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         effectiveContextLength: executionPlan.effectiveContextLength,
         effectiveOptions: executionPlan.effectiveOptions,
         backendId: executionPlan.backendId || null,
+        softBackendPreference: safePayload.softBackendPreference || null,
+        experiencePlan: safePayload.experiencePlan || null,
         reasons: Array.isArray(executionPlan.reasons) ? executionPlan.reasons : [],
       };
 
@@ -2427,6 +2604,8 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         ...(executionPlan.requestBody.images ? { images: executionPlan.requestBody.images } : {}),
         ...(Array.isArray(safePayload.tools) ? { tools: safePayload.tools } : {}),
         ...(safePayload.forceBackend ? { forceBackend: safePayload.forceBackend } : {}),
+        ...(safePayload.softBackendPreference ? { softBackendPreference: safePayload.softBackendPreference } : {}),
+        ...(safePayload.experiencePlan ? { experiencePlan: safePayload.experiencePlan } : {}),
       };
 
       const invokeBackend = async () => {
@@ -2589,6 +2768,8 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         effectiveContextLength: executionPlan.effectiveContextLength,
         effectiveOptions: executionPlan.effectiveOptions,
         backendId: executionPlan.backendId || null,
+        softBackendPreference: safePayload.softBackendPreference || null,
+        experiencePlan: safePayload.experiencePlan || null,
         reasons: Array.isArray(executionPlan.reasons) ? executionPlan.reasons : [],
       };
 
@@ -2611,6 +2792,8 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
             ...(executionPlan.requestBody.images ? { images: executionPlan.requestBody.images } : {}),
             ...(Array.isArray(safePayload.tools) ? { tools: safePayload.tools } : {}),
             ...(safePayload.forceBackend ? { forceBackend: safePayload.forceBackend } : {}),
+            ...(safePayload.softBackendPreference ? { softBackendPreference: safePayload.softBackendPreference } : {}),
+            ...(safePayload.experiencePlan ? { experiencePlan: safePayload.experiencePlan } : {}),
           };
 
           const streamResult = await orchestrator.stream(inferencePayload, (chunk) => {
@@ -5645,7 +5828,26 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
 
   ipcMain.handle('dev:isMosaicEnabled', () => ({
     enabled: process.env.DEVFORGE_MOSAIC_DEV === '1',
+    runtimeEnabled: mosaicCoordinator.isMosaicRuntimeEnabled(),
   }));
+
+  ipcMain.handle('dev:mosaicProbe', async (_, payload = {}) => {
+    if (process.env.DEVFORGE_MOSAIC_DEV !== '1') {
+      return { available: false, blockedReason: 'mosaic_dev_mode_disabled' };
+    }
+    try {
+      return mosaicCoordinator.probeRuntime({
+        ...(payload && typeof payload === 'object' ? payload : {}),
+        requireCombinedBackends: payload?.requireCombinedBackends !== false,
+      });
+    } catch (error) {
+      return {
+        available: false,
+        blockedReason: 'mosaic_probe_failed',
+        error: error?.message || String(error),
+      };
+    }
+  });
 
   ipcMain.handle('dev:readMosaicArtifacts', async () => {
     if (process.env.DEVFORGE_MOSAIC_DEV !== '1') {
@@ -5671,6 +5873,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       decision: await readJson('decision.json'),
       sim14b: await readJson('sim-14b.json'),
       sim30b: await readJson('sim-30b.json'),
+      gate2: await readJson('gate2-decision.json'),
     };
   });
 
@@ -5891,68 +6094,122 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   // Model Presets
   // ============================================
 
-  ipcMain.handle('presets:getForModel', (_, { modelName, workspace }) => {
-    if (!db) return [];
+  const readModelPresetColumns = () => {
+    const presetInfo = db?.exec?.('PRAGMA table_info(model_presets)');
+    const columns = Array.isArray(presetInfo?.[0]?.values)
+      ? presetInfo[0].values.map((row) => row?.[1])
+      : [];
+    return {
+      hasCreatedAt: columns.includes('created_at'),
+      hasDevicePin: columns.includes('device_pin'),
+      hasTaskIntent: columns.includes('task_intent'),
+      hasAdvancedOptions: columns.includes('advanced_options'),
+      hasVaultAllowed: columns.includes('vault_allowed'),
+    };
+  };
+
+  const parsePresetAdvancedOptions = (value) => {
+    if (!value) return {};
+    if (typeof value === 'object' && !Array.isArray(value)) {
+      return modelExperienceResolver.sanitizeAdvancedOptions(value);
+    }
+    if (typeof value !== 'string') return {};
     try {
-      const presetInfo = db.exec('PRAGMA table_info(model_presets)');
-      const columns = Array.isArray(presetInfo?.[0]?.values)
-        ? presetInfo[0].values.map((row) => row?.[1])
-        : [];
-      const hasCreatedAt = columns.includes('created_at');
-      const hasDevicePin = columns.includes('device_pin');
+      return modelExperienceResolver.sanitizeAdvancedOptions(JSON.parse(value));
+    } catch {
+      return {};
+    }
+  };
 
-      const orderBy = hasCreatedAt
-        ? 'ORDER BY is_default DESC, created_at DESC'
-        : 'ORDER BY is_default DESC';
+  const modelPresetRowToObject = (row, flags) => {
+    const [
+      id,
+      model_name,
+      temperature,
+      top_p,
+      top_k,
+      context_length,
+      system_prompt,
+      ws,
+      is_default,
+      device_pin = null,
+      task_intent = null,
+      advanced_options = null,
+      vault_allowed = 0,
+    ] = row;
+    return {
+      id,
+      model_name,
+      temperature,
+      top_p,
+      top_k,
+      context_length,
+      system_prompt,
+      workspace: ws,
+      is_default: !!is_default,
+      device_pin: flags.hasDevicePin ? (device_pin || null) : null,
+      task_intent: flags.hasTaskIntent
+        ? modelExperienceResolver.normalizeTaskIntent(task_intent || 'auto')
+        : 'auto',
+      advanced_options: flags.hasAdvancedOptions
+        ? parsePresetAdvancedOptions(advanced_options)
+        : {},
+      vault_allowed: flags.hasVaultAllowed ? !!vault_allowed : false,
+    };
+  };
 
-      const selectCols = hasDevicePin
-        ? 'id, model_name, temperature, top_p, top_k, context_length, system_prompt, workspace, is_default, device_pin'
-        : 'id, model_name, temperature, top_p, top_k, context_length, system_prompt, workspace, is_default';
+  const getModelPresetRows = (modelName, workspace) => {
+    if (!db) return [];
+    const flags = readModelPresetColumns();
+    const orderBy = flags.hasCreatedAt
+      ? 'ORDER BY is_default DESC, created_at DESC'
+      : 'ORDER BY is_default DESC';
+    const selectCols = [
+      'id',
+      'model_name',
+      'temperature',
+      'top_p',
+      'top_k',
+      'context_length',
+      'system_prompt',
+      'workspace',
+      'is_default',
+      flags.hasDevicePin ? 'device_pin' : 'NULL AS device_pin',
+      flags.hasTaskIntent ? 'task_intent' : 'NULL AS task_intent',
+      flags.hasAdvancedOptions ? 'advanced_options' : 'NULL AS advanced_options',
+      flags.hasVaultAllowed ? 'vault_allowed' : '0 AS vault_allowed',
+    ].join(', ');
 
-      const result = db.exec(
-        `
+    const result = db.exec(
+      `
         SELECT ${selectCols}
         FROM model_presets
         WHERE model_name = ?
           AND (workspace IS NULL OR workspace = '' OR workspace = ?)
         ${orderBy}
       `,
-        [modelName, workspace || null],
-      );
-      if (!result.length) return [];
-      return result[0].values.map((row) => {
-        const [
-          id,
-          model_name,
-          temperature,
-          top_p,
-          top_k,
-          context_length,
-          system_prompt,
-          ws,
-          is_default,
-          device_pin = null,
-        ] = row;
-        return {
-          id,
-          model_name,
-          temperature,
-          top_p,
-          top_k,
-          context_length,
-          system_prompt,
-          workspace: ws,
-          is_default: !!is_default,
-          device_pin: hasDevicePin ? (device_pin || null) : null,
-        };
-      });
+      [modelName, workspace || null],
+    );
+    if (!result.length) return [];
+    return result[0].values.map((row) => modelPresetRowToObject(row, flags));
+  };
+
+  const getActiveModelPreset = (modelName, workspace) => {
+    const rows = getModelPresetRows(modelName, workspace);
+    return rows.find((row) => row?.is_default) || rows[0] || null;
+  };
+
+  ipcMain.handle('presets:getForModel', (_, { modelName, workspace }) => {
+    if (!db) return [];
+    try {
+      return getModelPresetRows(modelName, workspace);
     } catch (error) {
       console.error('Failed to load model presets:', error);
       return [];
     }
   });
 
-  ipcMain.handle('presets:save', (_, preset) => {
+  const saveModelPresetPayload = (preset) => {
     if (!db) return { success: false, error: 'Database not initialized' };
     try {
       const modelName = String(preset?.model_name || '').trim().slice(0, 256);
@@ -5986,6 +6243,10 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       ]);
       const rawDevicePin = typeof preset?.device_pin === 'string' ? preset.device_pin.trim() : '';
       const safeDevicePin = rawDevicePin && ALLOWED_DEVICE_PINS.has(rawDevicePin) ? rawDevicePin : null;
+      const safeTaskIntent = modelExperienceResolver.normalizeTaskIntent(preset?.task_intent || 'auto');
+      const safeAdvancedOptions = modelExperienceResolver.sanitizeAdvancedOptions(preset?.advanced_options || {});
+      const safeAdvancedOptionsJson = JSON.stringify(safeAdvancedOptions);
+      const safeVaultAllowed = preset?.vault_allowed === true || preset?.vault_allowed === 1 ? 1 : 0;
 
       const values = [
         id,
@@ -5998,12 +6259,15 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         safeWorkspace,
         preset.is_default ? 1 : 0,
         safeDevicePin,
+        safeTaskIntent,
+        safeAdvancedOptionsJson,
+        safeVaultAllowed,
       ];
 
       db.run(
         `
-        INSERT INTO model_presets (id, model_name, temperature, top_p, top_k, context_length, system_prompt, workspace, is_default, device_pin)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO model_presets (id, model_name, temperature, top_p, top_k, context_length, system_prompt, workspace, is_default, device_pin, task_intent, advanced_options, vault_allowed)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           model_name = excluded.model_name,
           temperature = excluded.temperature,
@@ -6013,7 +6277,10 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
           system_prompt = excluded.system_prompt,
           workspace = excluded.workspace,
           is_default = excluded.is_default,
-          device_pin = excluded.device_pin
+          device_pin = excluded.device_pin,
+          task_intent = excluded.task_intent,
+          advanced_options = excluded.advanced_options,
+          vault_allowed = excluded.vault_allowed
       `,
         values,
       );
@@ -6024,6 +6291,10 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       console.error('Failed to save model preset:', error);
       return { success: false, error: error.message };
     }
+  };
+
+  ipcMain.handle('presets:save', (_, preset) => {
+    return saveModelPresetPayload(preset);
   });
 
   ipcMain.handle('presets:delete', (_, id) => {
@@ -6059,6 +6330,287 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       console.error('Failed to set default preset:', error);
       return { success: false, error: error.message };
     }
+  });
+
+  const modelLoadConfidence = createModelLoadConfidence({
+    getDb: () => db,
+    saveDatabase,
+  });
+  try {
+    modelLoadConfidence.ensureTables();
+  } catch (error) {
+    console.warn('[ModelLoadConfidence] Failed to initialize local history:', error?.message || error);
+  }
+
+  const sanitizeLoadConfidencePayload = (payload = {}) => {
+    const safe = payload && typeof payload === 'object' ? payload : {};
+    return {
+      model: String(safe.model || '').trim().slice(0, 1024),
+      workspace: String(safe.workspace || 'casual').trim().slice(0, 64) || 'casual',
+      modelInfo: safe.modelInfo && typeof safe.modelInfo === 'object' ? safe.modelInfo : null,
+      runtimeState: safe.runtimeState && typeof safe.runtimeState === 'object' ? safe.runtimeState : null,
+      experiencePlan: safe.experiencePlan && typeof safe.experiencePlan === 'object' ? safe.experiencePlan : null,
+      activePreset: safe.activePreset && typeof safe.activePreset === 'object' ? safe.activePreset : null,
+      advancedOverrides: safe.advancedOverrides && typeof safe.advancedOverrides === 'object'
+        ? modelExperienceResolver.sanitizeAdvancedOptions(safe.advancedOverrides)
+        : {},
+      effectiveOptions: safe.effectiveOptions && typeof safe.effectiveOptions === 'object'
+        ? sanitizeOptionSet(safe.effectiveOptions)
+        : {},
+      contextLengthTokens: Number.isFinite(Number(safe.contextLengthTokens)) ? Number(safe.contextLengthTokens) : null,
+      warmupResult: safe.warmupResult && typeof safe.warmupResult === 'object' ? safe.warmupResult : null,
+      lastKnownGood: safe.lastKnownGood && typeof safe.lastKnownGood === 'object' ? safe.lastKnownGood : null,
+    };
+  };
+
+  ipcMain.handle('model:resolveLoadConfidence', async (_, payload = {}) => {
+    const safePayload = sanitizeLoadConfidencePayload(payload);
+    const runtimeState = safePayload.runtimeState || orchestrator?.getRuntimeState?.() || null;
+    const activePreset = safePayload.activePreset || (
+      safePayload.model ? getActiveModelPreset(safePayload.model, safePayload.workspace) : null
+    );
+    return modelLoadConfidence.resolveLoadConfidence({
+      ...safePayload,
+      runtimeState,
+      activePreset,
+    });
+  });
+
+  ipcMain.handle('model:recordLoadOutcome', async (_, payload = {}) => {
+    const safe = payload && typeof payload === 'object' ? payload : {};
+    return modelLoadConfidence.recordLoadOutcome({
+      model: String(safe.model || '').trim().slice(0, 1024),
+      workspace: String(safe.workspace || 'casual').trim().slice(0, 64) || 'casual',
+      outcome: safe.outcome === 'failed' || safe.success === false ? 'failed' : 'success',
+      success: safe.success !== false,
+      source: String(safe.source || 'unknown').trim().slice(0, 64),
+      backend: String(safe.backend || safe.backendId || '').trim().slice(0, 80),
+      context: clampInteger(safe.context, 0, 262144, null),
+      batch: clampInteger(safe.batch, 0, 4096, null),
+      kvCacheType: String(safe.kvCacheType || '').trim().slice(0, 40),
+      numPredict: clampInteger(safe.numPredict, 0, 8192, null),
+      firstTokenMs: clampInteger(safe.firstTokenMs, 0, 60 * 60 * 1000, null),
+      tokensPerSecond: Number.isFinite(Number(safe.tokensPerSecond)) ? Number(safe.tokensPerSecond) : null,
+      error: String(safe.error || '').trim().slice(0, 500),
+      options: safe.options && typeof safe.options === 'object' ? sanitizeOptionSet(safe.options) : {},
+    });
+  });
+
+  ipcMain.handle('model:getLastKnownGood', async (_, payload = {}) => {
+    const safe = payload && typeof payload === 'object' ? payload : {};
+    return modelLoadConfidence.getLastKnownGood({
+      model: String(safe.model || '').trim().slice(0, 1024),
+      workspace: String(safe.workspace || 'casual').trim().slice(0, 64) || 'casual',
+    });
+  });
+
+  const sanitizeBackendDecisionPayload = (payload = {}) => {
+    const safe = payload && typeof payload === 'object' ? payload : {};
+    return {
+      model: String(safe.model || '').trim().slice(0, 1024),
+      workspace: String(safe.workspace || 'casual').trim().slice(0, 64) || 'casual',
+      eventType: String(safe.eventType || '').trim().slice(0, 80),
+      backend: String(safe.backend || safe.backendId || '').trim().slice(0, 80),
+      status: String(safe.status || 'info').trim().slice(0, 20),
+      reason: String(safe.reason || '').trim().slice(0, 500),
+      options: safe.options && typeof safe.options === 'object' ? sanitizeOptionSet(safe.options) : {},
+      limit: clampInteger(safe.limit, 1, 50, 12),
+    };
+  };
+
+  ipcMain.handle('model:recordBackendDecision', async (_, payload = {}) => {
+    return modelLoadConfidence.recordBackendDecision(sanitizeBackendDecisionPayload(payload));
+  });
+
+  ipcMain.handle('model:getBackendDecisionTimeline', async (_, payload = {}) => {
+    return modelLoadConfidence.getBackendDecisionTimeline(sanitizeBackendDecisionPayload(payload));
+  });
+
+  const modelExperienceWorkbench = createModelExperienceWorkbench({
+    getDb: () => db,
+    saveDatabase,
+    getOrchestrator: () => orchestrator,
+    getActivePreset: (model, workspace) => getActiveModelPreset(model, workspace),
+    savePreset: saveModelPresetPayload,
+    emitProgress: (payload) => {
+      try {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('model:workbenchProgress', payload);
+        }
+      } catch (_) {
+        // non-blocking progress mirror
+      }
+    },
+  });
+  try {
+    modelExperienceWorkbench.ensureTables();
+  } catch (error) {
+    console.warn('[ModelWorkbench] Failed to initialize local history:', error?.message || error);
+  }
+
+  const sanitizeSelectorModels = (models) => {
+    if (!Array.isArray(models)) return [];
+    return models.slice(0, 250).map((entry) => ({
+      id: String(entry?.id || entry?.name || '').trim().slice(0, 1024),
+      name: String(entry?.name || entry?.id || '').trim().slice(0, 1024),
+      source: String(entry?.source || '').trim().slice(0, 64),
+      sizeBytes: Number.isFinite(Number(entry?.sizeBytes || entry?.size))
+        ? Number(entry?.sizeBytes || entry?.size)
+        : null,
+      meta: entry?.meta && typeof entry.meta === 'object' ? entry.meta : {},
+    })).filter((entry) => entry.id || entry.name);
+  };
+
+  ipcMain.handle('model:getSelectorInsights', async (_, payload = {}) => {
+    const safe = payload && typeof payload === 'object' ? payload : {};
+    const workspace = String(safe.workspace || 'casual').trim().slice(0, 64) || 'casual';
+    const runtimeState = orchestrator?.getRuntimeState?.() || null;
+    const settings = store?.get?.('settings') || {};
+    const savedDiscoveryNetworkAccess = store?.get?.('discoveryNetworkAccess') || settings.discoveryNetworkAccess;
+    const savedVaultModelGating = store?.get?.('vaultModelGating') || settings.vaultModelGating;
+    const discoveryNetworkAccess = workspace === 'nsfw'
+      ? 'cache-only'
+      : (['on', 'cache-only', 'off'].includes(savedDiscoveryNetworkAccess) ? savedDiscoveryNetworkAccess : 'on');
+    const vaultModelGating = ['open', 'allowlist'].includes(savedVaultModelGating) ? savedVaultModelGating : 'open';
+    const models = sanitizeSelectorModels(safe.models);
+    const insights = {};
+    const selector = getDraftSelector();
+    const specStats = orchestrator && typeof orchestrator.getSpecDecodeStats === 'function'
+      ? orchestrator.getSpecDecodeStats({ compact: true })
+      : null;
+
+    for (const entry of models) {
+      const model = entry.id || entry.name;
+      let activePreset = null;
+      let plan = null;
+      let loadConfidence = null;
+      let lastKnownGood = null;
+      let outcomeSummary = null;
+      let workbenchRecommendation = null;
+      let specPair = null;
+
+      try {
+        activePreset = getActiveModelPreset(model, workspace);
+      } catch (_) {}
+
+      try {
+        plan = modelExperienceResolver.resolveModelExperiencePlan({
+          model,
+          workspace,
+          modelInfo: entry.meta?.details || entry.meta || {},
+          preset: activePreset,
+          runtimeState,
+          performanceProfile: runtimeState?.profile || store?.get?.('performanceProfile') || 'balanced',
+        });
+      } catch (error) {
+        plan = { success: false, warnings: [error?.message || 'Failed to resolve experience plan'] };
+      }
+
+      try {
+        loadConfidence = modelLoadConfidence.resolveLoadConfidence({
+          model,
+          workspace,
+          runtimeState,
+          activePreset,
+          experiencePlan: plan?.plan || {},
+          modelInfo: entry.meta?.details || entry.meta || {},
+        });
+      } catch (error) {
+        loadConfidence = { success: false, status: 'blocked', warnings: [error?.message || 'Load confidence unavailable'] };
+      }
+
+      try {
+        lastKnownGood = modelLoadConfidence.getLastKnownGood({ model, workspace });
+      } catch (_) {}
+
+      try {
+        outcomeSummary = modelLoadConfidence.getOutcomeSummary({ model, workspace, limit: 12 });
+      } catch (_) {}
+
+      try {
+        const history = modelExperienceWorkbench.getHistory({ model, workspace, limit: 3 });
+        workbenchRecommendation = history.find((row) => row?.recommendation)?.recommendation || null;
+      } catch (_) {}
+
+      try {
+        specPair = selector?.getDraftFor?.(model) || null;
+      } catch (_) {}
+
+      insights[model] = {
+        activePreset,
+        experiencePlan: plan,
+        loadConfidence,
+        lastKnownGood,
+        outcomeSummary,
+        workbenchRecommendation,
+        specPair,
+        specStats,
+        catalogEnrichment: {
+          networkMode: discoveryNetworkAccess,
+          vaultModelGating,
+          source: entry.source || null,
+        },
+      };
+    }
+
+    return {
+      success: true,
+      workspace,
+      networkMode: discoveryNetworkAccess,
+      vaultModelGating,
+      insights,
+    };
+  });
+
+  const sanitizeWorkbenchPayload = (payload = {}) => {
+    const safe = payload && typeof payload === 'object' ? payload : {};
+    return {
+      model: String(safe.model || '').trim().slice(0, 1024),
+      workspace: String(safe.workspace || 'casual').trim().slice(0, 64) || 'casual',
+      prompt: typeof safe.prompt === 'string' ? safe.prompt.slice(0, 4000) : '',
+      promptOverride: typeof safe.promptOverride === 'string' ? safe.promptOverride.slice(0, 4000) : '',
+      suiteId: typeof safe.suiteId === 'string' ? safe.suiteId.slice(0, 64) : 'default',
+      fullSuite: safe.fullSuite === true,
+      riskAccepted: safe.riskAccepted === true,
+      profileIds: Array.isArray(safe.profileIds)
+        ? safe.profileIds.map((id) => String(id || '').trim()).filter(Boolean).slice(0, 12)
+        : [],
+      controls: safe.controls && typeof safe.controls === 'object' ? safe.controls : {},
+      modelInfo: safe.modelInfo && typeof safe.modelInfo === 'object' ? safe.modelInfo : null,
+      limit: clampInteger(safe.limit, 1, 50, 10),
+    };
+  };
+
+  ipcMain.handle('model:workbenchGetSnapshot', async (_, payload = {}) => {
+    return modelExperienceWorkbench.getSnapshot(sanitizeWorkbenchPayload(payload));
+  });
+
+  ipcMain.handle('model:workbenchBuildProfiles', async (_, payload = {}) => {
+    return modelExperienceWorkbench.buildProfiles(sanitizeWorkbenchPayload(payload));
+  });
+
+  ipcMain.handle('model:workbenchRunEval', async (_, payload = {}) => {
+    const safePayload = sanitizeWorkbenchPayload(payload);
+    if (!safePayload.model) return { success: false, error: 'Model is required' };
+    return modelExperienceWorkbench.runEval(safePayload);
+  });
+
+  ipcMain.handle('model:workbenchCancelEval', async (_, payload = {}) => {
+    const runId = String(payload?.runId || '').trim().slice(0, 128);
+    return modelExperienceWorkbench.cancelEval({ runId });
+  });
+
+  ipcMain.handle('model:workbenchGetHistory', async (_, payload = {}) => {
+    return modelExperienceWorkbench.getHistory(sanitizeWorkbenchPayload(payload));
+  });
+
+  ipcMain.handle('model:workbenchSaveWinner', async (_, payload = {}) => {
+    const safe = payload && typeof payload === 'object' ? payload : {};
+    return modelExperienceWorkbench.saveWinner({
+      runId: String(safe.runId || '').trim().slice(0, 128),
+      profileId: String(safe.profileId || '').trim().slice(0, 80),
+      target: safe.target === 'session' ? 'session' : 'preset',
+    });
   });
 
   // ============================================

@@ -13,8 +13,24 @@
 const BaseBackend = require('./base-backend');
 const http = require('http');
 const https = require('https');
+const fs = require('fs');
+const path = require('path');
 const { URL } = require('url');
 const { getNpuBridge } = require('../npu-bridge');
+
+function traceNpuDebug(payload = {}) {
+  if (process.env.DEVFORGE_DEBUG_NPU_TRACE !== '1') return;
+  try {
+    const line = JSON.stringify({
+      source: 'openvino-backend',
+      ...payload,
+      timestamp: Date.now(),
+    }) + '\n';
+    fs.appendFileSync(path.join(process.cwd(), 'debug-npu-trace.log'), line);
+  } catch (_) {
+    // Debug tracing must never affect runtime behavior.
+  }
+}
 
 class OpenVinoBackend extends BaseBackend {
   constructor(config = {}) {
@@ -204,6 +220,17 @@ class OpenVinoBackend extends BaseBackend {
 
   /** @private Handle server-offline scenario with auto-start logic */
   async _handleServerOffline() {
+    traceNpuDebug({
+      location: '_handleServerOffline-entry',
+      message: 'backend handler called',
+      data: {
+        backendId: this.id,
+        device: this.device,
+        hadLazyStartPromise: !!this._lazyStartPromise,
+        autoStartAttempted: this._autoStartAttempted,
+      },
+    });
+
     // Concurrent callers share one in-flight start attempt so we never spawn
     // the Python server twice. The promise resolves to the final availability
     // result (success or failure) and is cleared on both outcomes.

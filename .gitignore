@@ -7,6 +7,7 @@ node_modules/
 dist/
 release/
 out/
+native/**/target/
 
 # Local env files
 .env
@@ -39,6 +40,8 @@ Thumbs.db
 
 # Testing
 coverage/
+__pycache__/
+*.pyc
 
 # Large external tools/environments (not part of source)
 ComfyUI/

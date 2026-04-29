@@ -399,6 +399,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   isSpecDecodeDisabled: (payload) => ipcRenderer.invoke('orchestrator:isSpecDecodeDisabled', payload || {}),
   prewarmSpecDecodeVerifier: (payload) => ipcRenderer.invoke('orchestrator:prewarmSpecDecodeVerifier', payload || {}),
   isMosaicDevEnabled: () => ipcRenderer.invoke('dev:isMosaicEnabled'),
+  mosaicProbe: (payload) => ipcRenderer.invoke('dev:mosaicProbe', payload || {}),
   readMosaicArtifacts: () => ipcRenderer.invoke('dev:readMosaicArtifacts'),
 
   // ============================================
@@ -686,6 +687,30 @@ contextBridge.exposeInMainWorld('electronAPI', {
 
   // Back-compat alias used by older frontend hooks
   getModelExperience: (modelPath) => ipcRenderer.invoke('model:getExperience', modelPath),
+
+  // Resolve the canonical local-first Model Experience Autopilot plan
+  resolveModelExperiencePlan: (payload) => ipcRenderer.invoke('model:resolveExperiencePlan', payload || {}),
+
+  // Model Load Confidence - local-only pre-generation readiness and last-good profile
+  resolveModelLoadConfidence: (payload) => ipcRenderer.invoke('model:resolveLoadConfidence', payload || {}),
+  recordModelLoadOutcome: (payload) => ipcRenderer.invoke('model:recordLoadOutcome', payload || {}),
+  getLastKnownGoodModelLoad: (payload) => ipcRenderer.invoke('model:getLastKnownGood', payload || {}),
+  recordBackendDecision: (payload) => ipcRenderer.invoke('model:recordBackendDecision', payload || {}),
+  getBackendDecisionTimeline: (payload) => ipcRenderer.invoke('model:getBackendDecisionTimeline', payload || {}),
+  getModelSelectorInsights: (payload) => ipcRenderer.invoke('model:getSelectorInsights', payload || {}),
+
+  // Model Experience Workbench - local-only plan/profile/eval/history flow
+  modelWorkbenchGetSnapshot: (payload) => ipcRenderer.invoke('model:workbenchGetSnapshot', payload || {}),
+  modelWorkbenchBuildProfiles: (payload) => ipcRenderer.invoke('model:workbenchBuildProfiles', payload || {}),
+  modelWorkbenchRunEval: (payload) => ipcRenderer.invoke('model:workbenchRunEval', payload || {}),
+  modelWorkbenchCancelEval: (payload) => ipcRenderer.invoke('model:workbenchCancelEval', payload || {}),
+  modelWorkbenchGetHistory: (payload) => ipcRenderer.invoke('model:workbenchGetHistory', payload || {}),
+  modelWorkbenchSaveWinner: (payload) => ipcRenderer.invoke('model:workbenchSaveWinner', payload || {}),
+  onModelWorkbenchProgress: (callback) => {
+    const handler = (_, payload) => callback(payload);
+    ipcRenderer.on('model:workbenchProgress', handler);
+    return () => ipcRenderer.removeListener('model:workbenchProgress', handler);
+  },
   
   // Load model with experience profile applied
   loadModelWithProfile: (modelPath) => ipcRenderer.invoke('model:loadWithProfile', modelPath),

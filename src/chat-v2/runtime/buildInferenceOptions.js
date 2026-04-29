@@ -4,7 +4,7 @@ import { useAppStore } from '../../stores/appStore';
 import { useChatV2SessionStore } from '../../stores/chatV2SessionStore';
 import { api } from '../../utils/electronAPI';
 import { clampInferenceOptionsToModel } from './inferenceOptionsUtil';
-import { mergePresetSystemPrompt } from './mergePresetSystemPrompt.cjs';
+import { mergePresetSystemPrompt } from './mergePresetSystemPrompt.js';
 
 let _vaultProfileCache = { at: 0, value: null };
 async function loadVaultProfile() {
@@ -188,13 +188,97 @@ async function applyVaultOverrides(options, workspaceId) {
 function restoreNonClampedOptions(clamped, options) {
   const systemPrompt = String(options?.systemPrompt ?? '').trim();
   const forceBackend = String(options?.forceBackend ?? '').trim();
+  const softBackendPreference = String(options?.softBackendPreference ?? '').trim();
   let result = clamped;
   if (systemPrompt) result = { ...result, systemPrompt };
   if (forceBackend) result = { ...result, forceBackend };
+  if (softBackendPreference) result = { ...result, softBackendPreference };
+  if (options?.experiencePlan && typeof options.experiencePlan === 'object') {
+    result = {
+      ...result,
+      experiencePlan: {
+        ...options.experiencePlan,
+        effectiveOptions: clamped,
+        summary: {
+          ...(options.experiencePlan.summary || {}),
+          context: clamped?.num_ctx || options.experiencePlan.summary?.context || null,
+        },
+      },
+    };
+  }
   return result;
 }
 
-export async function buildChatV2InferenceOptions({ model, workspace } = {}) {
+function buildSessionPayload(sessionState = {}) {
+  return {
+    contextLengthTokens: sessionState.contextLengthTokens ?? null,
+    backendOverride: sessionState.backendOverride || null,
+    tuningMode: sessionState.tuningMode || 'auto',
+    taskIntent: sessionState.taskIntent || 'auto',
+    advancedOverrides: sessionState.advancedOverrides || {},
+  };
+}
+
+async function resolveAutopilotOptions({
+  appState,
+  modelName,
+  workspaceId,
+  prompt = '',
+  controls = {},
+} = {}) {
+  if (typeof api.resolveModelExperiencePlan !== 'function') return null;
+
+  const sessionState = useChatV2SessionStore.getState();
+  let lastKnownGood = null;
+  try {
+    if (typeof api.getLastKnownGoodModelLoad === 'function') {
+      lastKnownGood = await api.getLastKnownGoodModelLoad({
+        model: modelName,
+        workspace: workspaceId,
+      });
+    }
+  } catch (_) {
+    lastKnownGood = null;
+  }
+  const result = await api.resolveModelExperiencePlan({
+    model: modelName,
+    workspace: workspaceId,
+    prompt,
+    modelInfo: appState.currentModelInfo || null,
+    autoTuneResult: appState.autoTuneResult || null,
+    performanceProfile: appState.performanceProfile || 'balanced',
+    session: buildSessionPayload(sessionState),
+    lastKnownGood,
+    controls: {
+      ...(controls && typeof controls === 'object' ? controls : {}),
+      fastChatMode: Boolean(appState.fastChatMode),
+    },
+  });
+
+  if (!result?.success || !result?.plan?.effectiveOptions) return null;
+  const plan = result.plan;
+  let options = { ...(plan.effectiveOptions || {}) };
+  options = await applyVaultOverrides(options, workspaceId);
+  const clamped = clampInferenceOptionsToModel(options, {
+    modelInfo: appState.currentModelInfo || null,
+    autoTuneResult: appState.autoTuneResult || null,
+    fallback: 8192,
+  }).options;
+
+  return restoreNonClampedOptions(clamped, {
+    systemPrompt: plan.systemPrompt || '',
+    forceBackend: plan.explicitBackendPin || '',
+    softBackendPreference: plan.softBackendPreference || '',
+    experiencePlan: {
+      ...plan,
+      effectiveOptions: clamped,
+      warnings: Array.isArray(result.warnings) ? result.warnings : plan.warnings || [],
+      reasons: Array.isArray(result.reasons) ? result.reasons : plan.reasons || [],
+    },
+  });
+}
+
+export async function buildChatV2InferenceOptions({ model, workspace, prompt = '', controls = {} } = {}) {
   const appState = useAppStore.getState();
   const modelName = String(model || appState.currentModel || '').trim();
   if (!modelName) return {};
@@ -202,6 +286,19 @@ export async function buildChatV2InferenceOptions({ model, workspace } = {}) {
   const workspaceId = String(workspace || appState.currentWorkspace || 'casual').trim();
   const workspaceType = resolveWorkspaceType(workspaceId);
   let hasExplicitPreset = false;
+
+  try {
+    const autopilotOptions = await resolveAutopilotOptions({
+      appState,
+      modelName,
+      workspaceId,
+      prompt,
+      controls,
+    });
+    if (autopilotOptions) return autopilotOptions;
+  } catch (err) {
+    console.warn('[ChatV2] Model Experience Autopilot failed; using legacy optimizer:', err?.message);
+  }
 
   let options;
   try {

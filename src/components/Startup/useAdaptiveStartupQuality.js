@@ -8,19 +8,34 @@ import {
   pickInitialTier,
 } from "./startupQuality";
 
-export function useAdaptiveStartupQuality(hardware) {
+/**
+ * Adaptive quality hook for startup-style visuals.
+ *
+ * `options.lockUpgrades` (default false) prevents the tier from being
+ * UPGRADED after the first stable pick — only the safety-valve downgrade
+ * from the frame-time governor is allowed. This is critical for short-lived
+ * surfaces (like the boot screen) where a mid-flight upgrade would force
+ * the underlying WebGL canvas to remount, producing a visible flash.
+ */
+export function useAdaptiveStartupQuality(hardware, options = {}) {
+  const { lockUpgrades = false } = options;
   const hints = useMemo(() => getClientGraphicsHints(), []);
   const [tier, setTier] = useState(() => pickInitialTier({ hardware, hints }));
+  const tierLockedRef = useRef(false);
 
   // If hardware info arrives slightly later, re-pick tier (still optimistic).
+  // Once a tier has been "locked" (we've sampled a few frames or the caller
+  // has explicitly locked upgrades), we stop reacting to later hardware
+  // changes that would only push us higher.
   useEffect(() => {
     const next = pickInitialTier({ hardware, hints });
     setTier((prev) => {
-      // Prefer the higher tier initially; governor can downshift safely.
       const order = ["REDUCED", "LOW", "MEDIUM", "HIGH", "ULTRA"];
-      return order.indexOf(next) > order.indexOf(prev) ? next : prev;
+      const isUpgrade = order.indexOf(next) > order.indexOf(prev);
+      if (isUpgrade && (lockUpgrades || tierLockedRef.current)) return prev;
+      return isUpgrade ? next : prev;
     });
-  }, [hardware, hints]);
+  }, [hardware, hints, lockUpgrades]);
 
   const quality = useMemo(() => QUALITY_PRESETS[tier] || QUALITY_PRESETS.HIGH, [tier]);
 
@@ -49,6 +64,12 @@ export function useAdaptiveStartupQuality(hardware) {
     s.samples.push(dtMs);
     if (s.samples.length > 60) s.samples.shift();
 
+    // After a brief warmup, lock the tier against further upgrades. The
+    // safety-valve downgrade below still fires if the system can't keep up.
+    if (!tierLockedRef.current && now - s.startedAt > 1200) {
+      tierLockedRef.current = true;
+    }
+
     // Don't adjust too frequently.
     if (now - s.lastAdjustAt < 900) return;
 
@@ -66,15 +87,16 @@ export function useAdaptiveStartupQuality(hardware) {
       return;
     }
 
-    // Optional: step up if it's been stable & fast for a while
-    if (veryFast) {
+    // Frame-governor upgrades are skipped when locked or when the caller
+    // has explicitly disabled upgrades — these are the main source of
+    // mid-flight WebGL canvas remounts during boot.
+    if (veryFast && !lockUpgrades && !tierLockedRef.current) {
       if (now - s.stableSince > 2500 && tierRef.current !== "ULTRA") {
         s.lastAdjustAt = now;
         s.stableSince = now;
         setTier((prev) => nextHigherTier(prev));
       }
-    } else {
-      // Reset stability timer when not consistently fast
+    } else if (!veryFast) {
       s.stableSince = now;
     }
   };

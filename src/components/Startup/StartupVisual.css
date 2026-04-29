@@ -32,9 +32,9 @@
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(ellipse 80% 50% at 50% 120%, rgba(var(--c1), 0.12) 0%, transparent 55%),
-    radial-gradient(ellipse 70% 50% at 25% -10%, rgba(var(--c2), 0.08) 0%, transparent 55%),
-    radial-gradient(ellipse 60% 40% at 80% 20%, rgba(var(--c3), 0.06) 0%, transparent 55%);
+    radial-gradient(ellipse 74% 44% at 50% 118%, rgba(var(--c1), 0.08) 0%, transparent 58%),
+    radial-gradient(ellipse 62% 44% at 24% -12%, rgba(var(--c2), 0.055) 0%, transparent 58%),
+    radial-gradient(ellipse 56% 38% at 82% 22%, rgba(var(--c3), 0.045) 0%, transparent 58%);
   opacity: var(--i);
   transition: opacity 800ms cubic-bezier(0.4, 0, 0.2, 1);
 }
@@ -55,9 +55,9 @@
   top: -38%;
   left: -28%;
   background: radial-gradient(circle,
-    rgba(var(--c1), 0.26) 0%,
-    rgba(var(--c1), 0.10) 28%,
-    rgba(var(--c1), 0.03) 48%,
+    rgba(var(--c1), 0.18) 0%,
+    rgba(var(--c1), 0.07) 30%,
+    rgba(var(--c1), 0.02) 50%,
     transparent 70%);
 }
 
@@ -67,8 +67,8 @@
   bottom: -34%;
   right: -22%;
   background: radial-gradient(circle,
-    rgba(var(--c2), 0.22) 0%,
-    rgba(var(--c2), 0.08) 30%,
+    rgba(var(--c2), 0.16) 0%,
+    rgba(var(--c2), 0.055) 30%,
     rgba(var(--c2), 0.02) 52%,
     transparent 72%);
   animation-duration: 28s;
@@ -113,6 +113,19 @@
 .svlux--stage4 .svlux-orb--4 { animation-delay: -9s; }
 .svlux--stage3 .svlux-ribbon--1 { animation-delay: -3s; }
 .svlux--stage4 .svlux-ribbon--2 { animation-delay: -5s; }
+.svlux--stage4 .svlux-core { transform: translate3d(-50%, -50%, 0) scale(0.96); }
+.svlux--ready .svlux-ribbon {
+  opacity: calc(var(--i) * 0.16);
+}
+
+.svlux--ready .svlux-net__lines line {
+  stroke: rgba(var(--c4), 0.18);
+}
+
+.svlux--ready .svlux-net__nodes circle {
+  fill: rgba(var(--c4), 0.72);
+  opacity: 0.65;
+}
 
 /* ===== RIBBONS (subtle, transform-only) ===== */
 .svlux-ribbon {
@@ -120,7 +133,7 @@
   left: -35%;
   width: 170%;
   height: 38%;
-  opacity: calc(var(--i) * 0.35);
+  opacity: calc(var(--i) * 0.22);
   transform: translate3d(0, 0, 0);
   will-change: transform;
   background: linear-gradient(90deg,
@@ -150,8 +163,8 @@
 }
 
 .svlux-net__lines line {
-  stroke: rgba(var(--c3), 0.22);
-  stroke-width: 0.12;
+  stroke: rgba(var(--c3), 0.16);
+  stroke-width: 0.1;
   stroke-linecap: round;
 }
 
@@ -173,8 +186,8 @@
   top: 42%;
   left: 50%;
   transform: translate3d(-50%, -50%, 0);
-  width: calc(88px + 180px * var(--p));
-  height: calc(88px + 180px * var(--p));
+  width: calc(76px + 160px * var(--p));
+  height: calc(76px + 160px * var(--p));
   transition: width 500ms cubic-bezier(0.4, 0, 0.2, 1), height 500ms cubic-bezier(0.4, 0, 0.2, 1);
   will-change: transform;
 }
@@ -184,8 +197,8 @@
   inset: -90%;
   border-radius: 999px;
   background: radial-gradient(circle,
-    rgba(var(--c2), 0.14) 0%,
-    rgba(var(--c1), 0.05) 40%,
+    rgba(var(--c2), 0.09) 0%,
+    rgba(var(--c1), 0.035) 40%,
     transparent 68%);
   opacity: calc(var(--p) * 0.9);
   animation: svlux-aura 6s cubic-bezier(0.4, 0, 0.6, 1) infinite;
@@ -196,8 +209,8 @@
   inset: 10%;
   border-radius: 999px;
   background: radial-gradient(circle,
-    rgba(var(--c3), 0.18) 0%,
-    rgba(var(--c2), 0.08) 50%,
+    rgba(var(--c3), 0.12) 0%,
+    rgba(var(--c2), 0.055) 50%,
     transparent 78%);
   opacity: calc(0.35 + var(--p) * 0.55);
   animation: svlux-pulse 3.8s cubic-bezier(0.4, 0, 0.6, 1) infinite;
@@ -208,9 +221,9 @@
   inset: 30%;
   border-radius: 999px;
   background: radial-gradient(circle,
-    rgba(255, 255, 255, 0.92) 0%,
-    rgba(var(--c4), 0.70) 34%,
-    rgba(var(--c3), 0.30) 66%,
+    rgba(255, 255, 255, 0.72) 0%,
+    rgba(var(--c4), 0.42) 34%,
+    rgba(var(--c3), 0.18) 66%,
     transparent 100%);
   opacity: calc(0.15 + var(--p) * 0.85);
   animation: svlux-pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
@@ -228,8 +241,8 @@
     transparent 100%);
   opacity: calc(var(--p) * 0.9);
   box-shadow:
-    0 0 18px rgba(255,255,255,0.22),
-    0 0 46px rgba(var(--c3), 0.16);
+    0 0 14px rgba(255,255,255,0.16),
+    0 0 36px rgba(var(--c3), 0.1);
   animation: svlux-spark 2.4s cubic-bezier(0.4, 0, 0.6, 1) infinite;
 }
 
@@ -264,6 +277,11 @@
   animation: svlux-ring 3.2s cubic-bezier(0.4, 0, 0.2, 1) infinite;
 }
 .svlux-core__ring--2 { animation-delay: 1.6s; border-color: rgba(var(--c1), 0.18); }
+
+.svlux--ready .svlux-core__ring {
+  border-color: rgba(var(--c4), 0.28);
+  opacity: calc(var(--p) * 0.32);
+}
 
 @keyframes svlux-aura {
   0%, 100% { transform: translate3d(0,0,0) scale(1); opacity: calc(var(--p) * 0.65); }
@@ -387,21 +405,20 @@
   inset: 0;
 }
 
-/* Subtle overlay to integrate with UI (vignette + soft scan) */
+/* Subtle vignette overlay above the WebGL stage. We deliberately avoid
+   `mix-blend-mode: soft-light` here — the soft-light blend was amplifying
+   any momentary bright frame from the GL canvas (bloom warm-up, mid-boot
+   tier change, etc.) into a visible white flash. A plain darkening
+   vignette is calmer and never gets brighter than its source. */
 .svultra__overlay {
   position: absolute;
   inset: 0;
   background:
-    radial-gradient(ellipse 70% 60% at 50% 50%,
+    radial-gradient(ellipse 72% 62% at 50% 50%,
       rgba(0, 0, 0, 0) 0%,
-      rgba(0, 0, 0, 0) 45%,
-      rgba(0, 0, 0, 0.28) 75%,
-      rgba(0, 0, 0, 0.56) 100%),
-    linear-gradient(180deg,
-      rgba(255, 255, 255, 0.03) 0%,
-      rgba(255, 255, 255, 0) 18%,
-      rgba(255, 255, 255, 0.02) 55%,
-      rgba(255, 255, 255, 0) 100%);
-  mix-blend-mode: soft-light;
-  opacity: 0.9;
+      rgba(0, 0, 0, 0) 48%,
+      rgba(5, 6, 12, 0.32) 78%,
+      rgba(5, 6, 12, 0.6) 100%);
+  opacity: 0.85;
+  pointer-events: none;
 }

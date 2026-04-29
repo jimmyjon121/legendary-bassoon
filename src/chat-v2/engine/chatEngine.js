@@ -668,6 +668,7 @@ export function createInitialChatV2State() {
     // notices never overwrite the partial reply the user can already see.
     streamingStatus: '',
     streamingReasoning: null,
+    webSearchActivity: [],
     error: null,
     errorCode: null,
     model: null,
@@ -686,6 +687,7 @@ export function createInitialChatV2State() {
     effectiveModel: null,
     executionMode: null,
     modeReasons: [],
+    experiencePlan: null,
     lastUserMessageId: null,
     lastAssistantMessageId: null,
   };
@@ -770,6 +772,30 @@ export class ChatV2Engine {
     for (const listener of this.listeners) {
       listener(this.state);
     }
+  }
+
+  pushWebSearchActivity(activity = {}) {
+    const type = String(activity.type || 'info');
+    const status = String(activity.status || 'info');
+    const message = String(activity.message || '').trim();
+    if (!message) return;
+
+    const nextActivity = {
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+      ts: Date.now(),
+      type,
+      status,
+      query: activity.query || null,
+      title: activity.title || null,
+      url: activity.url || null,
+      provider: activity.provider || null,
+      count: Number.isFinite(Number(activity.count)) ? Number(activity.count) : null,
+      tookMs: Number.isFinite(Number(activity.tookMs)) ? Number(activity.tookMs) : null,
+      message,
+    };
+
+    const previous = Array.isArray(this.state.webSearchActivity) ? this.state.webSearchActivity : [];
+    this.setState({ webSearchActivity: [...previous, nextActivity].slice(-10) });
   }
 
   reportStreamEvent(type, payload = {}, request = this.lastFailedRequest) {
@@ -870,6 +896,7 @@ export class ChatV2Engine {
       effectiveModel: preserveRuntimeState ? this.state.effectiveModel : (nextModel || null),
       executionMode: preserveRuntimeState ? this.state.executionMode : null,
       modeReasons: preserveRuntimeState ? this.state.modeReasons : [],
+      experiencePlan: preserveRuntimeState ? this.state.experiencePlan : null,
     });
   }
 
@@ -1057,6 +1084,9 @@ export class ChatV2Engine {
     if (Array.isArray(plan.reasons || plan.modeReasons)) {
       patch.modeReasons = Array.isArray(plan.reasons) ? plan.reasons : plan.modeReasons;
     }
+    if (plan.experiencePlan || plan.lastExperiencePlan) {
+      patch.experiencePlan = plan.experiencePlan || plan.lastExperiencePlan;
+    }
     if (plan.effectiveOptions && typeof plan.effectiveOptions === 'object') {
       patch.effectiveInferenceOptions = plan.effectiveOptions;
       patch.activeInferenceOptions = plan.effectiveOptions;
@@ -1204,6 +1234,7 @@ export class ChatV2Engine {
         // never staring at a silent "Thinking..." dot while the model spins up.
         streamingStatus: this.buildColdLoadStatus(this.state.model),
         streamingReasoning: null,
+        webSearchActivity: [],
         error: null,
         errorCode: null,
         draftAttachments: [],
@@ -1299,6 +1330,11 @@ export class ChatV2Engine {
           model,
           workspace: this.state.workspace,
           workloadType: 'chat',
+          prompt,
+          controls: {
+            webSearchEnabled: userMessage?.meta?.webSearchEnabled === true,
+            thinkLonger: userMessage?.meta?.thinkLonger === true,
+          },
         });
       } catch (_) {
         inferenceOptions = {};
@@ -1307,9 +1343,15 @@ export class ChatV2Engine {
 
     const presetSystemPrompt = String(inferenceOptions?.systemPrompt ?? '').trim();
     const forceBackend = String(inferenceOptions?.forceBackend ?? '').trim();
+    const softBackendPreference = String(inferenceOptions?.softBackendPreference ?? '').trim();
+    const experiencePlan = inferenceOptions?.experiencePlan && typeof inferenceOptions.experiencePlan === 'object'
+      ? inferenceOptions.experiencePlan
+      : null;
     inferenceOptions = { ...inferenceOptions };
     delete inferenceOptions.systemPrompt;
     delete inferenceOptions.forceBackend;
+    delete inferenceOptions.softBackendPreference;
+    delete inferenceOptions.experiencePlan;
 
     const thinkLongerEnabled = userMessage?.meta?.thinkLonger === true;
     if (thinkLongerEnabled) {
@@ -1331,8 +1373,16 @@ export class ChatV2Engine {
 
     let webResearchContext = '';
     if (canUseWebSearch) {
-      this.setState({ streamingContent: 'Researching the web before answering...' });
-      webResearchContext = await this.buildWebGroundingContext(prompt, runId);
+      this.setState({
+        streamingContent: 'Researching the web before answering...',
+        webSearchActivity: [],
+      });
+      this.pushWebSearchActivity({
+        type: 'start',
+        status: 'running',
+        message: 'Preparing live web search',
+      });
+      webResearchContext = await this.buildWebGroundingContext(prompt, runId, historyMessages);
       if (runId !== this.generationRunId) return;
     }
 
@@ -1351,7 +1401,8 @@ export class ChatV2Engine {
       requestedModel: model,
       effectiveModel: model,
       executionMode: forceModelFallback ? 'fallback_model' : (forceCompatMode ? 'compat' : 'direct'),
-      modeReasons: [],
+      modeReasons: Array.isArray(experiencePlan?.reasons) ? experiencePlan.reasons : [],
+      experiencePlan,
     });
 
     const request = {
@@ -1380,6 +1431,8 @@ export class ChatV2Engine {
       streamMessages: promptContext.streamMessages,
       promptContext,
       ...(forceBackend ? { forceBackend } : {}),
+      ...(softBackendPreference ? { softBackendPreference } : {}),
+      ...(experiencePlan ? { experiencePlan } : {}),
     };
 
     this.lastFailedRequest = null;
@@ -1510,6 +1563,9 @@ export class ChatV2Engine {
           forceCompatMode: request.forceCompatMode,
           forceModelFallback: request.forceModelFallback,
           priority: request.priority,
+          ...(request.forceBackend ? { forceBackend: request.forceBackend } : {}),
+          ...(request.softBackendPreference ? { softBackendPreference: request.softBackendPreference } : {}),
+          ...(request.experiencePlan ? { experiencePlan: request.experiencePlan } : {}),
           system: request.system,
           messages: request.streamMessages,
         },
@@ -1816,6 +1872,7 @@ export class ChatV2Engine {
       streamingContent: '',
       streamingStatus: '',
       streamingReasoning: null,
+      webSearchActivity: [],
       error: null,
       errorCode: null,
       lastAssistantMessageId: assistantMessage.id,
@@ -1894,6 +1951,7 @@ export class ChatV2Engine {
       streamingContent: '',
       streamingStatus: 'Retrying the previous message — preparing the model again.',
       streamingReasoning: null,
+        webSearchActivity: [],
       error: null,
       errorCode: null,
       metrics: {
@@ -1912,7 +1970,8 @@ export class ChatV2Engine {
   }
 
   async buildWebGroundingContext(prompt, runId) {
-    const query = normalizePromptForSearch(prompt);
+    const historyMessages = Array.isArray(arguments[2]) ? arguments[2] : [];
+    const query = normalizePromptForSearch(prompt, historyMessages);
     const clockContext = buildClockGroundingBlock();
     if (!query) {
       return isDirectDateOrTimePrompt(prompt) ? clockContext : '';
@@ -1926,6 +1985,10 @@ export class ChatV2Engine {
         fetchMaxLength: 2600,
         excerptLength: 900,
         userPrompt: prompt,
+        onActivity: (activity) => {
+          if (runId !== this.generationRunId) return;
+          this.pushWebSearchActivity(activity);
+        },
       });
 
       if (runId !== this.generationRunId) return '';
@@ -1939,7 +2002,21 @@ export class ChatV2Engine {
         .map((item, index) => formatCitationLine(item, index + 1))
         .filter(Boolean);
 
-      if (!synthesisContext && sourceLines.length === 0) return clockContext;
+      if (!synthesisContext && sourceLines.length === 0) {
+        this.pushWebSearchActivity({
+          type: 'complete',
+          status: 'warning',
+          message: 'No usable web sources found',
+        });
+        return clockContext;
+      }
+
+      this.pushWebSearchActivity({
+        type: 'complete',
+        status: 'done',
+        count: sourceLines.length,
+        message: `Using ${sourceLines.length || topResults.length} web source${(sourceLines.length || topResults.length) === 1 ? '' : 's'}`,
+      });
 
       return [
         clockContext,
@@ -1995,6 +2072,7 @@ export class ChatV2Engine {
       streamingContent: '',
       streamingStatus: 'Regenerating the reply — preparing the model.',
       streamingReasoning: null,
+      webSearchActivity: [],
       error: null,
       errorCode: null,
       metrics: {
@@ -2068,6 +2146,7 @@ export class ChatV2Engine {
       streamingContent: '',
       streamingStatus: 'Editing and regenerating — preparing the model.',
       streamingReasoning: null,
+      webSearchActivity: [],
       error: null,
       errorCode: null,
       metrics: {
@@ -2125,6 +2204,7 @@ export class ChatV2Engine {
       streamingContent: '',
       streamingStatus: '',
       streamingReasoning: null,
+      webSearchActivity: [],
       error: null,
       errorCode: null,
     });
@@ -2267,6 +2347,7 @@ export class ChatV2Engine {
         streamingContent: '',
         streamingStatus: '',
         streamingReasoning: null,
+        webSearchActivity: [],
         error: null,
         errorCode: null,
         lastAssistantMessageId: partialMessage.id,
@@ -2279,6 +2360,7 @@ export class ChatV2Engine {
         streamingContent: '',
         streamingStatus: '',
         streamingReasoning: null,
+        webSearchActivity: [],
         error: null,
         errorCode: null,
         metrics: { ...this.state.metrics, startedAt: null },
@@ -2295,6 +2377,7 @@ export class ChatV2Engine {
       streamingContent: '',
       streamingStatus: '',
       streamingReasoning: null,
+      webSearchActivity: [],
       error: String(error || 'Generation failed'),
       errorCode: code,
       metrics: {
@@ -2531,6 +2614,9 @@ export class ChatV2Engine {
         forceCompatMode: true,
         forceModelFallback: true,
         priority: request.priority,
+        ...(request.forceBackend ? { forceBackend: request.forceBackend } : {}),
+        ...(request.softBackendPreference ? { softBackendPreference: request.softBackendPreference } : {}),
+        ...(request.experiencePlan ? { experiencePlan: request.experiencePlan } : {}),
       });
 
       this.applyExecutionMeta(result?.meta || {});
@@ -2631,6 +2717,9 @@ export class ChatV2Engine {
           forceCompatMode: true,
           forceModelFallback: request.forceModelFallback === true || code.includes('abort'),
           priority: request.priority,
+          ...(request.forceBackend ? { forceBackend: request.forceBackend } : {}),
+          ...(request.softBackendPreference ? { softBackendPreference: request.softBackendPreference } : {}),
+          ...(request.experiencePlan ? { experiencePlan: request.experiencePlan } : {}),
         });
         this.applyExecutionMeta(result?.meta || {});
 
@@ -2811,11 +2900,94 @@ function buildWebGroundedPrompt(basePrompt, webResearchContext = '') {
   return parts.join('\n\n');
 }
 
-function normalizePromptForSearch(prompt, maxLength = 220) {
-  const normalized = buildSearchQueryFromPrompt(String(prompt || ''));
+function normalizePromptForSearch(prompt, historyMessages = [], maxLength = 220) {
+  const normalized = buildContextualSearchQuery(String(prompt || ''), historyMessages);
   if (!normalized) return '';
   if (normalized.length <= maxLength) return normalized;
   return normalized.slice(0, maxLength).trim();
+}
+
+function buildContextualSearchQuery(prompt = '', historyMessages = []) {
+  const rawPrompt = String(prompt || '').trim();
+  const baseQuery = buildSearchQueryFromPrompt(rawPrompt);
+  const followUpFocus = extractSearchFollowUpFocus(rawPrompt);
+  if (!followUpFocus) return baseQuery;
+
+  const anchor = findRecentSearchAnchor(historyMessages, rawPrompt);
+  if (!anchor) return baseQuery;
+
+  if (anchor.kind === 'news') {
+    return `latest news ${followUpFocus}`;
+  }
+
+  const anchorQuery = String(anchor.query || '').trim();
+  if (!anchorQuery) return baseQuery;
+  if (new RegExp(`\\b${escapeRegExp(followUpFocus)}\\b`, 'i').test(anchorQuery)) return anchorQuery;
+  return `${anchorQuery} ${followUpFocus}`.replace(/\s+/g, ' ').trim();
+}
+
+function extractSearchFollowUpFocus(prompt = '') {
+  let text = String(prompt || '').trim();
+  if (!text || text.length > 90) return '';
+  text = text.replace(/[?!.]+$/g, '').trim();
+
+  const patterns = [
+    /^(?:and\s+)?(?:what|how)\s+about\s+(.+)$/i,
+    /^(?:and\s+)?(?:for|in)\s+(.+)$/i,
+    /^(?:same|also)\s+(?:for|in|with)\s+(.+)$/i,
+  ];
+  for (const pattern of patterns) {
+    const match = text.match(pattern);
+    if (match?.[1]) {
+      const focus = cleanupFollowUpFocus(match[1]);
+      if (focus) return focus;
+    }
+  }
+
+  // Very short bare entities can also be follow-ups: "UK?", "France?", etc.
+  const bare = cleanupFollowUpFocus(text);
+  if (bare && bare.length <= 30 && /^[a-z0-9 .'-]+$/i.test(bare)) {
+    const tokenCount = bare.split(/\s+/).filter(Boolean).length;
+    if (tokenCount <= 3 && !/^(yes|no|why|how|what|when|where|thanks|ok|okay)$/i.test(bare)) {
+      return bare;
+    }
+  }
+
+  return '';
+}
+
+function cleanupFollowUpFocus(value = '') {
+  return String(value || '')
+    .replace(/^(?:the|a|an)\s+/i, '')
+    .replace(/\b(?:one|ones|same|too|also)\b/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function findRecentSearchAnchor(historyMessages = [], currentPrompt = '') {
+  const current = String(currentPrompt || '').trim();
+  const candidates = Array.isArray(historyMessages)
+    ? historyMessages
+        .filter((message) => String(message?.content || '').trim() && String(message?.content || '').trim() !== current)
+        .slice(-8)
+        .reverse()
+    : [];
+
+  for (const message of candidates) {
+    const content = String(message?.content || '').trim();
+    if (!content) continue;
+    const query = buildSearchQueryFromPrompt(content);
+    if (!query) continue;
+    const isNews = /\b(news|headline|headlines|latest|recent|updates?|developments?)\b/i.test(`${content} ${query}`);
+    if (isNews) return { kind: 'news', query };
+    if (String(message?.role || '') === 'user') return { kind: 'topic', query };
+  }
+
+  return null;
+}
+
+function escapeRegExp(value = '') {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
 function buildClockGroundingBlock() {

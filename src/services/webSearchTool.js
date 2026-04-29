@@ -406,6 +406,11 @@ export async function processSearchCalls(content, options = {}) {
   const fetchTimeout = parseNumericOption(options, 'fetchTimeout', 7000, 2500, 20000);
   const fetchMaxLength = parseNumericOption(options, 'fetchMaxLength', 2800, 800, 12000);
   const excerptLength = parseNumericOption(options, 'excerptLength', 900, 200, 2000);
+  const onActivity = typeof options?.onActivity === 'function' ? options.onActivity : null;
+  const searchOptions = { ...options };
+  // Renderer -> Electron IPC cannot clone functions. Keep callbacks local
+  // and never pass them through api.webSearch().
+  delete searchOptions.onActivity;
 
   if (searchCalls.length === 0) {
     return { content: workingContent, searchResults: [], actionTraces: [], synthesisContext: '' };
@@ -420,8 +425,25 @@ export async function processSearchCalls(content, options = {}) {
   for (let i = searchCalls.length - 1; i >= 0; i--) {
     const call = searchCalls[i];
     const effectiveQuery = buildSearchQueryFromPrompt(userPrompt, call.query) || call.query;
-    let result = await executeSearch(effectiveQuery, { ...options, maxResults });
+    onActivity?.({
+      type: 'search',
+      status: 'running',
+      query: effectiveQuery,
+      message: `Searching: "${effectiveQuery}"`,
+    });
+    let result = await executeSearch(effectiveQuery, { ...searchOptions, maxResults });
     let normalizedResults = Array.isArray(result?.results) ? result.results : [];
+    onActivity?.({
+      type: 'search',
+      status: result?.error ? 'error' : 'done',
+      query: effectiveQuery,
+      provider: compactWhitespace(result?.provider || ''),
+      count: normalizedResults.length,
+      tookMs: Number(result?.took || 0),
+      message: result?.error
+        ? `Search failed: ${String(result.error)}`
+        : `Found ${normalizedResults.length} result${normalizedResults.length === 1 ? '' : 's'}`,
+    });
     const actions = [{
       type: 'search',
       query: effectiveQuery,
@@ -439,9 +461,27 @@ export async function processSearchCalls(content, options = {}) {
       looksOffTopicForPrompt(normalizedResults, userPrompt);
 
     if (shouldRetry) {
-      const retryResult = await executeSearch(repairedQuery, { ...options, maxResults });
+      onActivity?.({
+        type: 'search_retry',
+        status: 'running',
+        query: repairedQuery,
+        replacedQuery: effectiveQuery,
+        message: `Refining query: "${repairedQuery}"`,
+      });
+      const retryResult = await executeSearch(repairedQuery, { ...searchOptions, maxResults });
       const retryResults = Array.isArray(retryResult?.results) ? retryResult.results : [];
       const retryLooksBetter = retryResults.length > 0 && !looksOffTopicForPrompt(retryResults, userPrompt);
+      onActivity?.({
+        type: 'search_retry',
+        status: retryResult?.error ? 'error' : (retryLooksBetter ? 'done' : 'skipped'),
+        query: repairedQuery,
+        replacedQuery: effectiveQuery,
+        count: retryResults.length,
+        tookMs: Number(retryResult?.took || 0),
+        message: retryLooksBetter
+          ? `Using refined query (${retryResults.length} results)`
+          : `Kept original query`,
+      });
 
       actions.push({
         type: 'search_retry',
@@ -470,11 +510,32 @@ export async function processSearchCalls(content, options = {}) {
         if (!url) continue;
 
         const startedAt = Date.now();
+        const sourceTitle = truncateText(candidate?.title || 'Untitled source', 120);
+        onActivity?.({
+          type: 'open',
+          status: 'running',
+          rank: rank + 1,
+          title: sourceTitle,
+          url,
+          message: `Reading source: ${sourceTitle}`,
+        });
         const page = await fetchPage(url, { timeout: fetchTimeout, maxLength: fetchMaxLength });
         const elapsedMs = Date.now() - startedAt;
         const pageText = compactWhitespace(page?.content || '');
         const pageTitle = truncateText(page?.title || candidate?.title || 'Untitled page', 180);
         const status = page?.error || !pageText ? 'error' : 'ok';
+        onActivity?.({
+          type: 'open',
+          status,
+          rank: rank + 1,
+          title: pageTitle,
+          url,
+          tookMs: elapsedMs,
+          chars: pageText.length,
+          message: status === 'ok'
+            ? `Read source: ${pageTitle}`
+            : `Could not read source: ${pageTitle}`,
+        });
 
         actions.push({
           type: 'open',

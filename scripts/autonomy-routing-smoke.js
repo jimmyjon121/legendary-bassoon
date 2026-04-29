@@ -82,8 +82,10 @@ function main() {
     );
   }
   assert(
-    ipc.includes('INSERT INTO model_presets (id, model_name, temperature, top_p, top_k, context_length, system_prompt, workspace, is_default, device_pin)'),
-    'presets:save must insert device_pin',
+    ipc.includes('INSERT INTO model_presets (id, model_name, temperature, top_p, top_k, context_length, system_prompt, workspace, is_default, device_pin')
+      && ipc.includes('task_intent')
+      && ipc.includes('advanced_options'),
+    'presets:save must insert device_pin plus Phase 4 task_intent/advanced_options columns',
     failures,
   );
   assert(

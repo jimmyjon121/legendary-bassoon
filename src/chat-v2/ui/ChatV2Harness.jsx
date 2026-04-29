@@ -38,6 +38,8 @@ export function ChatV2Harness({ forceMode = null, title = null }) {
             return buildChatV2InferenceOptions({
               model: request.model || state.currentModel,
               workspace: request.workspace || state.currentWorkspace || 'casual',
+              prompt: request.prompt || '',
+              controls: request.controls || {},
             });
           },
         })

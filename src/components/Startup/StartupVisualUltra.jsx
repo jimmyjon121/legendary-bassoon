@@ -73,15 +73,19 @@ void main(){
   float t = uTime * 0.01;
   float n = noise(p * 2.0 + t);
   
-  // Almost black background with tiny gradient
-  vec3 col = vec3(0.008, 0.008, 0.012); // Near black
+  // Almost black background with a restrained indigo lift.
+  vec3 col = vec3(0.006, 0.007, 0.011);
   
-  // Very subtle radial gradient
+  // Very subtle radial gradient.
   float r = length(p);
-  col += vec3(0.005, 0.008, 0.015) * (1.0 - r) * 0.3;
+  col += vec3(0.012, 0.016, 0.032) * (1.0 - r) * 0.24;
+
+  // A faint aperture echo, visible mostly after scan begins.
+  float ring = 1.0 - smoothstep(0.012, 0.028, abs(r - mix(0.36, 0.52, uProgress)));
+  col += vec3(0.025, 0.028, 0.052) * ring * smoothstep(0.25, 0.85, uProgress) * 0.28;
   
   // Tiny bit of noise texture
-  col += vec3(0.002, 0.002, 0.004) * n;
+  col += vec3(0.0014, 0.0015, 0.003) * n;
   
   // Fade in from pure black
   col *= smoothstep(0.0, 0.3, uProgress);
@@ -106,8 +110,8 @@ varying float vSeed;
 void main(){
   vSeed = aSeed;
   
-  float appear = smoothstep(aAppear - 0.05, aAppear + 0.05, uProgress);
-  vAlpha = appear * 0.3; // Very faint
+  float appear = smoothstep(max(0.24, aAppear) - 0.05, max(0.24, aAppear) + 0.05, uProgress);
+  vAlpha = appear * 0.22; // Very faint
   
   vec3 pos = position;
   
@@ -118,7 +122,7 @@ void main(){
   
   vec4 mv = modelViewMatrix * vec4(pos, 1.0);
   
-  float size = aScale * appear * 0.6; // Smaller
+  float size = aScale * appear * 0.46; // Smaller, cleaner
   gl_PointSize = size * (200.0 / max(0.001, -mv.z));
   
   gl_Position = projectionMatrix * mv;
@@ -174,10 +178,10 @@ void main(){
   float fres = pow(1.0 - max(0.0, dot(vN, vV)), 2.0);
   
   // Very dark blue core
-  vec3 col = vec3(0.05, 0.08, 0.15);
-  col += vec3(0.08, 0.12, 0.20) * fres;
+  vec3 col = vec3(0.032, 0.052, 0.105);
+  col += vec3(0.065, 0.095, 0.16) * fres;
   
-  float a = (0.2 + 0.5*fres) * awaken * 0.6; // Very translucent
+  float a = (0.16 + 0.42*fres) * awaken * 0.52; // Very translucent
   gl_FragColor = vec4(col, a);
 }
 `;
@@ -226,6 +230,7 @@ export default function StartupVisualUltra({
   style,
 }) {
   const containerRef = useRef(null);
+  const canvasReadyRef = useRef(null);
   const progressRef = useRef(progress);
   const reportFrameTimeRef = useRef(reportFrameTime);
   const reducedMotion = usePrefersReducedMotion();
@@ -242,14 +247,14 @@ export default function StartupVisualUltra({
   const settings = useMemo(() => {
     if (quality) {
       return {
-        nodes: Math.min(quality.nodes || 300, 300), // Much fewer
+        nodes: Math.min(quality.nodes || 180, 180),
         maxDpr: quality.maxDpr || 1.5,
         renderScale: quality.renderScale || 0.9,
       };
     }
     // Default - minimal
     return {
-      nodes: 200,
+      nodes: 140,
       maxDpr: 1.5,
       renderScale: 0.9,
     };
@@ -276,13 +281,18 @@ export default function StartupVisualUltra({
     });
 
     renderer.setClearColor(0x000000, 0);
-    
-    // Canvas setup
+
+    // Canvas setup. Start fully transparent so any first-frame buffer flash
+    // (bloom warm-up, swap-chain init, etc.) is hidden. We fade in on the
+    // first successful composer.render() — see `markReady()` below.
     renderer.domElement.style.position = "absolute";
     renderer.domElement.style.inset = "0";
     renderer.domElement.style.width = "100%";
     renderer.domElement.style.height = "100%";
     renderer.domElement.style.display = "block";
+    renderer.domElement.style.opacity = "0";
+    renderer.domElement.style.transition = "opacity 320ms cubic-bezier(0.4, 0, 0.2, 1)";
+    canvasReadyRef.current = renderer.domElement;
 
     if ("outputColorSpace" in renderer) renderer.outputColorSpace = THREE.SRGBColorSpace;
 
@@ -327,9 +337,10 @@ export default function StartupVisualUltra({
     const aScale = new Float32Array(N);
 
     for (let i = 0; i < N; i++) {
-      // Concentrate nodes in center
+      // Sparse forge-field: nodes cluster around a broad aperture instead
+      // of a bright star cloud competing with the progress ring.
       const angle = Math.random() * Math.PI * 2;
-      const radius = Math.pow(Math.random(), 0.5) * 2.5; // Cluster in center
+      const radius = 0.72 + Math.pow(Math.random(), 0.85) * 2.25;
       
       positions[i * 3 + 0] = Math.cos(angle) * radius;
       positions[i * 3 + 1] = Math.sin(angle) * radius;
@@ -390,10 +401,10 @@ export default function StartupVisualUltra({
     const composer = new EffectComposer(renderer);
     composer.addPass(new RenderPass(scene, camera));
 
-    const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.3, 0.8, 0.85);
-    bloom.strength = 0.3; // Very subtle
-    bloom.radius = 0.6;
-    bloom.threshold = 0.5; // High threshold - only brightest parts bloom
+    const bloom = new UnrealBloomPass(new THREE.Vector2(1, 1), 0.22, 0.75, 0.88);
+    bloom.strength = 0.22; // Very subtle
+    bloom.radius = 0.55;
+    bloom.threshold = 0.62; // High threshold - only brightest parts bloom
     composer.addPass(bloom);
 
     const film = new ShaderPass(FilmShader);
@@ -426,6 +437,7 @@ export default function StartupVisualUltra({
 
     // Render loop
     let last = performance.now();
+    let framesRendered = 0;
     function tick(now) {
       if (disposed) return;
 
@@ -454,6 +466,7 @@ export default function StartupVisualUltra({
 
       // Phase choreography
       const awaken = smoothstep(0.1, 0.6, p);
+      const seal = smoothstep(0.86, 1.0, p);
 
       // Very minimal camera drift
       if (!reducedMotion) {
@@ -463,16 +476,27 @@ export default function StartupVisualUltra({
       camera.lookAt(0, 0, 0);
 
       // Very slow rotation
-      root.rotation.y = reducedMotion ? 0 : t * 0.5;
+      root.rotation.y = reducedMotion ? 0 : t * 0.45;
+      root.scale.setScalar(1.0 - seal * 0.045);
 
       // Core subtle pulse
-      const pulse = 1.0 + Math.sin(t * 3.0) * 0.05;
-      coreGroup.scale.setScalar(pulse * awaken);
+      const pulse = 1.0 + Math.sin(t * 3.0) * 0.04;
+      coreGroup.scale.setScalar(pulse * awaken * (1.0 - seal * 0.12));
 
       // Update light intensity
-      coreLight.intensity = 0.3 + 0.2 * awaken;
+      coreLight.intensity = 0.22 + 0.16 * awaken + 0.12 * seal;
+      bloom.strength = 0.2 + 0.08 * seal;
+      bloom.radius = 0.52 + 0.08 * seal;
 
       composer.render();
+
+      // Reveal the canvas only after the second frame, by which point the
+      // bloom/post-process buffers have warmed and any first-frame artifact
+      // is already overwritten with a clean image.
+      framesRendered += 1;
+      if (framesRendered === 2 && canvasReadyRef.current) {
+        canvasReadyRef.current.style.opacity = "1";
+      }
 
       raf = requestAnimationFrame(tick);
     }
