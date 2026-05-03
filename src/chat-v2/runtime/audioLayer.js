@@ -16,6 +16,8 @@
  * engine at a time.
  */
 
+import { isVaultWorkspace, WORKSPACE_IDS } from '../../core/types';
+
 const SENTENCE_REGEX = /[^.!?\n]+[.!?]+|\n[^\n]+$/g;
 const DEFAULT_AMBIENCE_FADE_MS = 1200;
 
@@ -152,14 +154,14 @@ function segmentNewSentences(fullText, lastOffset) {
 }
 
 function chooseMood(intensity, workspace) {
-  if (workspace !== 'nsfw') return 'neutral';
+  if (!isVaultWorkspace(workspace)) return 'neutral';
   if (intensity > 0.75) return 'intense';
   if (intensity > 0.45) return 'warm';
   if (intensity > 0.2) return 'soft';
   return 'quiet';
 }
 
-export function attachAudioLayer(engine, { workspace = 'nsfw' } = {}) {
+export function attachAudioLayer(engine, { workspace = WORKSPACE_IDS.VAULT } = {}) {
   if (!engine) return () => {};
   if (attached.has(engine)) return attached.get(engine);
 

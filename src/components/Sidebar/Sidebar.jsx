@@ -8,12 +8,19 @@ import {
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useAppStore, WORKSPACES } from '../../stores/appStore';
+import { isVaultWorkspace, WORKSPACE_IDS } from '../../core/types';
 import { HardwareMonitorCompact } from '../HardwareMonitor/HardwareMonitor';
 import { PowerModeToggle } from '../PowerMode/PowerModeToggle';
 
 const ICONS = { MessageCircle, Briefcase, Code2, Beaker, Lock };
 const FALLBACK_ICON = MessageCircle;
-const ENABLED_WORKSPACES = ['casual', 'work', 'research', 'code', 'nsfw'];
+const ENABLED_WORKSPACES = [
+  WORKSPACE_IDS.CASUAL,
+  WORKSPACE_IDS.WORK,
+  WORKSPACE_IDS.RESEARCH,
+  WORKSPACE_IDS.CODE,
+  WORKSPACE_IDS.VAULT,
+];
 
 // Static workspace colors - no recomputation
 const WS_COLORS = {
@@ -301,7 +308,7 @@ export function Sidebar() {
   }, [setActiveFilter, setActiveFolder]);
 
   const accentColor = WS_COLORS[currentWorkspace] || WS_COLORS.casual;
-  const maskPrivateMeta = currentWorkspace === 'nsfw';
+  const maskPrivateMeta = isVaultWorkspace(currentWorkspace);
 
   const workspaceTabs = useMemo(() => (
     ENABLED_WORKSPACES
@@ -556,7 +563,7 @@ export function Sidebar() {
                     <NavRow
                       key={ws.id}
                       icon={Icon}
-                      label={ws.id === 'nsfw' ? 'Vault' : ws.name}
+                      label={isVaultWorkspace(ws.id) ? 'Vault' : ws.name}
                       active={currentWorkspace === ws.id}
                       accentColor={accentColor}
                       onClick={() => setWorkspace(ws.id)}

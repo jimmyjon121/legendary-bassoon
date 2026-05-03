@@ -11,6 +11,8 @@
  * disable the bridge in settings or disconnect from the safety bar.
  */
 
+import { isVaultWorkspace, WORKSPACE_IDS } from '../../core/types';
+
 const HEARTBEAT_MS = 600;
 const FLOOR = 0.05;
 
@@ -32,8 +34,8 @@ export function attachHapticBridge(engine, { getWorkspace } = {}) {
     if (!config) return false;
     if (!config.enabled) return false;
     if (config.enableOnlyInNsfwWorkspace) {
-      const ws = typeof getWorkspace === 'function' ? getWorkspace() : 'nsfw';
-      if (ws !== 'nsfw') return false;
+      const ws = typeof getWorkspace === 'function' ? getWorkspace() : WORKSPACE_IDS.VAULT;
+      if (!isVaultWorkspace(ws)) return false;
     }
     return true;
   };

@@ -11,6 +11,8 @@
  * The user is always the director. Detection happens before any network call.
  */
 
+import { isVaultWorkspace } from '../../core/types';
+
 const DEFAULT_CONFIG = Object.freeze({
   enabled: true,
   safewords: { red: 'red', yellow: 'yellow', green: 'green' },
@@ -61,7 +63,7 @@ export async function saveSafetyConfig(patch) {
 }
 
 /**
- * Detect a safeword in user input. Only active when the workspace is 'nsfw'
+ * Detect a safeword in user input. Only active in the Vault workspace
  * and the config is enabled. Matches case-insensitively against the entire
  * trimmed message OR a leading "!red" / "!yellow" / "!green" sigil so a user
  * can write "red alert I need out" if they wish.
@@ -74,7 +76,7 @@ export async function saveSafetyConfig(patch) {
  */
 export function detectSafeword(text, workspace, config = cachedConfig) {
   if (!text || typeof text !== 'string') return null;
-  if (workspace !== 'nsfw') return null;
+  if (!isVaultWorkspace(workspace)) return null;
   const cfg = config || DEFAULT_CONFIG;
   if (!cfg.enabled) return null;
 
@@ -162,7 +164,7 @@ export function getVaultProfileSync() {
 
 export function buildPersonaHint(profile) {
   if (!profile) return '';
-  if (String(profile.workload || '').toLowerCase() !== 'nsfw') return '';
+  if (!isVaultWorkspace(profile.workload)) return '';
   const label = profile.profile || 'default';
   const c = profile.corruption || {};
   const bits = [];

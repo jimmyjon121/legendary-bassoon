@@ -1,7 +1,7 @@
 /**
  * VaultSafetyBar
  *
- * Floating, unobtrusive indicator visible only when the workspace is 'nsfw'.
+ * Floating, unobtrusive indicator visible only in the Vault workspace.
  * Shows current safeword state and surfaces the aftercare suggestion when
  * the engine fires a 'vault-safety' event. The bar never sends anything to
  * the model on its own; it just reflects engine state and exposes buttons
@@ -10,6 +10,7 @@
 
 import { useCallback, useEffect, useState, lazy, Suspense } from 'react';
 import { Heart, ShieldAlert, ShieldCheck, ShieldHalf, Film, Users, Library } from 'lucide-react';
+import { isVaultWorkspace } from '../../core/types';
 
 const SceneDirector = lazy(() =>
   import('../../components/PrivateVault/SceneDirector').then((m) => ({ default: m.SceneDirector || m.default }))
@@ -123,7 +124,7 @@ export function VaultSafetyBar({ engine, workspace }) {
     return () => window.removeEventListener('vault-safety', onSafety);
   }, [refreshFromEngine]);
 
-  if (workspace !== 'nsfw') return null;
+  if (!isVaultWorkspace(workspace)) return null;
 
   const statusColor = aftercareActive ? '#38bdf8'
     : yellowClamp ? '#facc15'

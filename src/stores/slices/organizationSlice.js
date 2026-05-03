@@ -2,6 +2,7 @@
 // Handles folders, tags, pinning, starring, and search (workspace-scoped)
 
 import { v4 as uuidv4 } from 'uuid';
+import { isVaultWorkspace } from '../../core/types';
 
 export const createOrganizationSlice = (set, get) => ({
   // State
@@ -34,9 +35,9 @@ export const createOrganizationSlice = (set, get) => ({
     const id = uuidv4();
     
     try {
-      // For NSFW workspace, encrypt folder name
+      // For Vault workspace, encrypt folder name.
       let storedName = name;
-      if (workspace === 'nsfw' && get().nsfwPassword) {
+      if (isVaultWorkspace(workspace) && get().nsfwPassword) {
         try {
           const encrypted = await window.electronAPI?.encrypt(name, get().nsfwPassword);
           storedName = JSON.stringify(encrypted);
@@ -161,9 +162,9 @@ export const createOrganizationSlice = (set, get) => ({
     const workspace = get().currentWorkspace;
     
     try {
-      // For NSFW workspace, encrypt tags
+      // For Vault workspace, encrypt tags.
       let storedTags = tags;
-      if (workspace === 'nsfw' && get().nsfwPassword) {
+      if (isVaultWorkspace(workspace) && get().nsfwPassword) {
         try {
           const encrypted = await window.electronAPI?.encrypt(JSON.stringify(tags), get().nsfwPassword);
           storedTags = [JSON.stringify(encrypted)]; // Store as single encrypted string
@@ -210,9 +211,9 @@ export const createOrganizationSlice = (set, get) => ({
     } = get();
     let filtered = conversations || [];
 
-    // Never show NSFW conversations outside the Private workspace
-    if (currentWorkspace !== 'nsfw') {
-      filtered = filtered.filter(c => c.workspace !== 'nsfw');
+    // Never show Vault conversations outside the Vault workspace.
+    if (!isVaultWorkspace(currentWorkspace)) {
+      filtered = filtered.filter(c => !isVaultWorkspace(c.workspace));
     }
 
     // Project scope filter: when a project is active, only show linked chats.
@@ -322,9 +323,9 @@ export const createOrganizationSlice = (set, get) => ({
     try {
       const tags = await window.electronAPI?.listTagsForWorkspace(workspace) || [];
       
-      // Decrypt tags if NSFW workspace
+      // Decrypt tags if Vault workspace.
       let decryptedTags = tags;
-      if (workspace === 'nsfw' && get().nsfwPassword) {
+      if (isVaultWorkspace(workspace) && get().nsfwPassword) {
         decryptedTags = await Promise.all(
           tags.map(async (tag) => {
             try {
@@ -358,8 +359,8 @@ export const createOrganizationSlice = (set, get) => ({
       const workspace = get().currentWorkspace;
       let storedPreview = preview;
       
-      // Encrypt preview for NSFW
-      if (workspace === 'nsfw' && get().nsfwPassword && preview) {
+      // Encrypt preview for Vault.
+      if (isVaultWorkspace(workspace) && get().nsfwPassword && preview) {
         try {
           const encrypted = await window.electronAPI?.encrypt(preview, get().nsfwPassword);
           storedPreview = JSON.stringify(encrypted);

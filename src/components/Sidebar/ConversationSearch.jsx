@@ -14,6 +14,7 @@ import {
 import { useDebounce } from '../../hooks/useDebounce';
 import { api } from '../../utils/electronAPI';
 import { useAppStore } from '../../stores/appStore';
+import { isVaultWorkspace } from '../../core/types';
 
 export const ConversationSearch = ({ 
   conversations = [],
@@ -51,17 +52,18 @@ export const ConversationSearch = ({
         });
         
         if (!cancelled && results) {
-          // Strip NSFW conversations from results when not in Private workspace
-          const safeResults = currentWorkspace === 'nsfw'
+          // Strip Vault conversations from results when not in the Vault workspace.
+          const inVault = isVaultWorkspace(currentWorkspace);
+          const safeResults = inVault
             ? results
-            : results.filter(r => r.workspace !== 'nsfw');
+            : results.filter(r => !isVaultWorkspace(r.workspace));
 
           const grouped = {};
           for (const row of safeResults) {
             if (!grouped[row.conversation_id]) {
               grouped[row.conversation_id] = {
                 conversationId: row.conversation_id,
-                conversationTitle: currentWorkspace === 'nsfw'
+                conversationTitle: inVault
                   ? 'Vault note'
                   : (row.conversation_title || 'Untitled'),
                 matches: [],
@@ -305,7 +307,7 @@ export const ConversationSearch = ({
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2">
                               <span className="text-sm text-white/90 font-medium truncate">
-                                {currentWorkspace === 'nsfw'
+                                {isVaultWorkspace(currentWorkspace)
                                   ? 'Vault note'
                                   : highlightMatch(conv.title || 'Untitled', debouncedQuery)}
                               </span>
@@ -314,7 +316,7 @@ export const ConversationSearch = ({
                               )}
                             </div>
                             <p className="text-xs text-white/40 truncate mt-0.5">
-                              {currentWorkspace === 'nsfw'
+                              {isVaultWorkspace(currentWorkspace)
                                 ? 'Contents hidden in vault'
                                 : (conv.preview || 'No messages yet')}
                             </p>
@@ -359,7 +361,7 @@ export const ConversationSearch = ({
                               <span className="text-sm text-white/90 font-medium truncate block">
                                 {group.conversationTitle}
                               </span>
-                              {currentWorkspace === 'nsfw' ? (
+                              {isVaultWorkspace(currentWorkspace) ? (
                                 <p className="text-xs text-white/40 mt-1 line-clamp-1">
                                   {group.matches.length} matching message{group.matches.length !== 1 && 's'}
                                 </p>

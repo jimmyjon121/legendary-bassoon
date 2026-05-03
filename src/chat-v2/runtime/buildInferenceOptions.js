@@ -1,4 +1,5 @@
 import { buildOptimizedOllamaOptionsWithInfo } from '../../core/modelResolver';
+import { isVaultWorkspace, normalizeWorkspaceId, WORKSPACE_IDS } from '../../core/types';
 import { useAdaptiveGeneration } from '../../services/adaptiveGeneration';
 import { useAppStore } from '../../stores/appStore';
 import { useChatV2SessionStore } from '../../stores/chatV2SessionStore';
@@ -46,11 +47,11 @@ function mergeVaultOverrides(options, profile) {
 }
 
 function resolveWorkspaceType(workspace) {
-  const value = String(workspace || 'casual').trim().toLowerCase();
-  if (value === 'code') return 'code';
-  if (value === 'work') return 'work';
-  if (value === 'creative') return 'creative';
-  return 'casual';
+  const value = normalizeWorkspaceId(workspace);
+  if (value === WORKSPACE_IDS.CODE) return WORKSPACE_IDS.CODE;
+  if (value === WORKSPACE_IDS.WORK) return WORKSPACE_IDS.WORK;
+  if (value === WORKSPACE_IDS.CREATIVE) return WORKSPACE_IDS.CREATIVE;
+  return WORKSPACE_IDS.CASUAL;
 }
 
 function applyAutoTune(options, autoTuneResult) {
@@ -176,7 +177,7 @@ function applyFastChatClamp(options, {
 }
 
 async function applyVaultOverrides(options, workspaceId) {
-  if (String(workspaceId).toLowerCase() !== 'nsfw') return options;
+  if (!isVaultWorkspace(workspaceId)) return options;
   try {
     const profile = await loadVaultProfile();
     return mergeVaultOverrides(options, profile);
@@ -283,7 +284,7 @@ export async function buildChatV2InferenceOptions({ model, workspace, prompt = '
   const modelName = String(model || appState.currentModel || '').trim();
   if (!modelName) return {};
 
-  const workspaceId = String(workspace || appState.currentWorkspace || 'casual').trim();
+  const workspaceId = normalizeWorkspaceId(workspace || appState.currentWorkspace || WORKSPACE_IDS.CASUAL);
   const workspaceType = resolveWorkspaceType(workspaceId);
   let hasExplicitPreset = false;
 

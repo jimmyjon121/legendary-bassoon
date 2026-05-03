@@ -9,6 +9,7 @@ import { buildOptimizedOllamaOptionsWithInfo, parseModelName, MODEL_FAMILIES, is
 import { useEditorStore } from '../editorStore';
 import { buildFullContext } from '../../services/fullContextBuilder';
 import { resolveChatProjectContext } from '../../services/chatProjectContext';
+import { isVaultWorkspace } from '../../core/types';
 import {
   WEB_SEARCH_TOOL_PROMPT,
   isWebSearchAvailable,
@@ -1140,7 +1141,7 @@ export const createMessageSlice = (set, get) => ({
     
     // Add user message
     const userMessageId = uuidv4();
-    const isNsfw = currentWorkspace === 'nsfw';
+    const isNsfw = isVaultWorkspace(currentWorkspace);
     const nsfwPassword = get().nsfwPassword;
     
     // Encrypt content if NSFW workspace
@@ -1339,7 +1340,7 @@ export const createMessageSlice = (set, get) => ({
       return;
     }
 
-    const isNsfw = currentWorkspace === 'nsfw';
+    const isNsfw = isVaultWorkspace(currentWorkspace);
     const nsfwPassword = get().nsfwPassword;
     
     // Real model metadata from /api/show (populated on model switch in modelSlice)
@@ -1434,7 +1435,7 @@ export const createMessageSlice = (set, get) => ({
     }
 
     let chatProjectContext = null;
-    if (allowContextAugmentation && currentWorkspace !== 'nsfw' && get().activeProjectId) {
+    if (allowContextAugmentation && !isVaultWorkspace(currentWorkspace) && get().activeProjectId) {
       chatProjectContext = await resolveChatProjectContext({
         workspace: currentWorkspace,
         activeProjectId: get().activeProjectId,

@@ -3,6 +3,7 @@
 
 import { v4 as uuidv4 } from 'uuid';
 import { api, isElectron } from '../../utils/electronAPI';
+import { isVaultWorkspace } from '../../core/types';
 
 export const createConversationSlice = (set, get) => ({
   // State
@@ -22,8 +23,8 @@ export const createConversationSlice = (set, get) => ({
         limit: 1000,
       });
       
-      // Decrypt titles for Private workspace
-      if (workspace === 'nsfw' && nsfwPassword && result?.length > 0) {
+      // Decrypt titles for Vault workspace.
+      if (isVaultWorkspace(workspace) && nsfwPassword && result?.length > 0) {
         const decrypted = await Promise.all(
           result.map(async (conv) => {
             if (conv.encrypted) {
@@ -61,7 +62,7 @@ export const createConversationSlice = (set, get) => ({
     const id = uuidv4();
     const workspace = get().currentWorkspace;
     const model = get().currentModel;
-    const isNsfw = workspace === 'nsfw';
+    const isNsfw = isVaultWorkspace(workspace);
     const nsfwPassword = get().nsfwPassword;
     
     try {
@@ -118,7 +119,7 @@ export const createConversationSlice = (set, get) => ({
       
       // Decrypt messages if encrypted
       let decryptedMessages = messages || [];
-      if (workspace === 'nsfw' && get().nsfwPassword) {
+      if (isVaultWorkspace(workspace) && get().nsfwPassword) {
         const conversation = await api.data.conversationsGetById({ id: conversationId });
         
         if (conversation?.encrypted) {

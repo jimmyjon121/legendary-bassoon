@@ -4,6 +4,7 @@
 import { create } from 'zustand';
 import { shallow } from 'zustand/shallow';
 import { describeSettings } from '../services/modelOptimizer';
+import { isVaultWorkspace, normalizeWorkspaceId, WORKSPACE_IDS } from '../core/types';
 import {
   createWorkspaceSlice,
   createModelSlice,
@@ -88,7 +89,7 @@ export const useAppStore = create((set, get) => ({
       const activeProjectByWorkspace = normalizeActiveProjectByWorkspace(savedActiveProjectByWorkspace);
       
       // Important: Set workspace FIRST so loadConversations filters correctly
-      const workspace = savedWorkspace || 'casual';
+      const workspace = normalizeWorkspaceId(savedWorkspace || WORKSPACE_IDS.CASUAL);
 
       // Try to auto-unlock the Vault if the user opted in to "Remember me" on
       // a previous session. The password is stored only via OS-bound safeStorage
@@ -111,7 +112,7 @@ export const useAppStore = create((set, get) => ({
       } catch (_) { /* non-blocking */ }
 
       // Only restore the Vault workspace if we successfully auto-unlocked.
-      const safeWorkspace = workspace === 'nsfw' && !autoUnlocked ? 'casual' : workspace;
+      const safeWorkspace = isVaultWorkspace(workspace) && !autoUnlocked ? WORKSPACE_IDS.CASUAL : workspace;
       set({
         currentWorkspace: safeWorkspace,
         activeProjectByWorkspace,

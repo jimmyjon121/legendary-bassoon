@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { v4 as uuidv4 } from 'uuid';
 import { isElectron } from '../utils/electronAPI';
+import { isVaultWorkspace } from '../core/types';
 
 /**
  * Debate Store - Manages model-on-model discussions
@@ -84,7 +85,7 @@ export const useDebateStore = create((set, get) => ({
   openDebate: (workspace = 'casual') => set({ 
     isDebateOpen: true,
     workspace,
-    isPrivate: workspace === 'nsfw'
+    isPrivate: isVaultWorkspace(workspace)
   }),
   
   closeDebate: () => {
@@ -94,7 +95,7 @@ export const useDebateStore = create((set, get) => ({
   
   setWorkspace: (workspace) => set({
     workspace,
-    isPrivate: workspace === 'nsfw'
+    isPrivate: isVaultWorkspace(workspace)
   }),
   
   setParticipants: (models) => {

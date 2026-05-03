@@ -1,7 +1,8 @@
 // Workspace state management slice
-// Handles workspace switching, NSFW lock, and encryption
+// Handles workspace switching, Vault lock, and encryption
 
 import { safeCall } from '../../utils/electronAPI';
+import { isVaultWorkspace, WORKSPACE_IDS } from '../../core/types';
 
 // Base instruction appended to every system prompt.
 // With /api/chat the model template handles turn boundaries, so we just need
@@ -61,8 +62,8 @@ CRITICAL RULES:
     defaultModel: null,
     systemPrompt: 'You are a verification-first research assistant. Discover broadly, verify with official sources, cite evidence clearly, and avoid unsupported claims.' + RESPONSE_INSTRUCTION
   },
-  nsfw: {
-    id: 'nsfw',
+  [WORKSPACE_IDS.VAULT]: {
+    id: WORKSPACE_IDS.VAULT,
     name: 'Vault',
     icon: 'Lock',
     color: 'workspace-nsfw',
@@ -88,18 +89,20 @@ export const createWorkspaceSlice = (set, get) => ({
   setWorkspace: async (workspaceId) => {
     const previousWorkspace = get().currentWorkspace;
     
-    // If switching to NSFW and it's locked, don't switch yet
-    if (workspaceId === 'nsfw' && get().isLocked) {
-      set({ currentWorkspace: workspaceId });
+    const normalizedWorkspaceId = workspaceId === 'vault' ? WORKSPACE_IDS.VAULT : workspaceId;
+
+    // If switching to Vault and it's locked, don't switch yet.
+    if (isVaultWorkspace(normalizedWorkspaceId) && get().isLocked) {
+      set({ currentWorkspace: normalizedWorkspaceId });
       return;
     }
     
-    set({ currentWorkspace: workspaceId, currentConversationId: null, messages: [] });
-    await window.electronAPI?.setSettings('lastWorkspace', workspaceId);
+    set({ currentWorkspace: normalizedWorkspaceId, currentConversationId: null, messages: [] });
+    await window.electronAPI?.setSettings('lastWorkspace', normalizedWorkspaceId);
     
     // Record workspace switch to ledger
-    if (previousWorkspace !== workspaceId) {
-      safeCall('ledger:recordWorkspaceSwitch', [{ from: previousWorkspace, to: workspaceId }], null).catch(() => {});
+    if (previousWorkspace !== normalizedWorkspaceId) {
+      safeCall('ledger:recordWorkspaceSwitch', [{ from: previousWorkspace, to: normalizedWorkspaceId }], null).catch(() => {});
     }
     
     // Load conversations for this workspace
@@ -107,7 +110,7 @@ export const createWorkspaceSlice = (set, get) => ({
     set({ conversations });
 
     // Sync workspace-scoped project context (non-blocking)
-    get().loadProjects?.(workspaceId).catch(() => {});
+    get().loadProjects?.(normalizedWorkspaceId).catch(() => {});
   },
 
   unlockNsfw: async (password) => {
@@ -116,8 +119,8 @@ export const createWorkspaceSlice = (set, get) => ({
       if (result?.verified) {
         set({ isLocked: false, nsfwPassword: password });
         
-        // Important: If we're already on NSFW workspace, reload conversations now that we're unlocked
-        if (get().currentWorkspace === 'nsfw') {
+        // Important: if we're already on Vault, reload conversations now that we're unlocked.
+        if (isVaultWorkspace(get().currentWorkspace)) {
           const conversations = await get().loadConversations();
           set({ conversations, currentConversationId: null, messages: [] });
         }
@@ -135,8 +138,8 @@ export const createWorkspaceSlice = (set, get) => ({
       await window.electronAPI?.setNsfwPassword(password);
       set({ isLocked: false, nsfwPassword: password });
       
-      // Important: If we're on NSFW workspace, load conversations (will be empty first time)
-      if (get().currentWorkspace === 'nsfw') {
+      // Important: if we're on Vault, load conversations (empty on first use).
+      if (isVaultWorkspace(get().currentWorkspace)) {
         const conversations = await get().loadConversations();
         set({ conversations, currentConversationId: null, messages: [] });
       }
@@ -158,8 +161,8 @@ export const createWorkspaceSlice = (set, get) => ({
 
   lockNsfw: () => {
     set({ isLocked: true, nsfwPassword: null });
-    if (get().currentWorkspace === 'nsfw') {
-      get().setWorkspace('casual');
+    if (isVaultWorkspace(get().currentWorkspace)) {
+      get().setWorkspace(WORKSPACE_IDS.CASUAL);
     }
   },
 
@@ -167,7 +170,7 @@ export const createWorkspaceSlice = (set, get) => ({
     set({ 
       isLocked: true, 
       nsfwPassword: null,
-      currentWorkspace: 'casual',
+      currentWorkspace: WORKSPACE_IDS.CASUAL,
       currentConversationId: null,
       messages: [],
       streamingContent: ''

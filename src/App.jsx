@@ -9,6 +9,7 @@ import { KeyboardShortcutsModal, useKeyboardShortcutsModal } from './components/
 import { useAnimationStore } from './stores/animationStore';
 import ErrorBoundary from './components/ErrorBoundary';
 import { api, isElectron } from './utils/electronAPI';
+import { isVaultWorkspace, WORKSPACE_IDS } from './core/types';
 import { ModelHubPanel as ModelHubDirectInner } from './components/ModelHub/ModelHubPanel';
 
 class ModelHubErrorCatcher extends React.Component {
@@ -250,7 +251,7 @@ function App() {
       if (idleTimer) clearTimeout(idleTimer);
       idleTimer = setTimeout(() => {
         const state = useAppStore.getState();
-        if (state.currentWorkspace === 'nsfw' && !state.isLocked) {
+        if (isVaultWorkspace(state.currentWorkspace) && !state.isLocked) {
           state.lockNsfw();
         }
       }, 5 * 60 * 1000);
@@ -294,10 +295,10 @@ function App() {
       const { triggerPanic } = useAppStore.getState();
       triggerPanic();
     },
-    'workspace-casual': () => setWorkspace('casual'),
-    'workspace-work': () => setWorkspace('work'),
-    'workspace-research': () => setWorkspace('research'),
-    'workspace-code': () => setWorkspace('code'),
+    'workspace-casual': () => setWorkspace(WORKSPACE_IDS.CASUAL),
+    'workspace-work': () => setWorkspace(WORKSPACE_IDS.WORK),
+    'workspace-research': () => setWorkspace(WORKSPACE_IDS.RESEARCH),
+    'workspace-code': () => setWorkspace(WORKSPACE_IDS.CODE),
     'cancel-or-close': () => {
       const { isGenerating } = useAppStore.getState();
       if (isGenerating) {
@@ -357,8 +358,8 @@ function App() {
     }} />;
   }
 
-  // Show lock screen for NSFW workspace
-  if (isLocked && currentWorkspace === 'nsfw') {
+  // Show lock screen for Vault workspace
+  if (isLocked && isVaultWorkspace(currentWorkspace)) {
     return <LockScreen />;
   }
 

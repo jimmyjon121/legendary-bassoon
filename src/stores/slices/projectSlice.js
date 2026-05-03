@@ -1,6 +1,13 @@
 import { api } from '../../utils/electronAPI';
+import { WORKSPACE_IDS } from '../../core/types';
 
-const WORKSPACE_KEYS = ['casual', 'work', 'research', 'code', 'nsfw'];
+const WORKSPACE_KEYS = [
+  WORKSPACE_IDS.CASUAL,
+  WORKSPACE_IDS.WORK,
+  WORKSPACE_IDS.RESEARCH,
+  WORKSPACE_IDS.CODE,
+  WORKSPACE_IDS.VAULT,
+];
 
 export function normalizeActiveProjectByWorkspace(value) {
   const next = {};

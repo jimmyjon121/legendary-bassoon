@@ -3,6 +3,7 @@
  * Keeps IPC/data access in one boundary so engine stays app-agnostic.
  */
 import { v4 as uuidv4 } from 'uuid';
+import { isVaultWorkspace, normalizeWorkspaceId, WORKSPACE_IDS } from '../../core/types';
 import { cleanInferenceOptions } from './inferenceOptionsUtil';
 
 export function createElectronRuntimeAdapter(deps = {}) {
@@ -12,11 +13,9 @@ export function createElectronRuntimeAdapter(deps = {}) {
   const resolveWorkspace = () => {
     if (typeof deps.getWorkspace === 'function') {
       const value = deps.getWorkspace();
-      const normalized = String(value || '').trim();
-      return normalized || 'casual';
+      return normalizeWorkspaceId(value);
     }
-    const fallback = String(deps.workspace || '').trim();
-    return fallback || 'casual';
+    return normalizeWorkspaceId(deps.workspace || WORKSPACE_IDS.CASUAL);
   };
   const resolvePrivatePassword = () => {
     if (typeof deps.getPrivatePassword === 'function') {
@@ -26,7 +25,7 @@ export function createElectronRuntimeAdapter(deps = {}) {
     const fallback = String(deps.privatePassword || '').trim();
     return fallback || null;
   };
-  const isPrivateWorkspace = (workspace = resolveWorkspace()) => String(workspace || '').trim() === 'nsfw';
+  const isPrivateWorkspace = (workspace = resolveWorkspace()) => isVaultWorkspace(workspace);
   const requirePrivatePassword = () => {
     const password = resolvePrivatePassword();
     if (!password) {
@@ -184,7 +183,7 @@ export function createElectronRuntimeAdapter(deps = {}) {
       if (!create) throw new Error('Missing conversationsCreate adapter.');
       const conversationId = uuidv4();
       const ws = resolveWorkspace();
-      const isPrivate = ws === 'nsfw';
+      const isPrivate = isVaultWorkspace(ws);
       const privatePassword = isPrivate ? requirePrivatePassword() : null;
       const safeTitle = isPrivate ? 'Vault note' : seedTitle;
       const storedTitle = isPrivate

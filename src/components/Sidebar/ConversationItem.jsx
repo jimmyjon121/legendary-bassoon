@@ -10,6 +10,7 @@ import {
   Archive,
   Copy
 } from 'lucide-react';
+import { isVaultWorkspace } from '../../core/types';
 
 /**
  * ConversationItem - Enhanced conversation list item with pin/star
@@ -29,7 +30,7 @@ export const ConversationItem = memo(({
   const [showMenu, setShowMenu] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
   const [editTitle, setEditTitle] = useState(conversation.title);
-  const maskPrivateMeta = conversation.workspace === 'nsfw';
+  const maskPrivateMeta = isVaultWorkspace(conversation.workspace);
   const displayTitle = maskPrivateMeta ? 'Vault note' : conversation.title;
   const displayPreview = maskPrivateMeta ? '' : (conversation.preview || 'No messages yet');
 
