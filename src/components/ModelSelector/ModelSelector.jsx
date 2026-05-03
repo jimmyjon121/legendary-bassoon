@@ -315,7 +315,7 @@ function StateBanner({ state, selectorError, onStartOllama, onOpenHub, onUseLoca
       <p className="mt-1 text-xs text-text-secondary">{copy[1]}</p>
       <div className="mt-3 flex flex-wrap gap-2">
         <button type="button" onClick={onStartOllama} className="btn btn-secondary px-3 py-1.5 text-xs">Start Ollama</button>
-        <button type="button" onClick={onOpenHub} className="btn btn-secondary px-3 py-1.5 text-xs">Open Runtime Center</button>
+        <button type="button" onClick={onOpenHub} className="btn btn-secondary px-3 py-1.5 text-xs">Open Model Hub</button>
         <button type="button" onClick={onUseLocal} className="btn btn-secondary px-3 py-1.5 text-xs">Use local GGUF</button>
         <button type="button" onClick={onRefresh} className="btn btn-secondary px-3 py-1.5 text-xs"><RefreshCw size={12} /> Refresh</button>
       </div>

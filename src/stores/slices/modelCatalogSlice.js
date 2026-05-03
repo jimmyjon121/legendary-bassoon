@@ -23,151 +23,23 @@
 //     that selecting it will call loadLocalGguf and upgrade to gguf:)
 //   - NPU/OpenVINO: "npu:<hf-id-or-path>"
 
-const DEFAULT_TTL_MS = 30_000;
-
-const SOURCE_STATES = () => ({
-  ollama: { status: 'idle', error: null, fetchedAt: 0 },
-  llamanode: { status: 'idle', error: null, fetchedAt: 0 },
-  lmstudio: { status: 'idle', error: null, fetchedAt: 0 },
-  npu: { status: 'idle', error: null, fetchedAt: 0 },
-});
-
-function toEntry({ id, name, source, sizeBytes = null, meta = null }) {
-  if (!id) return null;
-  return {
-    id: String(id),
-    name: String(name || id),
-    source,
-    sizeBytes,
-    meta: meta || null,
-  };
-}
-
-function dedupeCatalog(entries) {
-  const map = new Map();
-  for (const entry of entries) {
-    if (!entry || !entry.id) continue;
-    // Prefer entries with richer metadata; earlier entries win unless later
-    // ones add a sizeBytes or meta block the earlier entry lacked.
-    const existing = map.get(entry.id);
-    if (!existing) {
-      map.set(entry.id, entry);
-      continue;
-    }
-    const merged = {
-      ...existing,
-      sizeBytes: existing.sizeBytes ?? entry.sizeBytes ?? null,
-      meta: existing.meta || entry.meta || null,
-      // Keep an aggregated source list for UI filtering.
-      sources: Array.from(new Set([...(existing.sources || [existing.source]), entry.source])),
-    };
-    map.set(entry.id, merged);
-  }
-  return map;
-}
+import { MODEL_CATALOG_SOURCES } from '../../core/types';
+import {
+  MODEL_CATALOG_TTL_MS,
+  catalogEntryHasAnySource,
+  createModelCatalogSourceStates,
+  dedupeModelCatalog,
+  fetchModelCatalogSource,
+} from '../../core/modelCatalogService';
 
 function entryHasAnySource(entry, sourceSet) {
-  if (!entry || !sourceSet) return false;
-  const sources = Array.isArray(entry.sources) && entry.sources.length > 0
-    ? entry.sources
-    : [entry.source];
-  return sources.some((source) => sourceSet.has(source));
-}
-
-async function fetchOllama() {
-  const api = window.electronAPI;
-  if (!api?.refreshModels && !api?.listModels) return [];
-  try {
-    // Prefer the dedicated refresh path so we get canonical Ollama metadata.
-    if (typeof api.refreshModels === 'function') {
-      const res = await api.refreshModels();
-      const list = Array.isArray(res?.models) ? res.models : Array.isArray(res) ? res : [];
-      return list.map((m) => toEntry({
-        id: m.name || m.id,
-        name: m.name || m.id,
-        source: 'ollama',
-        sizeBytes: m.size ?? null,
-        meta: m.details ? { details: m.details } : null,
-      })).filter(Boolean);
-    }
-    const list = await api.listModels();
-    return (Array.isArray(list) ? list : []).map((m) => toEntry({
-      id: m.name || m.id,
-      name: m.name || m.id,
-      source: 'ollama',
-      sizeBytes: m.size ?? null,
-    })).filter(Boolean);
-  } catch (err) {
-    throw new Error(`ollama: ${err?.message || err}`);
-  }
-}
-
-async function fetchLlamanodeCatalog() {
-  const api = window.electronAPI;
-  if (typeof api?.listLocalGgufs !== 'function') return [];
-  try {
-    const res = await api.listLocalGgufs();
-    const models = Array.isArray(res?.models) ? res.models : [];
-    return models.map((m) => toEntry({
-      id: m.id || `gguf:${m.path}`,
-      name: m.name || m.path,
-      source: 'llamanode',
-      sizeBytes: m.sizeBytes ?? null,
-      meta: { path: m.path, registeredAt: m.registeredAt, lastUsedAt: m.lastUsedAt },
-    })).filter(Boolean);
-  } catch (err) {
-    throw new Error(`llamanode: ${err?.message || err}`);
-  }
-}
-
-async function fetchLmStudio() {
-  const api = window.electronAPI;
-  if (typeof api?.scanLMStudioModels !== 'function') return [];
-  try {
-    const res = await api.scanLMStudioModels();
-    const models = Array.isArray(res?.models) ? res.models : [];
-    return models.map((m) => toEntry({
-      id: m.id ? `lmstudio:${m.path || m.id}` : `lmstudio:${m.path}`,
-      name: m.name || m.filename || (m.path ? m.path.split(/[\\/]/).pop() : 'LM Studio model'),
-      source: 'lmstudio',
-      sizeBytes: m.size ?? null,
-      meta: { path: m.path, filename: m.filename },
-    })).filter(Boolean);
-  } catch (err) {
-    throw new Error(`lmstudio: ${err?.message || err}`);
-  }
-}
-
-async function fetchNpu() {
-  const api = window.electronAPI;
-  if (typeof api?.getNpuStatus !== 'function') return { entries: [], status: null };
-  try {
-    const status = await api.getNpuStatus({ force: false });
-    const configured = status?.model || status?.modelPath;
-    const entries = [];
-    if (configured) {
-      entries.push(toEntry({
-        id: `npu:${configured}`,
-        name: String(configured).split('/').pop().replace(/-ov$/, '').replace(/-fp16$/, ''),
-        source: 'npu',
-        meta: {
-          fullId: configured,
-          serverRunning: Boolean(status?.serverRunning),
-          device: status?.device || 'NPU',
-          precision: status?.precision || null,
-        },
-      }));
-    }
-    return { entries: entries.filter(Boolean), status };
-  } catch (err) {
-    throw new Error(`npu: ${err?.message || err}`);
-  }
+  return catalogEntryHasAnySource(entry, sourceSet);
 }
 
 export const createModelCatalogSlice = (set, get) => ({
   // === State ===
   modelCatalog: new Map(),
-  modelCatalogSources: SOURCE_STATES(),
+  modelCatalogSources: createModelCatalogSourceStates(),
   modelCatalogStatus: 'idle', // 'idle' | 'loading' | 'ready' | 'error'
   modelCatalogLastHydratedAt: 0,
   modelCatalogLastError: null,
@@ -175,7 +47,7 @@ export const createModelCatalogSlice = (set, get) => ({
   npuStatus: null,
 
   // === Actions ===
-  hydrateModelCatalog: async ({ force = false, ttlMs = DEFAULT_TTL_MS, sources = null } = {}) => {
+  hydrateModelCatalog: async ({ force = false, ttlMs = MODEL_CATALOG_TTL_MS, sources = null } = {}) => {
     const state = get();
 
     // Reuse in-flight hydrate so concurrent callers don't fan out.
@@ -226,16 +98,16 @@ export const createModelCatalogSlice = (set, get) => ({
       };
 
       await Promise.all([
-        runFetch('ollama', fetchOllama, (entries) => results.push(...entries)),
-        runFetch('llamanode', fetchLlamanodeCatalog, (entries) => results.push(...entries)),
-        runFetch('lmstudio', fetchLmStudio, (entries) => results.push(...entries)),
-        runFetch('npu', fetchNpu, ({ entries, status }) => {
+        runFetch(MODEL_CATALOG_SOURCES.OLLAMA, () => fetchModelCatalogSource(MODEL_CATALOG_SOURCES.OLLAMA), (entries) => results.push(...entries)),
+        runFetch(MODEL_CATALOG_SOURCES.LLAMANODE, () => fetchModelCatalogSource(MODEL_CATALOG_SOURCES.LLAMANODE), (entries) => results.push(...entries)),
+        runFetch(MODEL_CATALOG_SOURCES.LM_STUDIO, () => fetchModelCatalogSource(MODEL_CATALOG_SOURCES.LM_STUDIO), (entries) => results.push(...entries)),
+        runFetch(MODEL_CATALOG_SOURCES.NPU, () => fetchModelCatalogSource(MODEL_CATALOG_SOURCES.NPU), ({ entries, status }) => {
           results.push(...entries);
           set({ npuStatus: status });
         }),
       ]);
 
-      const catalog = dedupeCatalog(results);
+      const catalog = dedupeModelCatalog(results);
       const anyReady = Object.values(next).some((s) => s.status === 'ready');
 
       set({
@@ -269,7 +141,7 @@ export const createModelCatalogSlice = (set, get) => ({
           ...state.modelCatalogSources,
           [source]: { ...(state.modelCatalogSources[source] || {}), fetchedAt: 0 },
         }
-        : SOURCE_STATES(),
+        : createModelCatalogSourceStates(),
     }));
   },
 
