@@ -6,12 +6,15 @@
 const OllamaBackend = require('./backends/ollama-backend');
 const LlamaCppBackend = require('./backends/llamacpp-backend');
 const LlamaNodeBackend = require('./backends/llamanode-backend');
+const LlamaCppSparkBackend = require('./backends/llamacpp-spark-backend');
 const MosaicBackend = require('./backends/mosaic-backend');
 const OpenVinoBackend = require('./backends/openvino-backend');
 const { isGgufModelId } = require('./backends/llamanode-backend');
 const { getLaneCandidates } = require('./lane-registry');
 const { isMosaicRuntimeEnabled } = require('./mosaic-coordinator');
 const hardwareDetection = require('./hardware-detection');
+const { detectSparkProfile } = require('./spark-profile');
+const { inspectMoE } = require('./moe-detector');
 const JobQueue = require('./job-queue');
 const { getPowerMode } = require('./power-mode');
 const { embedTextsWithRouting } = require('./embedding-service');
@@ -34,6 +37,7 @@ const PROFILE_ORDER_STANDARD = {
   balanced: ['ollama-cuda', 'llamanode', 'openvino-npu', 'openvino-gpu', 'llamacpp-vulkan', 'ollama-cpu'],
   efficiency: ['openvino-npu', 'llamanode', 'llamacpp-vulkan', 'openvino-gpu', 'ollama-cuda', 'ollama-cpu'],
   laptop: ['openvino-npu', 'llamanode', 'llamacpp-vulkan', 'openvino-gpu', 'ollama-cpu', 'ollama-cuda'],
+  spark: ['llamacpp-spark', 'ollama-cuda', 'llamanode', 'ollama-cpu'],
 };
 
 const PROFILE_ORDER_UNIFIED = {
@@ -41,6 +45,7 @@ const PROFILE_ORDER_UNIFIED = {
   balanced: ['openvino-hybrid', 'openvino-npu', 'ollama-cuda', 'llamanode', 'llamacpp-vulkan', 'ollama-cpu'],
   efficiency: ['openvino-npu', 'openvino-hybrid', 'llamanode', 'llamacpp-vulkan', 'ollama-cuda', 'ollama-cpu'],
   laptop: ['openvino-npu', 'llamanode', 'llamacpp-vulkan', 'openvino-hybrid', 'ollama-cpu', 'ollama-cuda'],
+  spark: ['llamacpp-spark', 'ollama-cuda', 'llamanode', 'ollama-cpu'],
 };
 
 const PROFILE_PRIORITY = {
@@ -48,6 +53,7 @@ const PROFILE_PRIORITY = {
   balanced: 0,
   efficiency: 10,
   laptop: -5,
+  spark: -20,
 };
 
 const DEFAULT_LANE_CONFIG = {
@@ -132,6 +138,7 @@ class InferenceOrchestrator {
     this.currentBackend = null;
     this.preferredBackendId = null;
     this.hardware = null;
+    this.sparkProfile = null;
     this.initialized = false;
     this.profile = this.store?.get('performanceProfile') || 'balanced';
     this.jobQueue = new JobQueue({
@@ -223,14 +230,21 @@ class InferenceOrchestrator {
     console.log('[Orchestrator] Initializing...');
     try {
       this.hardware = await hardwareDetection.detectHardware();
+      this.sparkProfile = await detectSparkProfile();
+      if (this.sparkProfile?.isSpark && !this.store?.get?.('performanceProfileUserSet')) {
+        this.profile = 'spark';
+        this.store?.set?.('performanceProfile', 'spark');
+      }
       console.log('[Orchestrator] Hardware detected:', {
         gpus: this.hardware.gpus?.length || 0,
         npu: this.hardware.npu?.detected || false,
         recommendations: this.hardware.recommendations?.primary,
+        spark: this.sparkProfile?.isSpark || false,
       });
     } catch (error) {
       console.error('[Orchestrator] Hardware detection failed:', error);
       this.hardware = { gpus: [], npu: { detected: false }, cpu: {}, recommendations: {} };
+      this.sparkProfile = { isSpark: false };
     }
 
     this.preferredBackendId = this.store?.get('preferredBackend') || 'auto';
@@ -292,6 +306,16 @@ class InferenceOrchestrator {
       useGpu: Boolean(primaryGpu),
       priority: 2,
     }));
+
+    if (this.sparkProfile?.isSpark) {
+      const sparkEndpoint = this.store?.get('llamaCppSparkEndpoint') || 'http://127.0.0.1:11500';
+      this.backends.set('llamacpp-spark', new LlamaCppSparkBackend({
+        endpoint: sparkEndpoint,
+        device: primaryGpu?.name || 'NVIDIA GB10 unified memory',
+        priority: 0,
+      }));
+      console.log('[Orchestrator] Spark detected — registered llamacpp-spark backend (fallback-safe)');
+    }
 
     const hasArcGpu = this.hardware.gpus?.some((g) => g.type === 'intel-arc');
     if (hasArcGpu) {
@@ -942,27 +966,38 @@ class InferenceOrchestrator {
   }
 
   async _queryNvidiaSmi() {
-    // `nvidia-smi` is best-effort telemetry and simply resolves null when the
-    // command is unavailable on the current machine.
     const { exec } = require('child_process');
+    const parseFirstGpuLine = (stdout) => {
+      const line = String(stdout || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean)[0];
+      if (!line) return null;
+      const parts = line.split(',').map((s) => parseFloat(String(s).trim()));
+      if (parts.length < 3 || !parts.slice(0, 3).every((v) => Number.isFinite(v))) return null;
+      const utilizationGpu = Math.min(100, Math.max(0, Math.round(parts[0])));
+      const vramUsed = Math.round(Math.max(0, parts[1]));
+      const vramTotal = Math.round(Math.max(0, parts[2]));
+      return { utilizationGpu, vramUsed, vramTotal };
+    };
     return new Promise((resolve) => {
-      exec(
+      const cmds = [
+        'nvidia-smi -i 0 --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits',
         'nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total --format=csv,noheader,nounits',
-        { timeout: 3000 },
-        (error, stdout) => {
-          if (error || !stdout?.trim()) { resolve(null); return; }
-          try {
-            const parts = stdout.trim().split(',').map(s => parseFloat(s.trim()));
-            if (parts.length >= 3 && parts.every(v => Number.isFinite(v))) {
-              resolve({
-                utilizationGpu: Math.round(parts[0]),
-                vramUsed: Math.round(parts[1]),
-                vramTotal: Math.round(parts[2]),
-              });
-            } else { resolve(null); }
-          } catch { resolve(null); }
+      ];
+      const run = (i) => {
+        if (i >= cmds.length) {
+          resolve(null);
+          return;
         }
-      );
+        exec(cmds[i], { timeout: 3000 }, (error, stdout) => {
+          if (error || !stdout?.trim()) {
+            run(i + 1);
+            return;
+          }
+          const parsed = parseFirstGpuLine(stdout);
+          if (parsed) resolve(parsed);
+          else run(i + 1);
+        });
+      };
+      run(0);
     });
   }
 
@@ -1387,6 +1422,36 @@ class InferenceOrchestrator {
     // through to ollama-cuda simply because that backend ranks first.
     const specDecodeSelection = await this._trySelectSpecDecodeBackend(payload, buildDecision, rejectedCandidates);
     if (specDecodeSelection) return specDecodeSelection;
+
+    // Spark MoE routing: once the dedicated llama.cpp Spark server is present,
+    // MoE families use its tensor-placement recipes. Until then this branch is
+    // fallback-safe and records why we stayed on Ollama.
+    const moeInfo = inspectMoE(payload?.modelInfo || {}, payload.model || '');
+    if (this.sparkProfile?.isSpark && moeInfo?.isMoE && this.backends.has('llamacpp-spark')) {
+      const sparkBackend = this.backends.get('llamacpp-spark');
+      const health = await this._safeBackendHealth(sparkBackend);
+      if (health.available) {
+        return {
+          backend: sparkBackend,
+          fallbackReason: null,
+          decisionEvidence: buildDecision({
+            selectedBackend: sparkBackend.id,
+            fallbackReason: null,
+            candidateOrder: ['llamacpp-spark', ...order],
+            scored: [{ backendId: sparkBackend.id, score: 100, index: 0 }],
+            rejected: rejectedCandidates,
+            selectionSource: 'spark-moe',
+            extra: { moe: moeInfo },
+          }),
+        };
+      }
+      rejectedCandidates.push({
+        backendId: sparkBackend.id,
+        reason: 'spark_moe_backend_unavailable',
+        healthStatus: health?.status || 'unavailable',
+        error: health?.error || null,
+      });
+    }
 
     // Direct GGUF models (id starts with "gguf:") are force-routed to
     // llamanode. This is the path LM Studio imports and local file loads
@@ -2813,12 +2878,21 @@ class InferenceOrchestrator {
         });
         const elapsedMs = Date.now() - start;
         const text = String(response?.response || response?.message?.content || '');
-        const estimatedTokens = Math.max(1, Math.round(text.length / 4));
+        let tokenEstimate = Number(response?.eval_count ?? response?.message?.eval_count);
+        if (!Number.isFinite(tokenEstimate) || tokenEstimate <= 0) {
+          tokenEstimate = Number(response?.generation_stats?.completion_tokens);
+        }
+        if (!Number.isFinite(tokenEstimate) || tokenEstimate <= 0) {
+          tokenEstimate = Math.max(1, Math.round(text.length / 4));
+        }
         runs.push({
           ok: true,
           elapsedMs,
-          estimatedTokens,
-          tokensPerSecond: Number((estimatedTokens / Math.max(0.001, elapsedMs / 1000)).toFixed(2)),
+          estimatedTokens: Math.round(tokenEstimate),
+          tokensPerSecond: Number((tokenEstimate / Math.max(0.001, elapsedMs / 1000)).toFixed(2)),
+          tokenSource: Number.isFinite(Number(response?.eval_count)) && Number(response?.eval_count) > 0
+            ? 'eval_count'
+            : 'estimate',
         });
       } catch (error) {
         runs.push({
@@ -3022,11 +3096,15 @@ class InferenceOrchestrator {
         : [],
       softBackendPreference: this.lastExecutionPlan?.softBackendPreference || null,
       backendDecisionSource: this.lastBackendDecision?.selectionSource || null,
+      expertTelemetry: typeof this.currentBackend?.getExpertTelemetry === 'function'
+        ? this.currentBackend.getExpertTelemetry()
+        : null,
       offloadEvidence: evidenceRows,
       hardware: {
         gpuCount: this.hardware?.gpus?.length || 0,
         hasNpu: Boolean(this.hardware?.npu?.detected),
         cpu: this.hardware?.cpu?.brand || null,
+        spark: this.sparkProfile || null,
       },
       timestamp: Date.now(),
     };

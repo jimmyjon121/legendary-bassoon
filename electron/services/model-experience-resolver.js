@@ -10,11 +10,13 @@ const ALLOWED_BACKENDS = new Set([
   'ollama-cuda',
   'ollama-cpu',
   'llamanode',
+  'llamacpp-spark',
   'openvino-npu',
   'openvino-gpu',
   'openvino-hybrid',
   'llamacpp-vulkan',
 ]);
+const { inspectMoE } = require('./moe-detector');
 
 const ALLOWED_TASK_INTENTS = new Set([
   'auto',
@@ -27,6 +29,7 @@ const ALLOWED_TASK_INTENTS = new Set([
 
 const ALLOWED_ADVANCED_KEYS = new Set([
   'temperature',
+  'min_p',
   'top_p',
   'top_k',
   'repeat_penalty',
@@ -105,6 +108,7 @@ const TASK_DEFAULTS = {
 
 const NUMERIC_LIMITS = {
   temperature: { min: 0, max: 2, fallback: 0.6 },
+  min_p: { min: 0, max: 1, fallback: 0 },
   top_p: { min: 0, max: 1, fallback: 0.9 },
   top_k: { min: 1, max: 2000, fallback: 40, integer: true },
   repeat_penalty: { min: 0.8, max: 2, fallback: 1.08 },
@@ -195,6 +199,7 @@ function inferFamily(modelName = '', modelInfo = null, profile = null) {
   const lower = String(modelName || '').toLowerCase();
   if (lower.startsWith('npu:')) return 'openvino';
   if (lower.startsWith('gguf:') || lower.includes('.gguf')) return 'gguf';
+  if (lower.includes('gpt-oss') || lower.includes('gpt_oss') || lower.includes('gptoss')) return 'gpt-oss';
   if (lower.includes('deepseek-coder')) return 'deepseek-coder';
   if (lower.includes('deepseek-r1')) return 'deepseek-r1';
   if (lower.includes('deepseek')) return 'deepseek';
@@ -359,10 +364,15 @@ function applyHardwareGuardrails(options, { runtimeState = null, performanceProf
     trace.push('auto-tune');
   }
 
-  if (profile === 'efficiency' || profile === 'laptop') {
-    next.num_ctx = Math.min(Number(next.num_ctx) || 4096, profile === 'laptop' ? 8192 : 12288);
-    next.num_predict = Math.min(Number(next.num_predict) || 768, profile === 'laptop' ? 768 : 1024);
+  if (profile === 'efficiency' || profile === 'laptop' || profile === 'spark') {
+    next.num_ctx = Math.min(Number(next.num_ctx) || 4096, profile === 'spark' ? 8192 : (profile === 'laptop' ? 8192 : 12288));
+    next.num_predict = Math.min(Number(next.num_predict) || 768, profile === 'spark' ? 1024 : (profile === 'laptop' ? 768 : 1024));
     next.num_batch = Math.min(Number(next.num_batch) || 96, 128);
+    if (profile === 'spark') {
+      next.num_gpu = -1;
+      next.flash_attn = true;
+      next.kv_cache_type = next.kv_cache_type || 'q4_0';
+    }
     trace.push(`${profile}-profile-guardrail`);
   }
 
@@ -376,6 +386,36 @@ function applyHardwareGuardrails(options, { runtimeState = null, performanceProf
     trace.push('memory-pressure-guardrail');
   }
 
+  return next;
+}
+
+function isGptOssFamilyOrName(modelName = '', family = '') {
+  const lower = `${modelName} ${family}`.toLowerCase();
+  return lower.includes('gpt-oss') || lower.includes('gpt_oss') || lower.includes('gptoss');
+}
+
+function applyGptOssHarmonyDefaults(options, trace, warnings) {
+  const next = {
+    ...options,
+    temperature: 1.0,
+    top_k: 40,
+    top_p: 1.0,
+    min_p: 0.0,
+    repeat_penalty: 1.0,
+    num_gpu: -1,
+    flash_attn: options.flash_attn !== false,
+  };
+
+  delete next.frequency_penalty;
+  delete next.presence_penalty;
+
+  next.num_ctx = Math.min(Number(next.num_ctx) || 8192, 8192);
+  next.num_batch = Math.min(Number(next.num_batch) || 64, 64);
+  next.num_predict = Math.min(Number(next.num_predict) || 1024, 1024);
+  next.kv_cache_type = next.kv_cache_type || 'q4_0';
+
+  trace.push('gpt-oss-harmony-defaults');
+  warnings.push('GPT-OSS Harmony profile is active: raw prompt routing with model-card sampling defaults.');
   return next;
 }
 
@@ -588,6 +628,7 @@ function resolveModelExperiencePlan(payload = {}) {
   }
 
   const family = inferFamily(model, modelInfo, profileInput);
+  const moe = modelInfo?.moe || inspectMoE(modelInfo?._showData || modelInfo || {}, model);
   const paramBillions = inferParamBillions(model, modelInfo, profileInput);
   const quantization = inferQuantization(model, modelInfo, profileInput);
   const contextLimit = resolveModelContextLimit(model, modelInfo, profileInput);
@@ -622,6 +663,17 @@ function resolveModelExperiencePlan(payload = {}) {
     autoTuneResult,
   }, overrideTrace);
 
+  if (String(performanceProfile || runtimeState?.profile || '').toLowerCase() === 'spark' && moe?.isMoE) {
+    effectiveOptions.num_ctx = Math.min(Number(effectiveOptions.num_ctx) || 4096, 4096);
+    effectiveOptions.num_batch = Math.min(Number(effectiveOptions.num_batch) || 64, 64);
+    effectiveOptions.num_predict = Math.min(Number(effectiveOptions.num_predict) || 1024, 1024);
+    effectiveOptions.kv_cache_type = 'q4_0';
+    effectiveOptions.num_gpu = -1;
+    effectiveOptions.flash_attn = true;
+    overrideTrace.push('spark-moe-guardrail');
+    warnings.push('Spark MoE safe profile is active: ctx 4096, batch 64, q4_0 KV cache.');
+  }
+
   const presetResult = applyPreset(effectiveOptions, preset, overrideTrace, warnings);
   effectiveOptions = presetResult.options;
 
@@ -635,6 +687,11 @@ function resolveModelExperiencePlan(payload = {}) {
     effectiveOptions.num_predict = Math.min(8192, Math.max(Number(effectiveOptions.num_predict) || 1024, 2048));
     effectiveOptions.num_ctx = Math.min(contextLimit, Math.max(Number(effectiveOptions.num_ctx) || 8192, 16384));
     reasons.push('think-longer-expanded-output');
+  }
+
+  if (isGptOssFamilyOrName(model, family)) {
+    effectiveOptions = applyGptOssHarmonyDefaults(effectiveOptions, overrideTrace, warnings);
+    reasons.push('gpt-oss-harmony-profile');
   }
 
   effectiveOptions = clampEffectiveOptions(effectiveOptions, contextLimit, overrideTrace);
@@ -656,6 +713,7 @@ function resolveModelExperiencePlan(payload = {}) {
     family,
     paramBillions,
     quantization,
+    moe,
     contextLimit,
     workspace,
     primaryStrength: taskIntent,

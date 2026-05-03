@@ -270,6 +270,7 @@ class OllamaBackend extends BaseBackend {
             stream: false,
             options,
             keep_alive: keepAlive,
+            ...(payload.raw ? { raw: true } : {}),
             ...(payload.format ? { format: payload.format } : {}),
             ...(payload.images ? { images: payload.images } : {}),
           };
@@ -327,6 +328,7 @@ class OllamaBackend extends BaseBackend {
             stream: true,
             options,
             keep_alive: keepAlive,
+            ...(payload.raw ? { raw: true } : {}),
             ...(payload.images ? { images: payload.images } : {}),
           };
 

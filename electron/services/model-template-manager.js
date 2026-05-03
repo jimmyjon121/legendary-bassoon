@@ -81,6 +81,14 @@ const CHAT_TEMPLATES = {
     stop: ['<|end|>', '<|user|>'],
   },
 
+  // GPT-OSS Harmony format. Some Hugging Face Ollama imports ship with a
+  // malformed generated template, so DevForge keeps a known-good profile.
+  gptOss: {
+    template: `{{ if .System }}<|start|>system<|message|>{{ .System }}<|end|>{{ end }}{{ range .Messages }}{{ if eq .Role "user" }}<|start|>user<|message|>{{ .Content }}<|end|>{{ else if eq .Role "assistant" }}<|start|>assistant<|channel|>final<|message|>{{ .Content }}<|end|>{{ end }}{{ end }}<|start|>assistant<|channel|>final<|message|>`,
+    system: 'You are ChatGPT, a large language model trained by OpenAI.\nKnowledge cutoff: 2024-06\n\nReasoning: medium\n\n# Valid channels: analysis, commentary, final. Channel must be included for every message.',
+    stop: ['<|return|>', '<|end|>', '<|start|>'],
+  },
+
   // Simple Human/Assistant format (fallback for uncensored models)
   simple: {
     template: `{{ if .System }}{{ .System }}
@@ -97,6 +105,11 @@ const CHAT_TEMPLATES = {
 
 // Model name patterns to template mapping
 const MODEL_TEMPLATE_MAP = {
+  // GPT-OSS Harmony must be checked before generic "uncensored" names.
+  'gpt-oss': 'gptOss',
+  'gpt_oss': 'gptOss',
+  'gptoss': 'gptOss',
+
   // Vicuna family
   'vicuna': 'vicuna',
   'wizard-vicuna': 'vicuna',
@@ -180,12 +193,19 @@ class ModelTemplateManager {
   /**
    * Check if a model needs template fixing
    */
-  needsTemplateFix(modelInfo) {
+  needsTemplateFix(modelInfo, modelName = '') {
     if (!modelInfo) return true;
     
     // Check if template is just {{ .Prompt }} (no structure)
     const template = modelInfo.template || '';
     if (template.trim() === '{{ .Prompt }}' || template.trim() === '') {
+      return true;
+    }
+
+    if (
+      this.detectTemplate(modelName) === 'gptOss' &&
+      /\{\{\s*if\s+\.Prompt\s*\}\}tart\|>user<\|message\|>/.test(template)
+    ) {
       return true;
     }
     
@@ -206,7 +226,7 @@ class ModelTemplateManager {
     // Get current model info
     const modelInfo = await this.getModelInfo(modelName);
     
-    if (!this.needsTemplateFix(modelInfo)) {
+    if (!this.needsTemplateFix(modelInfo, modelName)) {
       console.log('[TemplateManager] Model has valid template, no fix needed');
       this.modelCache.set(modelName, { fixed: false, template: modelInfo.template });
       return { fixed: false };
@@ -226,13 +246,24 @@ class ModelTemplateManager {
     try {
       // Create a new model with the fixed template
       // This creates an alias with the correct template
-      const modelfile = `FROM ${modelName}
-TEMPLATE """${template.template}"""
-SYSTEM """${template.system}"""
-PARAMETER temperature 0.4
+      const parameterBlock = templateKey === 'gptOss'
+        ? [
+          'PARAMETER temperature 1.0',
+          'PARAMETER top_k 40',
+          'PARAMETER top_p 1.0',
+          'PARAMETER min_p 0.0',
+          'PARAMETER repeat_penalty 1.0',
+          ...template.stop.map((token) => `PARAMETER stop ${JSON.stringify(token)}`),
+        ].join('\n')
+        : `PARAMETER temperature 0.4
 PARAMETER top_p 0.8
 PARAMETER repeat_penalty 1.15
 PARAMETER stop ${JSON.stringify(template.stop)}`;
+
+      const modelfile = `FROM ${modelName}
+TEMPLATE """${template.template}"""
+SYSTEM """${template.system}"""
+${parameterBlock}`;
 
       const fixedModelName = `${modelName}-fixed`;
       
@@ -288,7 +319,33 @@ PARAMETER stop ${JSON.stringify(template.stop)}`;
     // Simple string-based formatting (Ollama template format is complex)
     // This is a simplified version for /api/generate with raw:true
     
-    if (templateKey === 'vicuna') {
+    if (templateKey === 'gptOss') {
+      const today = new Date().toISOString().slice(0, 10);
+      prompt = [
+        '<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.',
+        'Knowledge cutoff: 2024-06',
+        `Current date: ${today}`,
+        '',
+        'Reasoning: medium',
+        '',
+        '# Valid channels: analysis, commentary, final. Channel must be included for every message.',
+        '<|end|>',
+      ].join('\n');
+
+      const developerSystem = String(systemPrompt || '').trim();
+      if (developerSystem) {
+        prompt += `<|start|>developer<|message|># Instructions\n\n${developerSystem}<|end|>`;
+      }
+
+      for (const msg of messages) {
+        if (msg.role === 'user') {
+          prompt += `<|start|>user<|message|>${msg.content}<|end|>`;
+        } else if (msg.role === 'assistant') {
+          prompt += `<|start|>assistant<|channel|>final<|message|>${msg.content}<|end|>`;
+        }
+      }
+      prompt += '<|start|>assistant<|channel|>final<|message|>';
+    } else if (templateKey === 'vicuna') {
       prompt = 'A chat between a curious user and an artificial intelligence assistant. The assistant gives helpful, detailed, and polite answers to the user\'s questions.\n\n';
       if (system) prompt = system + '\n\n' + prompt;
       for (const msg of messages) {
@@ -353,12 +410,6 @@ module.exports = {
   CHAT_TEMPLATES,
   MODEL_TEMPLATE_MAP,
 };
-
-
-
-
-
-
 
 
 

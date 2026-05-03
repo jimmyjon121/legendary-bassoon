@@ -1,5 +1,7 @@
 const MODEL_METADATA_CACHE_TTL_MS = 5 * 60 * 1000;
 const MODEL_LIST_CACHE_TTL_MS = 15 * 1000;
+const { inspectMoE } = require('./moe-detector');
+const { getCachedSparkProfile } = require('./spark-profile');
 
 const CASUAL_BASELINE_FALLBACKS = [
   'llama3.2:3b',
@@ -186,8 +188,22 @@ function buildGenerateFallbackPrompt(systemPrompt, chatMessages = []) {
 
 function buildGptOssHarmonyPrompt(systemPrompt, chatMessages = []) {
   const parts = [];
-  const sys = String(systemPrompt || '').trim() || 'You are a helpful assistant.';
-  parts.push(`<|start|>system<|message|>${sys}<|end|>`);
+  const sys = String(systemPrompt || '').trim();
+  const today = new Date().toISOString().slice(0, 10);
+  parts.push([
+    '<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.',
+    'Knowledge cutoff: 2024-06',
+    `Current date: ${today}`,
+    '',
+    'Reasoning: medium',
+    '',
+    '# Valid channels: analysis, commentary, final. Channel must be included for every message.',
+    '<|end|>',
+  ].join('\n'));
+
+  if (sys) {
+    parts.push(`<|start|>developer<|message|># Instructions\n\n${sys}<|end|>`);
+  }
 
   for (const msg of chatMessages) {
     const content = String(msg.content || '').trim();
@@ -221,12 +237,22 @@ function clampExecutionOptions(baseOptions = {}, metadata = {}) {
   const effectiveContextLength = Number.isFinite(contextLimit) && contextLimit > 0
     ? contextLimit
     : fallbackLimit;
+  const sparkProfile = getCachedSparkProfile();
+  const envSaysSpark = /spark|gb10|grace/i.test(String(process.env.DEVFORGE_SPARK_PROFILE || ''));
+  const isSpark = Boolean(sparkProfile?.isSpark || envSaysSpark);
+  const moe = metadata?.moe || inspectMoE(metadata?._showData || metadata || {}, metadata?.model || '');
+  const isSparkMoe = Boolean(isSpark && moe?.isMoE);
+  const safeContextCeiling = isSparkMoe
+    ? 4096
+    : (isSpark
+      ? Math.min(effectiveContextLength || fallbackLimit || 8192, fallbackLimit || 8192, 8192)
+      : effectiveContextLength);
 
   const requestedCtx = Number(options.num_ctx);
   if (Number.isFinite(requestedCtx) && requestedCtx > 0) {
-    options.num_ctx = Math.max(256, Math.min(Math.floor(requestedCtx), effectiveContextLength));
-  } else if (effectiveContextLength > 0) {
-    options.num_ctx = effectiveContextLength;
+    options.num_ctx = Math.max(256, Math.min(Math.floor(requestedCtx), safeContextCeiling));
+  } else if (safeContextCeiling > 0) {
+    options.num_ctx = safeContextCeiling;
   }
 
   const requestedPredict = Number(options.num_predict);
@@ -234,8 +260,19 @@ function clampExecutionOptions(baseOptions = {}, metadata = {}) {
     options.num_predict = Math.max(16, Math.floor(requestedPredict));
   }
 
+  if (isSparkMoe) {
+    options.num_ctx = Math.min(Number(options.num_ctx || 4096), 4096);
+    options.num_batch = Math.min(Number(options.num_batch || 64), 64);
+    options.num_predict = Math.min(Number(options.num_predict || 1024), 1024);
+    options.kv_cache_type = 'q4_0';
+    options.num_gpu = -1;
+    options.flash_attn = options.flash_attn !== false;
+  }
+
   return {
     effectiveContextLength,
+    moe,
+    spark: isSpark,
     options,
   };
 }
@@ -246,7 +283,10 @@ function isLikelyGptOssModel(modelName, family = '') {
   return (
     modelLower.includes('gpt-oss') ||
     modelLower.includes('gpt_oss') ||
-    familyLower === 'gpt-oss'
+    modelLower.includes('gptoss') ||
+    familyLower === 'gpt-oss' ||
+    familyLower.includes('gpt_oss') ||
+    familyLower.includes('gptoss')
   );
 }
 
@@ -310,17 +350,30 @@ function buildGenerateCompatRequest(modelName, systemPrompt, messages, baseOptio
   const cappedCtx = isGptOss ? Math.min(effectiveContext, 8192) : effectiveContext;
   const cappedPredict = greetingLike ? 96 : (isGptOss ? 384 : 768);
 
-  const options = {
-    ...baseOptions,
-    repeat_penalty: Math.max(1.1, Number(baseOptions.repeat_penalty || 1.05)),
-    num_ctx: Number.isFinite(Number(baseOptions.num_ctx)) ? Math.min(Number(baseOptions.num_ctx), cappedCtx) : cappedCtx,
-    num_predict: Number.isFinite(Number(baseOptions.num_predict)) ? Math.min(Number(baseOptions.num_predict), cappedPredict) : cappedPredict,
-    temperature: greetingLike
-      ? Math.min(Math.max(Number(baseOptions.temperature ?? 0.2), 0.2), 0.35)
-      : Number(baseOptions.temperature ?? 0.2),
-  };
+  const options = isGptOss
+    ? {
+      ...baseOptions,
+      num_ctx: Number.isFinite(Number(baseOptions.num_ctx)) ? Math.min(Number(baseOptions.num_ctx), cappedCtx) : cappedCtx,
+      num_predict: Number.isFinite(Number(baseOptions.num_predict)) ? Math.min(Number(baseOptions.num_predict), cappedPredict) : cappedPredict,
+      temperature: 1.0,
+      top_k: 40,
+      top_p: 1.0,
+      min_p: 0.0,
+      repeat_penalty: 1.0,
+    }
+    : {
+      ...baseOptions,
+      repeat_penalty: Math.max(1.1, Number(baseOptions.repeat_penalty || 1.05)),
+      num_ctx: Number.isFinite(Number(baseOptions.num_ctx)) ? Math.min(Number(baseOptions.num_ctx), cappedCtx) : cappedCtx,
+      num_predict: Number.isFinite(Number(baseOptions.num_predict)) ? Math.min(Number(baseOptions.num_predict), cappedPredict) : cappedPredict,
+      temperature: greetingLike
+        ? Math.min(Math.max(Number(baseOptions.temperature ?? 0.2), 0.2), 0.35)
+        : Number(baseOptions.temperature ?? 0.2),
+    };
 
   if (isGptOss) {
+    delete options.frequency_penalty;
+    delete options.presence_penalty;
     const stops = Array.isArray(baseOptions.stop) ? baseOptions.stop : [];
     options.stop = Array.from(new Set([
       ...stops,
@@ -345,6 +398,7 @@ function buildGenerateCompatRequest(modelName, systemPrompt, messages, baseOptio
     model: modelName,
     prompt,
     stream,
+    ...(isGptOss ? { raw: true } : {}),
     options,
   };
 
@@ -572,14 +626,23 @@ async function buildExecutionPlan({ endpoint, makeRequest, payload, stream = fal
   const workspace = String(payload?.workspace || '').trim().toLowerCase() || 'casual';
   const workloadType = String(payload?.workloadType || '').trim().toLowerCase() || 'chat';
   const requestedInfo = await getNormalizedModelInfo(endpoint, makeRequest, requestedModel);
+  if (requestedInfo && typeof requestedInfo === 'object') {
+    requestedInfo.moe = inspectMoE(requestedInfo?._showData || requestedInfo || {}, requestedModel);
+  }
 
   let effectiveModel = requestedModel;
   let metadata = requestedInfo;
   const reasons = [];
   const hasMessages = Array.isArray(payload?.messages) && payload.messages.length > 0;
   const privateWorkspace = workspace === 'nsfw' || workspace === 'private';
-  const allowCasualFallback = workspace === 'casual' && !privateWorkspace && workloadType === 'chat' && hasMessages;
   const explicitFallback = payload?.forceModelFallback === true;
+  const requestedIsGptOss = isLikelyGptOssModel(requestedModel, metadata?.family);
+  const allowCasualFallback =
+    workspace === 'casual' &&
+    !privateWorkspace &&
+    workloadType === 'chat' &&
+    hasMessages &&
+    (!requestedIsGptOss || explicitFallback);
 
   if (allowCasualFallback) {
     const shouldFallback =
@@ -592,6 +655,9 @@ async function buildExecutionPlan({ endpoint, makeRequest, payload, stream = fal
       if (fallbackModel) {
         effectiveModel = fallbackModel;
         metadata = await getNormalizedModelInfo(endpoint, makeRequest, fallbackModel);
+        if (metadata && typeof metadata === 'object') {
+          metadata.moe = inspectMoE(metadata?._showData || metadata || {}, fallbackModel);
+        }
         reasons.push(explicitFallback ? 'forced-casual-baseline-fallback' : 'casual-baseline-fallback');
       } else {
         reasons.push('casual-fallback-unavailable');
@@ -603,6 +669,7 @@ async function buildExecutionPlan({ endpoint, makeRequest, payload, stream = fal
     ...metadata,
     model: effectiveModel,
   });
+  const effectiveIsGptOss = isLikelyGptOssModel(effectiveModel, metadata?.family);
 
   let requestDescriptor = null;
   let executionMode = reasons.some((reason) => reason.includes('fallback'))
@@ -610,7 +677,10 @@ async function buildExecutionPlan({ endpoint, makeRequest, payload, stream = fal
     : 'direct';
 
   if (hasMessages) {
-    const wantsCompatMode = payload?.forceCompatMode === true || metadata?.supportsNativeChat !== true;
+    const wantsCompatMode =
+      payload?.forceCompatMode === true ||
+      metadata?.supportsNativeChat !== true ||
+      effectiveIsGptOss;
     if (wantsCompatMode) {
       requestDescriptor = buildGenerateCompatRequest(
         effectiveModel,
