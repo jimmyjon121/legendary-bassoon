@@ -25,6 +25,7 @@ const https = require('https');
 const { setupWebSearchHandlers } = require('./ipc/web-search-handlers');
 const { setupCodeToolsHandlers } = require('./ipc/code-tools-handlers');
 const { setupResearchHandlers } = require('./ipc/research-handlers');
+const { setupSparkModelHubHandlers } = require('./ipc/spark-model-hub-handlers');
 const { validatePath } = require('./utils/pathValidator');
 const { DataService, registerDataHandlers } = require('./services/ipc/data-service');
 const { FsAccessService, registerFsScopedHandlers } = require('./services/ipc/fs-access-service');
@@ -39,6 +40,8 @@ const characterEvolution = require('./services/character-evolution');
 const mosaicCoordinator = require('./services/mosaic-coordinator');
 const { createModelExperienceWorkbench } = require('./services/model-experience-workbench');
 const { createModelLoadConfidence } = require('./services/model-load-confidence');
+const { detectSparkProfile } = require('./services/spark-profile');
+const { inspectMoE } = require('./services/moe-detector');
 
 // =============================================================================
 // LAZY SERVICE LOADING - Services are loaded on-demand for faster startup
@@ -1522,7 +1525,10 @@ function isLikelyGptOssModel(modelName, family = '') {
   return (
     modelLower.includes('gpt-oss') ||
     modelLower.includes('gpt_oss') ||
-    familyLower === 'gpt-oss'
+    modelLower.includes('gptoss') ||
+    familyLower === 'gpt-oss' ||
+    familyLower.includes('gpt_oss') ||
+    familyLower.includes('gptoss')
   );
 }
 
@@ -1604,8 +1610,22 @@ function buildGenerateFallbackPrompt(systemPrompt, chatMessages = []) {
 
 function buildGptOssHarmonyPrompt(systemPrompt, chatMessages = []) {
   const parts = [];
-  const sys = (systemPrompt || '').trim() || 'You are a helpful assistant.';
-  parts.push(`<|start|>system<|message|>${sys}<|end|>`);
+  const sys = (systemPrompt || '').trim();
+  const today = new Date().toISOString().slice(0, 10);
+  parts.push([
+    '<|start|>system<|message|>You are ChatGPT, a large language model trained by OpenAI.',
+    'Knowledge cutoff: 2024-06',
+    `Current date: ${today}`,
+    '',
+    'Reasoning: medium',
+    '',
+    '# Valid channels: analysis, commentary, final. Channel must be included for every message.',
+    '<|end|>',
+  ].join('\n'));
+
+  if (sys) {
+    parts.push(`<|start|>developer<|message|># Instructions\n\n${sys}<|end|>`);
+  }
 
   for (const msg of chatMessages) {
     const content = (msg.content || '').trim();
@@ -1714,17 +1734,30 @@ async function buildGenerateCompatRequest(endpoint, modelName, systemPrompt, mes
     ? Math.min(baseCtx ?? 8192, 8192)
     : (baseCtx ?? 16384);
 
-  const options = {
-    ...baseOptions,
-    repeat_penalty: Math.max(1.1, baseOptions.repeat_penalty || 1.05),
-    num_ctx: resolvedCtx,
-    num_predict: Number.isFinite(baseOptions.num_predict) ? Math.min(baseOptions.num_predict, cappedPredict) : cappedPredict,
-    temperature: greetingLike
-      ? Math.min(Math.max(baseOptions.temperature ?? 0.2, 0.2), 0.35)
-      : (baseOptions.temperature ?? 0.2),
-  };
+  const options = isGptOss
+    ? {
+      ...baseOptions,
+      num_ctx: resolvedCtx,
+      num_predict: Number.isFinite(baseOptions.num_predict) ? Math.min(baseOptions.num_predict, cappedPredict) : cappedPredict,
+      temperature: 1.0,
+      top_k: 40,
+      top_p: 1.0,
+      min_p: 0.0,
+      repeat_penalty: 1.0,
+    }
+    : {
+      ...baseOptions,
+      repeat_penalty: Math.max(1.1, baseOptions.repeat_penalty || 1.05),
+      num_ctx: resolvedCtx,
+      num_predict: Number.isFinite(baseOptions.num_predict) ? Math.min(baseOptions.num_predict, cappedPredict) : cappedPredict,
+      temperature: greetingLike
+        ? Math.min(Math.max(baseOptions.temperature ?? 0.2, 0.2), 0.35)
+        : (baseOptions.temperature ?? 0.2),
+    };
 
   if (isGptOss) {
+    delete options.frequency_penalty;
+    delete options.presence_penalty;
     const stops = Array.isArray(baseOptions.stop) ? baseOptions.stop : [];
     options.stop = Array.from(new Set([
       ...stops,
@@ -1749,10 +1782,13 @@ async function buildGenerateCompatRequest(endpoint, modelName, systemPrompt, mes
     model: modelName,
     prompt,
     stream,
+    ...(isGptOss ? { raw: true } : {}),
     options: {
       ...options,
-      frequency_penalty: options.frequency_penalty ?? 0.05,
-      presence_penalty: options.presence_penalty ?? 0.05,
+      ...(isGptOss ? {} : {
+        frequency_penalty: options.frequency_penalty ?? 0.05,
+        presence_penalty: options.presence_penalty ?? 0.05,
+      }),
     },
   };
 
@@ -2061,6 +2097,13 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     setupResearchHandlers(ipcMain, mainWindow, { db, saveDatabase, store });
   } catch (error) {
     console.error('[IPC] Failed to setup research handlers:', error.message);
+  }
+
+  // Spark Model Hub IPC (local AI runtime command center)
+  try {
+    setupSparkModelHubHandlers(ipcMain, mainWindow, store);
+  } catch (error) {
+    console.error('[IPC] Failed to setup Spark Model Hub handlers:', error.message);
   }
 
   const { getAgentService } = require('./services/agent-service');
@@ -2597,11 +2640,13 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         allowFallback: safePayload.allowFallback !== false,
         workspace: safePayload.workspace || null,
         workloadType: safePayload.workloadType || (safePayload.tools?.length ? 'agent' : 'chat'),
+        modelInfo: executionPlan.metadata || null,
         executionPlan: executionMeta,
         ...(executionPlan.requestBody.messages ? { messages: executionPlan.requestBody.messages } : {}),
         ...(executionPlan.requestBody.prompt ? { prompt: executionPlan.requestBody.prompt } : {}),
         ...(executionPlan.requestBody.system ? { system: executionPlan.requestBody.system } : {}),
         ...(executionPlan.requestBody.images ? { images: executionPlan.requestBody.images } : {}),
+        ...(executionPlan.requestBody.raw ? { raw: true } : {}),
         ...(Array.isArray(safePayload.tools) ? { tools: safePayload.tools } : {}),
         ...(safePayload.forceBackend ? { forceBackend: safePayload.forceBackend } : {}),
         ...(safePayload.softBackendPreference ? { softBackendPreference: safePayload.softBackendPreference } : {}),
@@ -2785,11 +2830,13 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
             allowFallback: safePayload.allowFallback !== false,
             workspace: safePayload.workspace || null,
             workloadType: safePayload.workloadType || (safePayload.tools?.length ? 'agent' : 'chat'),
+            modelInfo: executionPlan.metadata || null,
             executionPlan: executionMeta,
             ...(executionPlan.requestBody.messages ? { messages: executionPlan.requestBody.messages } : {}),
             ...(executionPlan.requestBody.prompt ? { prompt: executionPlan.requestBody.prompt } : {}),
             ...(executionPlan.requestBody.system ? { system: executionPlan.requestBody.system } : {}),
             ...(executionPlan.requestBody.images ? { images: executionPlan.requestBody.images } : {}),
+            ...(executionPlan.requestBody.raw ? { raw: true } : {}),
             ...(Array.isArray(safePayload.tools) ? { tools: safePayload.tools } : {}),
             ...(safePayload.forceBackend ? { forceBackend: safePayload.forceBackend } : {}),
             ...(safePayload.softBackendPreference ? { softBackendPreference: safePayload.softBackendPreference } : {}),
@@ -2924,7 +2971,14 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     let requestBody;
     let apiPath;
 
-      if (useChatPayload && !safePayload.preferNativeChat) {
+      if (
+        useChatPayload
+        && (
+          safePayload.forceCompatMode
+          || !safePayload.preferNativeChat
+          || isLikelyGptOssModel(safePayload.model)
+        )
+      ) {
       const compat = await buildGenerateCompatRequest(
         endpoint,
         safePayload.model,
@@ -3024,6 +3078,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
           ...(requestBody.prompt ? { prompt: requestBody.prompt } : {}),
           ...(requestBody.system ? { system: requestBody.system } : {}),
           ...(requestBody.images ? { images: requestBody.images } : {}),
+          ...(requestBody.raw ? { raw: true } : {}),
           ...(Array.isArray(safePayload.tools) ? { tools: safePayload.tools } : {}),
         };
 
@@ -3149,8 +3204,121 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     return { success: true };
   });
 
-  ipcMain.handle('llm:unload', async () => {
-    return { success: true, message: 'Model unload not required (Ollama manages memory automatically)' };
+  ipcMain.handle('llm:unload', async (_, request = null) => {
+    const endpoint = store.get('llmEndpoint');
+    const runtimeState = typeof orchestrator?.getRuntimeState === 'function'
+      ? orchestrator.getRuntimeState()
+      : null;
+    const requestedModel = (() => {
+      if (typeof request === 'string') return request;
+      if (request && typeof request === 'object') return request.model || request.name || '';
+      return '';
+    })();
+    const preferredModel = String(
+      requestedModel
+      || store.get('currentModel')
+      || runtimeState?.effectiveModel
+      || runtimeState?.requestedModel
+      || ''
+    ).trim();
+
+    const normalizeModelKey = (value = '') => String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/:latest$/i, '');
+
+    let loadedNames = [];
+    try {
+      const ps = await makeRequest(`${endpoint}/api/ps`, { timeout: 5000 });
+      loadedNames = Array.isArray(ps?.data?.models)
+        ? ps.data.models
+          .map((entry) => String(entry?.name || entry?.model || '').trim())
+          .filter(Boolean)
+        : [];
+    } catch (_) {
+      loadedNames = [];
+    }
+
+    const preferredKey = normalizeModelKey(preferredModel);
+    let targets = [];
+    if (preferredModel) {
+      targets = loadedNames.filter((name) => normalizeModelKey(name) === preferredKey);
+      if (targets.length === 0) targets = [preferredModel];
+    } else {
+      targets = loadedNames;
+    }
+
+    if (targets.length === 0) {
+      return {
+        success: true,
+        unloaded: [],
+        message: 'No loaded models found to unload.',
+      };
+    }
+
+    const uniqueTargets = [...new Set(targets)];
+    const attempts = [];
+
+    for (const modelName of uniqueTargets) {
+      let success = false;
+      let error = null;
+
+      // Prefer native CLI stop first when available.
+      const stopRes = await spawnAsync('ollama', ['stop', modelName], {
+        encoding: 'utf8',
+      });
+      if (!stopRes.error && stopRes.status === 0) {
+        success = true;
+      } else {
+        error = stopRes.error?.message || String(stopRes.stderr || 'ollama stop failed').trim();
+      }
+
+      // Fallback: force immediate unload via keep_alive=0 request.
+      if (!success) {
+        try {
+          const unloadRes = await makeRequest(`${endpoint}/api/generate`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: {
+              model: modelName,
+              prompt: '',
+              stream: false,
+              keep_alive: 0,
+              options: { num_predict: 1 },
+            },
+            timeout: 30000,
+          });
+          const unloadError = unloadRes?.data?.error || null;
+          if (!unloadError) {
+            success = true;
+            error = null;
+          } else {
+            error = String(unloadError);
+          }
+        } catch (fallbackError) {
+          error = fallbackError?.message || error || 'Unload fallback failed';
+        }
+      }
+
+      attempts.push({
+        model: modelName,
+        success,
+        error: success ? null : (error || 'Unload failed'),
+      });
+    }
+
+    const unloaded = attempts.filter((entry) => entry.success).map((entry) => entry.model);
+    const failed = attempts.filter((entry) => !entry.success);
+
+    return {
+      success: failed.length === 0 || unloaded.length > 0,
+      unloaded,
+      failed,
+      attempts,
+      message: failed.length
+        ? `Unloaded ${unloaded.length}/${attempts.length} models`
+        : `Unloaded ${unloaded.length} model${unloaded.length === 1 ? '' : 's'}`,
+    };
   });
 
   ipcMain.handle('llm:health', async () => {
@@ -3204,12 +3372,27 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         const requested = typeof modelName === 'object' && modelName
           ? modelName
           : { name: modelName };
-        return await getNormalizedModelInfo(
+        const normalized = await getNormalizedModelInfo(
           endpoint,
           makeRequest,
           requested?.name || requested?.model || '',
           { forceRefresh: requested?.forceRefresh === true }
         );
+        let moe = inspectMoE(normalized?._showData || normalized?.raw || normalized || {}, requested?.name || requested?.model || '');
+        if (!moe?.isMoE) {
+          try {
+            const show = await makeRequest(`${endpoint}/api/show`, {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: { name: requested?.name || requested?.model || '' },
+              timeout: 10000,
+            });
+            moe = inspectMoE(show?.data || {}, requested?.name || requested?.model || '');
+          } catch (_) {
+            // Best-effort only; normalized metadata remains valid.
+          }
+        }
+        return { ...normalized, moe };
       }
 
       const response = await makeRequest(`${endpoint}/api/show`, {
@@ -3225,6 +3408,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       const data = response.data;
       const details = data.details || {};
       const modelInfo = data.model_info || {};
+      const moe = inspectMoE(data, typeof modelName === 'string' ? modelName : modelName?.name || modelName?.model || '');
 
       // Extract real metadata
       const family = details.family || null;
@@ -3263,6 +3447,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         parentModel: details.parent_model || null,
         // Template: the chat template string (needed for thinking model detection)
         template: data.template || null,
+        moe,
         // Raw details for debugging
         _raw: { families: details.families, format: details.format },
       };
@@ -3357,6 +3542,58 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         offloadEvidence: null,
         timings: { elapsedMs: 0 },
       };
+    }
+  });
+
+  // Warmup with detailed progress events streamed to a renderer-supplied
+  // channel id. Used by the WarmupOverlay to render a real progress bar.
+  ipcMain.handle('llm:warmupWithProgress', async (event, payload = {}) => {
+    const { warmupWithProgress } = require('./services/model-load-progress');
+    const modelName = String(payload?.model || payload?.modelName || '').trim();
+    const channel = String(payload?.channel || '').trim();
+    if (!modelName) {
+      return { success: false, error: 'Missing model name' };
+    }
+    if (!channel) {
+      return { success: false, error: 'Missing progress channel' };
+    }
+    const endpoint = store.get('llmEndpoint');
+    const sender = event?.sender;
+    const safeSendProgress = (chunk) => {
+      try {
+        if (sender && !sender.isDestroyed()) {
+          sender.send(channel, chunk);
+        }
+      } catch (_) { /* renderer detached */ }
+    };
+
+    try {
+      const result = await warmupWithProgress({
+        endpoint,
+        makeRequest,
+        model: modelName,
+        useCuda: true,
+        onEvent: safeSendProgress,
+      });
+      // Final message lets the renderer flip the overlay state to "complete".
+      safeSendProgress({
+        type: result?.success ? 'done' : 'error',
+        stage: result?.success ? 'ready' : 'error',
+        progress: result?.success ? 100 : 99,
+        message: result?.success ? 'Ready.' : (result?.error || 'Warmup failed'),
+        model: modelName,
+        elapsedMs: result?.elapsedMs || null,
+      });
+      return result;
+    } catch (error) {
+      safeSendProgress({
+        type: 'error',
+        stage: 'error',
+        progress: 99,
+        message: error?.message || 'Warmup failed',
+        model: modelName,
+      });
+      return { success: false, error: error?.message || 'Warmup failed' };
     }
   });
 
@@ -5882,7 +6119,17 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       return { success: false, error: 'Orchestrator not available' };
     }
     orchestrator.setProfile(profile);
+    store?.set?.('performanceProfileUserSet', true);
     return { success: true, profile: orchestrator.getProfile() };
+  });
+
+  ipcMain.handle('llm:sparkProbe', async (_, options = {}) => {
+    const profile = await detectSparkProfile({ force: options?.force !== false });
+    return {
+      success: true,
+      profile,
+      runtime: orchestrator?.getRuntimeState?.() || null,
+    };
   });
 
   ipcMain.handle('llm:getRecommendation', (_, modelParams) => {
@@ -5897,6 +6144,8 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       const snapshot = {
         cpu: null,
         memory: null,
+        unifiedMemory: null,
+        spark: null,
         gpus: [],
         npu: null,
       };
@@ -5915,7 +6164,14 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
               usagePercent: Number(stats.memory.usagePercent || 0),
               usedGB: Number(stats.memory.used || 0),
               totalGB: Number(stats.memory.total || 0),
+              availableGB: Number(stats.memory.available || 0),
             };
+          }
+          if (stats?.unifiedMemory) {
+            snapshot.unifiedMemory = stats.unifiedMemory;
+          }
+          if (stats?.spark) {
+            snapshot.spark = stats.spark;
           }
           if (Array.isArray(stats?.gpus)) {
             snapshot.gpus = stats.gpus.map((gpu) => ({
@@ -5925,7 +6181,7 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
               temperature: gpu.temperature ?? null,
               vramUsed: Number(gpu.vramUsed || 0),
               vramTotal: Number(gpu.vramTotal || 0),
-              vramPercent: Number(gpu.vramPercent || 0),
+              vramPercent: Math.min(100, Math.max(0, Number(gpu.vramPercent || 0))),
               ollamaVramUsed: Number(gpu.ollamaVramUsed || 0),
             }));
           }
