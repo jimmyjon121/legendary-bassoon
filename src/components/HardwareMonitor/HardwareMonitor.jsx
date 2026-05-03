@@ -202,13 +202,14 @@ export function HardwareMonitorCompact({ className = '' }) {
     const vramDelta = Math.abs((nextGpu?.vramPercent || 0) - (prevGpu?.vramPercent || 0));
     const prevNpu = prev.npu || {};
     const nextNpu = next.npu || {};
+    const unifiedDelta = Math.abs((next.unifiedMemory?.usagePercent || 0) - (prev.unifiedMemory?.usagePercent || 0));
     const npuChanged =
       Boolean(prevNpu.serverRunning) !== Boolean(nextNpu.serverRunning) ||
       Boolean(prevNpu.modelLoaded) !== Boolean(nextNpu.modelLoaded) ||
       (prevNpu.device || '') !== (nextNpu.device || '');
 
     // Ignore tiny metric jitter to reduce unnecessary re-renders.
-    return cpuDelta >= 1 || memDelta >= 1 || gpuDelta >= 1 || vramDelta >= 1 || npuChanged;
+    return cpuDelta >= 1 || memDelta >= 1 || gpuDelta >= 1 || vramDelta >= 1 || unifiedDelta >= 1 || npuChanged;
   }, []);
 
   const fetchStats = useCallback(async () => {
@@ -216,7 +217,14 @@ export function HardwareMonitorCompact({ className = '' }) {
     if (fetchInFlightRef.current) return;
     fetchInFlightRef.current = true;
     try {
-      const data = await api.getHardwareStats();
+      const [hardwareData, runtimeState] = await Promise.all([
+        api.getHardwareStats(),
+        api.getLlmRuntimeState?.(),
+      ]);
+      const data = {
+        ...(hardwareData || {}),
+        expertTelemetry: runtimeState?.expertTelemetry || null,
+      };
       if (data && shouldAcceptStatsUpdate(lastStatsRef.current, data)) {
         lastStatsRef.current = data;
         setStats(data);
@@ -257,7 +265,10 @@ export function HardwareMonitorCompact({ className = '' }) {
   const gpuUtil = gpu?.utilizationGpu || 0;
   const vramUsed = gpu?.vramUsed || gpu?.ollamaVramUsed || 0;
   const vramTotal = gpu?.vramTotal || 0;
-  const vramPct = vramTotal > 0 ? Math.round((vramUsed / vramTotal) * 100) : 0;
+  const vramPct = vramTotal > 0
+    ? Math.min(100, Math.max(0, Math.round((vramUsed / vramTotal) * 100)))
+    : 0;
+  const unified = stats.unifiedMemory || null;
 
   return (
     <div className={className}>
@@ -285,19 +296,37 @@ export function HardwareMonitorCompact({ className = '' }) {
           detail={stats.cpu?.temperature ? `${stats.cpu.temperature}°C` : undefined}
           color="auto"
         />
-        <MetricRow
-          icon={MemoryStick}
-          label="RAM"
-          value={stats.memory?.usagePercent || 0}
-          detail={`${stats.memory?.used || 0} / ${stats.memory?.total || 0} GB`}
-          color="auto"
-        />
+        {unified ? (
+          <MetricRow
+            icon={MemoryStick}
+            label="Unified"
+            value={unified.usagePercent || 0}
+            detail={`${Number(unified.usedGiB || 0).toFixed(1)} / ${Number(unified.totalGiB || 0).toFixed(1)} GiB shared`}
+            color="cyan"
+          />
+        ) : (
+          <MetricRow
+            icon={MemoryStick}
+            label="RAM"
+            value={stats.memory?.usagePercent || 0}
+            detail={`${stats.memory?.used || 0} / ${stats.memory?.total || 0} GB`}
+            color="auto"
+          />
+        )}
         {gpu && (
           <MetricRow
             icon={Gpu}
             label="GPU"
-            value={gpuUtil}
-            detail={vramTotal > 0 ? `VRAM ${vramUsed}/${vramTotal} MB` : gpu?.name?.replace('NVIDIA ', '').replace('Intel ', '')}
+            value={Math.min(100, Math.round(Number(gpuUtil) || 0))}
+            detail={
+              unified
+                ? `${Math.min(100, Math.round(Number(gpuUtil) || 0))}% util${
+                  stats?.ollama?.totalVramMB ? ` · ~${Math.round(stats.ollama.totalVramMB)} MiB model` : ''
+                } · use Unified row`
+                : (vramTotal > 0
+                  ? `${Math.round(vramUsed)} / ${Math.round(vramTotal)} MiB (${vramPct}%)`
+                  : gpu?.name?.replace('NVIDIA ', '').replace('Intel ', ''))
+            }
             color="violet"
             iconColor="text-violet-400/50"
           />
@@ -311,8 +340,32 @@ export function HardwareMonitorCompact({ className = '' }) {
       }`}>
         <div className="px-3 pb-3 pt-2 space-y-3 border-t border-white/[0.04] mx-2">
 
-          {/* VRAM gauge (if GPU detected) */}
-          {gpu && vramTotal > 0 && (
+          {/* Spark unified memory gauge */}
+          {unified && (
+            <div className="p-2.5 rounded-lg bg-cyan-500/[0.04] border border-cyan-400/10">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-[10px] text-cyan-200/70 font-medium uppercase tracking-wider">Unified Memory</span>
+                <span className="text-[10px] text-cyan-300 font-semibold tabular-nums">{unified.usagePercent}%</span>
+              </div>
+              <div className="h-1.5 rounded-full bg-white/[0.04] overflow-hidden">
+                <div
+                  className="h-full rounded-full transition-all duration-700 ease-out"
+                  style={{
+                    width: `${unified.usagePercent || 0}%`,
+                    background: 'linear-gradient(90deg, #06b6d4, #22d3ee)',
+                    boxShadow: '0 0 8px rgba(34,211,238,0.3)',
+                  }}
+                />
+              </div>
+              <div className="flex items-center justify-between mt-1.5">
+                <span className="text-[9px] text-white/25">{Number(unified.usedGiB || 0).toFixed(1)} GiB used</span>
+                <span className="text-[9px] text-white/25">{Number(unified.availableGiB || 0).toFixed(1)} GiB available</span>
+              </div>
+            </div>
+          )}
+
+          {/* VRAM gauge (if GPU detected and not Spark unified memory) */}
+          {!unified && gpu && vramTotal > 0 && (
             <div className="p-2.5 rounded-lg bg-white/[0.02] border border-white/[0.04]">
               <div className="flex items-center justify-between mb-2">
                 <span className="text-[10px] text-white/40 font-medium uppercase tracking-wider">VRAM</span>
@@ -379,6 +432,19 @@ export function HardwareMonitorCompact({ className = '' }) {
                     <span className="text-[10px] text-indigo-400/60 font-mono">{Math.round(model.sizeVram / (1024 * 1024))}MB</span>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {stats.expertTelemetry && (
+            <div className="pt-2 border-t border-white/[0.04]">
+              <div className="flex items-center gap-1.5 mb-1.5">
+                <Brain size={10} className="text-cyan-400/60" />
+                <span className="text-[10px] text-cyan-200/70 font-medium uppercase tracking-wider">Expert Utilization</span>
+              </div>
+              <div className="rounded-md bg-white/[0.015] px-2 py-1 text-[10px] text-white/45">
+                expert {stats.expertTelemetry.expertId} · {stats.expertTelemetry.routedTokens} routed tokens
+                {stats.expertTelemetry.retune?.action ? ` · retuner ${stats.expertTelemetry.retune.action}` : ''}
               </div>
             </div>
           )}
@@ -545,9 +611,9 @@ export function HardwareMonitorFull() {
                   <div>
                     <div className="flex items-center justify-between text-[11px] mb-1.5">
                       <span className="text-white/40">VRAM</span>
-                      <span className="text-white/60 font-semibold tabular-nums">{stats.gpus[i].vramPercent || 0}%</span>
+                      <span className="text-white/60 font-semibold tabular-nums">{Math.min(100, Number(stats.gpus[i].vramPercent) || 0)}%</span>
                     </div>
-                    <BarFull value={stats.gpus[i].vramPercent || 0} color="auto" />
+                    <BarFull value={Math.min(100, Number(stats.gpus[i].vramPercent) || 0)} color="auto" />
                   </div>
                   {stats.gpus[i].temperature && (
                     <div className="col-span-2 flex items-center gap-1.5 text-[11px] text-white/35">

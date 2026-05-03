@@ -14,6 +14,8 @@ When you first launch DevForge, you'll see an onboarding wizard that guides you 
 4. **Private Workspace** (Optional) - Set up encrypted workspace
 5. **Complete** - You're ready to go!
 
+On startup, onboarding runs a quick local health probe. If Ollama is already reachable and has a model available, DevForge proceeds without waiting for the background auto-setup signal. The auto-setup signal is still used when it arrives, and a short fallback local check keeps first launch from blocking on optional services.
+
 ### Prerequisites
 
 Before using DevForge, make sure you have:
@@ -21,6 +23,18 @@ Before using DevForge, make sure you have:
 - **Ollama** installed and running (`ollama serve`)
 - At least one model pulled (`ollama pull dolphin-mixtral`)
 - **ComfyUI** (optional, for image generation)
+
+### NVIDIA Spark Linux
+
+On NVIDIA Spark Linux, launch with the Spark profile:
+
+```bash
+./run-devforge-spark.sh
+# or
+npm run app:spark
+```
+
+The profile is CUDA/Ollama-first and keeps optional OpenVINO/NPU, `robotjs`, llama.cpp, Mosaic, and speculative-decoding paths non-blocking. Use the standard launch commands on macOS and Windows.
 
 ## Workspaces
 
@@ -182,10 +196,14 @@ Access settings with `Ctrl+,` or click Settings in sidebar.
 
 ### Database Location
 - **Windows**: `%APPDATA%/devforge/devforge.db`
+- **macOS**: `~/Library/Application Support/devforge/devforge.db`
+- **Linux**: `~/.config/devforge/devforge.db`
 - Contains all conversations, messages, and settings
 
 ### Logs
 - **Windows**: `%APPDATA%/devforge/devforge.log`
+- **macOS**: `~/Library/Logs/devforge/devforge.log`
+- **Linux**: `~/.config/devforge/devforge.log`
 - Contains app events and errors
 
 ### Backing Up

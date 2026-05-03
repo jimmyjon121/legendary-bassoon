@@ -7,7 +7,7 @@ export const createOrganizationSlice = (set, get) => ({
   // State
   folders: [],
   activeFolderId: null,
-  activeFilter: 'all', // 'all' | 'today' | 'week' | 'starred' | 'pinned'
+  activeFilter: 'all', // 'all' | 'today' | 'week' | 'starred' | 'pinned' | 'archived'
   searchQuery: '',
   searchResults: null,
   isSearching: false,
@@ -252,6 +252,9 @@ export const createOrganizationSlice = (set, get) => ({
         break;
       case 'pinned':
         filtered = filtered.filter(c => c.pinned === 1);
+        break;
+      case 'archived':
+        filtered = filtered.filter(c => c.archived === 1 || c.archived === true);
         break;
       default:
         // 'all' - no additional filtering

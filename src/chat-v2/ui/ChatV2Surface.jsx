@@ -27,6 +27,7 @@ import { useAppStore } from '../../stores/appStore';
 import { useChatV2SessionStore } from '../../stores/chatV2SessionStore';
 import { useToastStore } from '../../stores/toastStore';
 import { safeCall } from '../../utils/electronAPI';
+import { triggerWarmupWithProgress } from '../../stores/modelWarmupStore';
 import { ModelExperienceWorkbench } from './ModelExperienceWorkbench';
 
 const StreamingMarkdown = lazy(() =>
@@ -1388,6 +1389,9 @@ export function ChatV2Surface({ engine, title = 'Chat V2 (Standalone)' }) {
       options: inferenceOptions || {},
     });
     try {
+      // Drive the global warmup overlay (progress bar) in parallel with the
+      // engine's warmup so the user always sees lifecycle feedback.
+      void triggerWarmupWithProgress(state.model);
       const result = await engine.warmupModel(state.model, { lane: 'lane_interactive' });
       const loaded = Boolean(result?.success || result?.ok);
       const nextWarmup = {
@@ -1434,7 +1438,7 @@ export function ChatV2Surface({ engine, title = 'Chat V2 (Standalone)' }) {
   const handleEjectModel = useCallback(async () => {
     if (!state.model) return;
     await Promise.all([
-      safeCall('unloadModel', [], null),
+      safeCall('unloadModel', [state.model], null),
       safeCall('unloadNpuModel', [], null),
     ]);
     setWarmupResult({ status: 'unloaded', model: state.model, completedAt: Date.now() });
@@ -1689,7 +1693,7 @@ export function ChatV2Surface({ engine, title = 'Chat V2 (Standalone)' }) {
     setIsWarmingModel(true);
     try {
       await Promise.all([
-        safeCall('unloadModel', [], null),
+        safeCall('unloadModel', [state.model], null),
         safeCall('unloadNpuModel', [], null),
       ]);
       await engine.warmupModel(state.model, { lane: 'lane_interactive' });

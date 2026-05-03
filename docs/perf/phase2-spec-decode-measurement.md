@@ -28,6 +28,7 @@ extend wall time without changing the conclusion.
 ## Raw measurement (orchestrator telemetry, not proxies)
 
 Output file (committed for traceability): [`scripts/.spec-eval-ramp1.json`](../../scripts/.spec-eval-ramp1.json)
+Raw mixed stdout/stderr log: [`scripts/.spec-eval-ramp1.log`](../../scripts/.spec-eval-ramp1.log)
 
 `perPrompt[0]` (the entire measured set):
 
@@ -121,8 +122,11 @@ $env:SPEC_EVAL_MAIN_MODEL='qwen2.5:1.5b'
 $env:DEVFORGE_NPU_GENAI_ONLY='1'
 $env:SPEC_EVAL_TURN_TIMEOUT_MS='90000'
 $env:SPEC_EVAL_MIN_FREE_RAM_GB='3.5'
-node scripts/speculative-decoding-eval.js 1>scripts/.spec-eval-ramp1.json 2>&1
+node scripts/speculative-decoding-eval.js 1>scripts/.spec-eval-ramp1.log 2>&1
 ```
+
+The committed JSON artifact is the extracted final telemetry payload from
+that raw log, kept parseable for tooling and indexers.
 
 The eval enforces a per-turn timeout and a free-RAM watchdog; if either
 trips, the script exits non-zero with a clear message rather than

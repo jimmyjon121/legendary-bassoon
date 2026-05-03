@@ -221,6 +221,7 @@ export const api = {
     warmloop: { active: false, available: false },
     streams: { firstTokenMs: null, last: null, aborts: {}, warmloopTransitions: [] },
   }),
+  sparkProbe: (options = {}) => safeCall('sparkProbe', [options], { success: false, profile: null }),
   recordStreamEvent: (payload = {}) =>
     safeCall('recordStreamEvent', [payload], { success: false }),
 
@@ -455,7 +456,29 @@ export const api = {
   libraryAddModel: (modelData = {}) => safeCall('libraryAddModel', [modelData], null),
   libraryUpdateModel: (id, updates = {}) => safeCall('libraryUpdateModel', [id, updates], false),
   warmupModel: (model) => safeCall('warmupModel', [model], { success: false }),
-  unloadModel: () => safeCall('unloadModel', [], { success: false }),
+  warmupModelWithProgress: (model, onProgress) => {
+    const raw = getAPI();
+    if (!raw?.warmupModelWithProgress || typeof raw.warmupModelWithProgress !== 'function') {
+      return {
+        promise: safeCall('warmupModel', [model], { success: false }),
+        unsubscribe: () => {},
+      };
+    }
+    try {
+      return raw.warmupModelWithProgress(model, onProgress);
+    } catch (error) {
+      console.error('[ElectronAPI] warmupModelWithProgress failed:', error);
+      return {
+        promise: Promise.resolve({ success: false, error: error?.message || 'Warmup failed' }),
+        unsubscribe: () => {},
+      };
+    }
+  },
+  unloadModel: (model = null) => (
+    model
+      ? safeCall('unloadModel', [model], { success: false })
+      : safeCall('unloadModel', [], { success: false })
+  ),
   scanFolderForModels: (folderPath) => safeCall('scanFolderForModels', [folderPath], { models: [], error: null }),
 
   // Attachments (v2 first, legacy fallback)

@@ -225,8 +225,9 @@ export const MODEL_FAMILIES = {
     maxContext: 4096,
   },
   'gpt-oss': {
-    type: 'chat', temperature: 0.2, top_p: 0.9, top_k: 40, repeat_penalty: 1.05,
-    maxContext: 131072,
+    type: 'chat', temperature: 1.0, top_p: 1.0, min_p: 0.0, top_k: 40, repeat_penalty: 1.0,
+    maxContext: 8192,
+    moe: true,
   },
   // Catch-all for GPT-style / generic GGUF models
   'gpt': {
@@ -521,6 +522,43 @@ export function parseModelName(modelName) {
   return { family, size, quantization };
 }
 
+function isGptOssFamily(family, modelName = '') {
+  const lower = `${family || ''} ${modelName || ''}`.toLowerCase();
+  return lower.includes('gpt-oss') || lower.includes('gpt_oss') || lower.includes('gptoss');
+}
+
+function applyGptOssHarmonySettings(settings) {
+  return {
+    ...settings,
+    temperature: 1.0,
+    top_p: 1.0,
+    min_p: 0.0,
+    top_k: 40,
+    repeat_penalty: 1.0,
+    num_ctx: Math.min(settings.num_ctx || 8192, 8192),
+    num_batch: Math.min(settings.num_batch || 64, 64),
+    num_predict: Math.min(settings.num_predict || 1024, 1024),
+    _source: `${settings._source || 'default'}+gpt-oss-harmony`,
+  };
+}
+
+function applyGptOssHarmonyResult(result) {
+  const next = {
+    ...result,
+    temperature: 1.0,
+    top_p: 1.0,
+    min_p: 0.0,
+    top_k: 40,
+    repeat_penalty: 1.0,
+    num_ctx: Math.min(result.num_ctx || 8192, 8192),
+    num_batch: Math.min(result.num_batch || 64, 64),
+    num_predict: Math.min(result.num_predict || 1024, 1024),
+  };
+  delete next.frequency_penalty;
+  delete next.presence_penalty;
+  return next;
+}
+
 /**
  * Get optimal settings for a model
  */
@@ -607,6 +645,10 @@ export function getOptimalSettings(modelName, workspaceType = 'casual') {
     settings.top_k = Math.min(100, settings.top_k + 20);
     settings.repeat_penalty = Math.max(1.0, settings.repeat_penalty - 0.05);
     settings._source += '+workspace:creative';
+  }
+
+  if (isGptOssFamily(family, modelName)) {
+    settings = applyGptOssHarmonySettings(settings);
   }
   
   return settings;
@@ -697,7 +739,7 @@ export function describeSettings(modelName) {
 export function buildOptimizedOllamaOptions(modelName, workspaceType = 'casual', overrides = {}) {
   const settings = getOptimalSettings(modelName, workspaceType);
   
-  return {
+  const result = {
     temperature: overrides.temperature ?? settings.temperature,
     top_p: overrides.top_p ?? settings.top_p,
     top_k: overrides.top_k ?? settings.top_k,
@@ -711,6 +753,14 @@ export function buildOptimizedOllamaOptions(modelName, workspaceType = 'casual',
     _source: settings._source,
     _modelType: settings._modelType,
   };
+
+  if (settings.min_p !== undefined || overrides.min_p !== undefined) {
+    result.min_p = overrides.min_p ?? settings.min_p;
+  }
+
+  return isGptOssFamily(settings._detected?.family, modelName)
+    ? applyGptOssHarmonyResult(result)
+    : result;
 }
 
 /**
@@ -842,9 +892,13 @@ export function buildOptimizedOllamaOptionsWithInfo(modelName, workspaceType = '
     settings._source += '+workspace:casual';
   }
 
+  if (isGptOssFamily(family, modelName)) {
+    settings = applyGptOssHarmonySettings(settings);
+  }
+
   // Reasoning models need extra room for chain-of-thought
   const modelType = familyProfile?.type;
-  if (modelType === 'reasoning') {
+  if (modelType === 'reasoning' && !isGptOssFamily(family, modelName)) {
     settings.num_predict = Math.max(settings.num_predict, 8192);
     settings._source += '+reasoning';
   }
@@ -854,7 +908,7 @@ export function buildOptimizedOllamaOptionsWithInfo(modelName, workspaceType = '
   const thinkingModel = isThinkingModel(family, modelName, template);
   
   // Apply user overrides last (explicit settings always win)
-  return {
+  const result = {
     temperature: overrides.temperature ?? settings.temperature,
     top_p: overrides.top_p ?? settings.top_p,
     top_k: overrides.top_k ?? settings.top_k,
@@ -868,6 +922,14 @@ export function buildOptimizedOllamaOptionsWithInfo(modelName, workspaceType = '
     _modelType: settings._modelType,
     _isThinkingModel: thinkingModel,
   };
+
+  if (settings.min_p !== undefined || overrides.min_p !== undefined) {
+    result.min_p = overrides.min_p ?? settings.min_p;
+  }
+
+  return isGptOssFamily(family, modelName)
+    ? applyGptOssHarmonyResult(result)
+    : result;
 }
 
 /**
@@ -917,6 +979,7 @@ function resolveFamily(ollamaFamily, modelName) {
     'pixtral': 'pixtral',
     'gpt-oss': 'gpt-oss',
     'gpt_oss': 'gpt-oss',
+    'gptoss': 'gpt-oss',
   };
   
   if (familyMap[f]) return familyMap[f];

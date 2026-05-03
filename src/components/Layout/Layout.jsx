@@ -1,8 +1,9 @@
-import React, { useState, useEffect, memo } from 'react';
-import { WifiOff, Globe, Cpu, RefreshCw, RotateCcw, X, Minus, Square } from 'lucide-react';
-import { useAppStore, WORKSPACES } from '../../stores/appStore';
+import React, { useState, useEffect, useCallback, memo } from 'react';
+import { WifiOff, Globe, RotateCcw, X, Minus, Square, Unplug } from 'lucide-react';
+import { useAppStore } from '../../stores/appStore';
 import { pollingCoordinator } from '../../services/pollingCoordinator';
 import { api } from '../../utils/electronAPI';
+import { WarmupOverlay } from '../ModelExperience/WarmupOverlay';
 
 // Workspace colors - simple object, no re-computation
 const WORKSPACE_COLORS = {
@@ -24,24 +25,36 @@ function formatCurrentModelLabel(currentModel) {
   return raw.split(':')[0] || raw;
 }
 
+function normalizeModelKey(value = '') {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/:latest$/i, '');
+}
+
 // Memoized title bar to prevent re-renders
 const TitleBar = memo(function TitleBar({ 
-  workspace, 
   accentColor, 
   currentModel, 
   modelStatus, 
+  isActiveModelLoaded,
   sovereigntyStatus,
   showDevRefresh,
   showWindowControls,
   isWindowMaximized,
-  onRefreshApp,
   onRestartApp,
-  isRefreshingApp,
   isRestartingApp,
+  isEjectingModel,
   onWindowMinimize,
   onWindowMaximize,
   onWindowClose,
+  onEjectModel,
 }) {
+  const hasActiveModel = Boolean(String(currentModel || '').trim());
+  const statusTone = hasActiveModel
+    ? (isActiveModelLoaded ? 'loaded' : 'unloaded')
+    : 'none';
+
   return (
     <header 
       className="titlebar relative z-20 h-10 flex items-center justify-between px-3 border-b bg-[#0a0b10]/95 border-white/[0.06]"
@@ -82,44 +95,52 @@ const TitleBar = memo(function TitleBar({
       {/* Center: Model status */}
       <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2 px-2.5 py-1 rounded-md bg-white/[0.03] border border-white/[0.06]" style={{ WebkitAppRegion: 'no-drag' }}>
         <div className={`w-1.5 h-1.5 rounded-full ${
-          modelStatus === 'online' ? 'bg-emerald-400' :
-          (modelStatus === 'loading' || modelStatus === 'warming') ? 'bg-amber-400' : 'bg-zinc-600'
+          modelStatus === 'loading' || modelStatus === 'warming'
+            ? 'bg-amber-400'
+            : statusTone === 'loaded'
+              ? 'bg-emerald-400'
+              : 'bg-zinc-600'
         }`} />
         <span className="text-[11px] text-zinc-400 font-medium">
           {formatCurrentModelLabel(currentModel)}
         </span>
+        {hasActiveModel && (
+          <span className={`rounded-full border px-1.5 py-0.5 text-[10px] ${
+            statusTone === 'loaded'
+              ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200'
+              : 'border-zinc-500/35 bg-zinc-500/10 text-zinc-300'
+          }`}>
+            {statusTone === 'loaded' ? 'Loaded' : 'Unloaded'}
+          </span>
+        )}
+        {hasActiveModel && (
+          <button
+            type="button"
+            onClick={onEjectModel}
+            disabled={isEjectingModel}
+            className="inline-flex h-5 items-center gap-1 rounded border border-red-400/20 bg-red-500/[0.08] px-1.5 text-[10px] font-medium text-red-200 transition hover:bg-red-500/[0.14] disabled:cursor-wait disabled:opacity-60"
+            title="Eject current model from active runtimes (GPU/NPU)"
+          >
+            <Unplug size={10} />
+            <span>{isEjectingModel ? 'Ejecting' : 'Eject'}</span>
+          </button>
+        )}
       </div>
 
-      {/* Right: Refresh + Restart are prominent and clearly labeled, sitting
-          before the window controls with a visual divider. Refresh reloads
-          the renderer (fast, picks up UI changes). Restart relaunches the
-          whole Electron app (slower but picks up main-process, native
-          module, and orchestrator changes). The X (close) stays rightmost
-          to match Windows chrome conventions. */}
+      {/* Right: Restart is prominent because it relaunches the full Electron
+          app and picks up renderer, main-process, IPC, and native changes. */}
       <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' }}>
         {showDevRefresh && (
-          <>
-            <button
-              type="button"
-              onClick={onRefreshApp}
-              disabled={isRefreshingApp || isRestartingApp}
-              className="flex items-center gap-1.5 h-7 px-2.5 rounded-md text-zinc-300 hover:text-white hover:bg-white/[0.08] border border-white/[0.05] hover:border-white/[0.12] transition-colors disabled:opacity-50 disabled:cursor-wait"
-              title="Refresh UI — picks up renderer changes (fast). Use this after editing anything under src/."
-            >
-              <RefreshCw size={13} className={isRefreshingApp ? 'animate-spin' : ''} />
-              <span className="text-[11px] font-medium">{isRefreshingApp ? 'Refreshing…' : 'Refresh'}</span>
-            </button>
-            <button
-              type="button"
-              onClick={onRestartApp}
-              disabled={isRefreshingApp || isRestartingApp}
-              className="flex items-center gap-1.5 h-7 px-2.5 rounded-md text-amber-300/90 hover:text-amber-200 hover:bg-amber-500/[0.12] border border-amber-500/[0.15] hover:border-amber-500/30 transition-colors disabled:opacity-50 disabled:cursor-wait"
-              title="Restart app — full Electron relaunch. Picks up changes to electron/, native modules, orchestrator, and IPC handlers."
-            >
-              <RotateCcw size={13} className={isRestartingApp ? 'animate-spin' : ''} />
-              <span className="text-[11px] font-medium">{isRestartingApp ? 'Restarting…' : 'Restart'}</span>
-            </button>
-          </>
+          <button
+            type="button"
+            onClick={onRestartApp}
+            disabled={isRestartingApp}
+            className="flex items-center gap-1.5 h-7 px-2.5 rounded-md text-amber-300/90 hover:text-amber-200 hover:bg-amber-500/[0.12] border border-amber-500/[0.15] hover:border-amber-500/30 transition-colors disabled:opacity-50 disabled:cursor-wait"
+            title="Restart app — full Electron relaunch. Picks up renderer, electron/, native module, orchestrator, and IPC changes."
+          >
+            <RotateCcw size={13} className={isRestartingApp ? 'animate-spin' : ''} />
+            <span className="text-[11px] font-medium">{isRestartingApp ? 'Restarting...' : 'Restart'}</span>
+          </button>
         )}
         {showDevRefresh && showWindowControls && (
           <div className="w-px h-5 bg-white/[0.1] mx-1.5" aria-hidden />
@@ -180,6 +201,7 @@ export function Layout({ children }) {
   const currentWorkspace = useAppStore(state => state.currentWorkspace);
   const modelStatus = useAppStore(state => state.modelStatus);
   const currentModel = useAppStore(state => state.currentModel);
+  const llmRuntimeState = useAppStore(state => state.llmRuntimeState);
   const error = useAppStore(state => state.error);
   const clearError = useAppStore(state => state.clearError);
   
@@ -191,10 +213,10 @@ export function Layout({ children }) {
     typeof window !== 'undefined' && Boolean(window.electronAPI)
   );
   const [isWindowMaximized, setIsWindowMaximized] = useState(false);
-  const [isRefreshingApp, setIsRefreshingApp] = useState(false);
   const [isRestartingApp, setIsRestartingApp] = useState(false);
+  const [isEjectingModel, setIsEjectingModel] = useState(false);
+  const [isActiveModelLoaded, setIsActiveModelLoaded] = useState(false);
   
-  const workspace = WORKSPACES[currentWorkspace];
   const accentColor = WORKSPACE_COLORS[currentWorkspace] || WORKSPACE_COLORS.casual;
 
   useEffect(() => {
@@ -247,35 +269,47 @@ export function Layout({ children }) {
     await api.closeWindow();
   };
 
-  // Renderer-only refresh: reloads the current window to pick up the
-  // latest bundled UI. Fast. Use this after editing anything under src/.
-  // Alt-click still bypasses cache for stubborn cached assets.
-  const handleRefreshApp = async (event) => {
-    const ignoreCache = event?.altKey === true;
+  const refreshLoadedStatus = useCallback(async () => {
+    const modelName = String(currentModel || '').trim();
+    if (!modelName) {
+      setIsActiveModelLoaded(false);
+      return;
+    }
 
-    if (typeof window === 'undefined' || isRefreshingApp || isRestartingApp) return;
-    setIsRefreshingApp(true);
-
+    const currentKey = normalizeModelKey(modelName);
     try {
-      window.sessionStorage?.setItem('devforge:startup-complete', '1');
-    } catch { /* non-blocking */ }
+      if (window?.electronAPI?.sparkModelHubLoadedModels) {
+        const loaded = await window.electronAPI.sparkModelHubLoadedModels();
+        const loadedModels = Array.isArray(loaded?.models) ? loaded.models : [];
+        const isLoaded = loadedModels.some((entry) => {
+          const candidate = String(entry?.name || entry?.model || '').trim();
+          return normalizeModelKey(candidate) === currentKey;
+        });
+        setIsActiveModelLoaded(Boolean(isLoaded));
+        return;
+      }
+    } catch (_) {
+      // Fall through to runtime-state heuristic.
+    }
 
+    const effective = normalizeModelKey(
+      llmRuntimeState?.effectiveModel || llmRuntimeState?.requestedModel || ''
+    );
+    setIsActiveModelLoaded(Boolean(effective && effective === currentKey && modelStatus === 'online'));
+  }, [currentModel, llmRuntimeState, modelStatus]);
+
+  const handleEjectModel = async () => {
+    if (!currentModel || isEjectingModel) return;
+    setIsEjectingModel(true);
     try {
-      if (window.electronAPI?.reloadWindow) {
-        await window.electronAPI.reloadWindow({ ignoreCache });
-        return; // renderer detaches on reload
-      }
-      // Fallback when running outside Electron (dev browser inspection).
-      if (ignoreCache && typeof window.location.reload === 'function') {
-        window.location.reload(true);
-      } else {
-        window.location.reload();
-      }
-    } catch (error) {
-      console.warn('[Layout] Refresh failed:', error?.message || error);
-      window.location.reload();
+      await Promise.all([
+        api.unloadModel(currentModel),
+        api.unloadNpuModel(),
+      ]);
+      setIsActiveModelLoaded(false);
     } finally {
-      setIsRefreshingApp(false);
+      setIsEjectingModel(false);
+      void refreshLoadedStatus();
     }
   };
 
@@ -284,7 +318,7 @@ export function Layout({ children }) {
   // node-llama-cpp) actually take effect. Slower than a refresh
   // but picks up everything.
   const handleRestartApp = async () => {
-    if (typeof window === 'undefined' || isRefreshingApp || isRestartingApp) return;
+    if (typeof window === 'undefined' || isRestartingApp) return;
     setIsRestartingApp(true);
 
     try {
@@ -328,24 +362,34 @@ export function Layout({ children }) {
     return () => unsubscribePolling?.();
   }, []);
 
+  useEffect(() => {
+    void refreshLoadedStatus();
+    const unsubscribePolling = pollingCoordinator.subscribe('layout:model-loaded-status', {
+      run: refreshLoadedStatus,
+      intervalMs: 8000,
+      hiddenIntervalMs: 30000,
+    });
+    return () => unsubscribePolling?.();
+  }, [refreshLoadedStatus]);
+
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-surface-base">
       <TitleBar 
-        workspace={workspace}
         accentColor={accentColor}
         currentModel={currentModel}
         modelStatus={modelStatus}
+        isActiveModelLoaded={isActiveModelLoaded}
         sovereigntyStatus={sovereigntyStatus}
         showDevRefresh={showDevRefresh}
         showWindowControls={showWindowControls}
         isWindowMaximized={isWindowMaximized}
-        onRefreshApp={handleRefreshApp}
         onRestartApp={handleRestartApp}
-        isRefreshingApp={isRefreshingApp}
         isRestartingApp={isRestartingApp}
+        isEjectingModel={isEjectingModel}
         onWindowMinimize={handleWindowMinimize}
         onWindowMaximize={handleWindowMaximize}
         onWindowClose={handleWindowClose}
+        onEjectModel={handleEjectModel}
       />
 
       <ErrorToast error={error} onClear={clearError} />
@@ -353,6 +397,8 @@ export function Layout({ children }) {
       <div className="flex-1 overflow-hidden relative">
         {children}
       </div>
+
+      <WarmupOverlay />
     </div>
   );
 }

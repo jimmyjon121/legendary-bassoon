@@ -58,6 +58,7 @@ export const useAppStore = create((set, get) => ({
         'sidebarSectionOrder',
         'sidebarSectionVisibility',
         'activeProjectByWorkspace',
+        'autoWarmupOnLaunch',
       ]) || {};
       
       // Fallback to individual calls if batch not available
@@ -71,6 +72,7 @@ export const useAppStore = create((set, get) => ({
       const savedSidebarSectionOrder = settings.sidebarSectionOrder ?? await window.electronAPI?.getSettings('sidebarSectionOrder');
       const savedSidebarSectionVisibility = settings.sidebarSectionVisibility ?? await window.electronAPI?.getSettings('sidebarSectionVisibility');
       const savedActiveProjectByWorkspace = settings.activeProjectByWorkspace ?? await window.electronAPI?.getSettings('activeProjectByWorkspace');
+      const savedAutoWarmupOnLaunch = settings.autoWarmupOnLaunch ?? await window.electronAPI?.getSettings('autoWarmupOnLaunch');
       const streamingRenderMode = ['hybrid', 'plain_stream', 'full_rich'].includes(savedStreamingRenderMode)
         ? savedStreamingRenderMode
         : 'hybrid';
@@ -119,10 +121,13 @@ export const useAppStore = create((set, get) => ({
           : {}),
       });
       
+      // Default: do NOT warm the last-used model on launch. Users opt in
+      // explicitly via Settings -> Performance ("Auto-warm last model on launch").
+      const shouldAutoWarmup = savedAutoWarmupOnLaunch === true;
       const llmBootstrapTask = get().initializeLlm
         ? get().initializeLlm({
           requestedModel: savedModel ?? undefined,
-          warmup: Boolean(savedModel),
+          warmup: Boolean(savedModel) && shouldAutoWarmup,
           updateError: false,
         }).catch((error) => {
           console.warn('[AppStore] LLM bootstrap degraded:', error?.message || error);

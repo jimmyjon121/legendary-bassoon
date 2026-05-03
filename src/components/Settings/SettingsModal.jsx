@@ -1,7 +1,8 @@
 import React, { useState, useEffect, Suspense, lazy, memo } from 'react';
-import { X, Settings, Server, Image, Shield, Keyboard, FolderOpen, Loader, Cpu, Zap, Bug, Search } from 'lucide-react';
+import { X, Settings, Server, Image, Shield, Keyboard, FolderOpen, Loader, Cpu, Zap, Bug, Search, Monitor } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { api } from '../../utils/electronAPI';
+import { triggerWarmupWithProgress } from '../../stores/modelWarmupStore';
 import { useShortcutsStore } from '../../stores/shortcutsStore';
 import { useThemeStore } from '../../stores/themeStore';
 import { pollingCoordinator } from '../../services/pollingCoordinator';
@@ -1155,6 +1156,27 @@ function NPUModelConverter() {
     setModel: state.setModel,
     setPreferredBackend: state.setPreferredBackend,
   }), shallow);
+
+  const llmRuntimeSpark = useAppStore((state) =>
+    Boolean(
+      state.llmRuntimeState?.hardware?.spark?.isSpark
+      || state.llmRuntimeState?.deviceUtilization?.spark?.isSpark,
+    ));
+  const [probeSparkHost, setProbeSparkHost] = React.useState(false);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    api.sparkProbe({ force: false }).then((r) => {
+      if (!cancelled && r?.profile?.isSpark) setProbeSparkHost(true);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
+
+  // Intel/OpenVINO NPU path — not offered on NVIDIA DGX Spark.
+  if (probeSparkHost || llmRuntimeSpark) {
+    return null;
+  }
+
   const [modelInput, setModelInput] = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const [actionResult, setActionResult] = React.useState(null);
@@ -2430,6 +2452,80 @@ function DebugSettings() {
   );
 }
 
+function resolveHardwareProfile({ sparkProbe, runtimeState }) {
+  const sparkRuntime = runtimeState?.hardware?.spark || runtimeState?.deviceUtilization?.spark || null;
+  if (sparkProbe?.isSpark || sparkRuntime?.isSpark) {
+    return {
+      id: 'spark',
+      label: 'NVIDIA DGX Spark',
+      shortLabel: 'Spark',
+      accentName: 'NVIDIA Green',
+      icon: Zap,
+      shell: 'border-[#76b900]/30 bg-[#76b900]/10',
+      title: 'text-[#b8ff5f]',
+      text: 'text-[#d8ffb0]/75',
+      muted: 'text-[#d8ffb0]/55',
+      pill: 'border-[#76b900]/30 bg-[#76b900]/15 text-[#d8ffb0]',
+      button: 'border-[#76b900]/30 bg-[#76b900]/15 text-[#d8ffb0] hover:bg-[#76b900]/25',
+      focus: 'focus:border-[#76b900]/50',
+      description: 'Spark profile active: CUDA-first routing, unified-memory telemetry, MoE guardrails, and one loaded model by default.',
+    };
+  }
+
+  const platform = String(navigator?.platform || navigator?.userAgent || '').toLowerCase();
+  if (platform.includes('mac')) {
+    return {
+      id: 'mac',
+      label: 'Mac',
+      shortLabel: 'Mac',
+      accentName: 'Apple Blue',
+      icon: Monitor,
+      shell: 'border-sky-400/25 bg-sky-500/10',
+      title: 'text-sky-100',
+      text: 'text-sky-100/70',
+      muted: 'text-sky-100/50',
+      pill: 'border-sky-400/25 bg-sky-500/10 text-sky-100',
+      button: 'border-sky-400/25 bg-sky-500/10 text-sky-100 hover:bg-sky-500/15',
+      focus: 'focus:border-sky-400/40',
+      description: 'Mac profile: keep the existing local runtime settings and avoid Spark-only unified-memory controls.',
+    };
+  }
+
+  if (platform.includes('win')) {
+    return {
+      id: 'windows',
+      label: 'Windows PC',
+      shortLabel: 'Windows',
+      accentName: 'Windows Blue',
+      icon: Monitor,
+      shell: 'border-blue-400/25 bg-blue-500/10',
+      title: 'text-blue-100',
+      text: 'text-blue-100/70',
+      muted: 'text-blue-100/50',
+      pill: 'border-blue-400/25 bg-blue-500/10 text-blue-100',
+      button: 'border-blue-400/25 bg-blue-500/10 text-blue-100 hover:bg-blue-500/15',
+      focus: 'focus:border-blue-400/40',
+      description: 'Windows profile: keep existing GPU/runtime options and use standard VRAM-based telemetry.',
+    };
+  }
+
+  return {
+    id: 'linux',
+    label: 'Linux Workstation',
+    shortLabel: 'Linux',
+    accentName: 'Neutral',
+    icon: Server,
+    shell: 'border-white/10 bg-white/[0.04]',
+    title: 'text-text-primary',
+    text: 'text-text-secondary',
+    muted: 'text-text-muted',
+    pill: 'border-white/10 bg-white/[0.05] text-text-secondary',
+    button: 'border-white/10 bg-white/[0.06] text-text-secondary hover:bg-white/[0.1]',
+    focus: 'focus:border-white/20',
+    description: 'Linux profile: use existing GPU/runtime options unless Spark hardware is detected.',
+  };
+}
+
 function HardwareSettings() {
   const [powerMode, setPowerMode] = React.useState(false);
   const [npuStatus, setNpuStatus] = React.useState(null);
@@ -2447,6 +2543,39 @@ function HardwareSettings() {
   const [hybridStatus, setHybridStatus] = React.useState(null);
   const [hybridLoading, setHybridLoading] = React.useState(false);
   const [hybridAdvanced, setHybridAdvanced] = React.useState(false);
+  const [autoWarmupOnLaunch, setAutoWarmupOnLaunchState] = React.useState(false);
+  const [sparkProbe, setSparkProbe] = React.useState(null);
+  const [sparkProbeBusy, setSparkProbeBusy] = React.useState(false);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const stored = await window.electronAPI?.getSettings?.('autoWarmupOnLaunch');
+        if (!cancelled) setAutoWarmupOnLaunchState(stored === true);
+      } catch (_) {
+        if (!cancelled) setAutoWarmupOnLaunchState(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const handleToggleAutoWarmupOnLaunch = React.useCallback(async (next) => {
+    setAutoWarmupOnLaunchState(Boolean(next));
+    try {
+      await window.electronAPI?.setSettings?.('autoWarmupOnLaunch', Boolean(next));
+    } catch (error) {
+      console.warn('[Settings] Failed to persist autoWarmupOnLaunch:', error?.message || error);
+    }
+  }, []);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    api.sparkProbe({ force: false }).then((result) => {
+      if (!cancelled) setSparkProbe(result?.profile || null);
+    }).catch(() => {});
+    return () => { cancelled = true; };
+  }, []);
   const {
     currentModel,
     availableModels,
@@ -2470,6 +2599,28 @@ function HardwareSettings() {
     setPreferredBackend: state.setPreferredBackend,
     setPerformanceProfile: state.setPerformanceProfile,
   }), shallow);
+
+  const handleRunSparkProbe = React.useCallback(async () => {
+    setSparkProbeBusy(true);
+    try {
+      const result = await api.sparkProbe({ force: true });
+      setSparkProbe(result?.profile || null);
+      if (result?.profile?.isSpark) {
+        await setPerformanceProfile?.('spark');
+      }
+    } catch (error) {
+      console.warn('[Settings] Spark probe failed:', error?.message || error);
+    } finally {
+      setSparkProbeBusy(false);
+    }
+  }, [setPerformanceProfile]);
+
+  const hardwareProfile = React.useMemo(
+    () => resolveHardwareProfile({ sparkProbe, runtimeState }),
+    [sparkProbe, runtimeState],
+  );
+  const isSparkHardware = hardwareProfile.id === 'spark';
+  const intelAcceleratorRelevant = !isSparkHardware;
 
   const formatBytes = React.useCallback((bytes) => {
     const value = Number(bytes || 0);
@@ -2499,6 +2650,27 @@ function HardwareSettings() {
       console.warn('Failed to refresh runtime state:', error);
     }
   }, [currentModel, refreshLlmRuntime]);
+
+  /** Spark hosts never use Intel/OpenVINO — fix stale settings from other machines */
+  React.useEffect(() => {
+    if (!isSparkHardware || !setPerformanceProfile) return;
+    if (profile !== 'laptop' && profile !== 'efficiency') return;
+    void setPerformanceProfile('spark').catch(() => {});
+  }, [isSparkHardware, profile, setPerformanceProfile]);
+
+  React.useEffect(() => {
+    if (!isSparkHardware || !setPreferredBackend) return;
+    const intelBackends = new Set(['openvino-npu', 'openvino-hybrid', 'llamacpp-vulkan']);
+    if (!intelBackends.has(backend)) return;
+    void (async () => {
+      try {
+        await setPreferredBackend('ollama-cuda');
+        await refreshRuntimeState();
+      } catch (_) {
+        /* non-fatal */
+      }
+    })();
+  }, [isSparkHardware, backend, setPreferredBackend, refreshRuntimeState]);
 
   const refreshNpuStatus = React.useCallback(async (force = false) => {
     if (!window.electronAPI?.getNpuStatus) return null;
@@ -2536,7 +2708,9 @@ function HardwareSettings() {
   const refreshHardwareStatus = React.useCallback(async (forceNpu = false) => {
     const tasks = [];
 
-    tasks.push(refreshNpuStatus(forceNpu));
+    if (intelAcceleratorRelevant) {
+      tasks.push(refreshNpuStatus(forceNpu));
+    }
     tasks.push(refreshRuntimeState());
 
     if (window.electronAPI?.getImageBackendStatus) {
@@ -2555,14 +2729,14 @@ function HardwareSettings() {
       );
     }
 
-    if (window.electronAPI?.getHybridCapabilities) {
+    if (intelAcceleratorRelevant && window.electronAPI?.getHybridCapabilities) {
       tasks.push(
         window.electronAPI.getHybridCapabilities()
           .then((caps) => setHybridCaps(caps || null))
           .catch((error) => console.warn('Failed to fetch hybrid capabilities:', error)),
       );
     }
-    if (window.electronAPI?.getHybridStatus) {
+    if (intelAcceleratorRelevant && window.electronAPI?.getHybridStatus) {
       tasks.push(
         window.electronAPI.getHybridStatus()
           .then((status) => setHybridStatus(status || null))
@@ -2571,7 +2745,7 @@ function HardwareSettings() {
     }
 
     await Promise.all(tasks);
-  }, [refreshNpuStatus, refreshRuntimeState]);
+  }, [intelAcceleratorRelevant, refreshNpuStatus, refreshRuntimeState]);
 
   React.useEffect(() => {
     let disposed = false;
@@ -2605,6 +2779,12 @@ function HardwareSettings() {
     setWarmupModel(modelName);
     const syntheticModel = /^npu:/i.test(String(modelName || '').trim());
     try {
+      // Show the global progress overlay alongside the existing offload-verify
+      // result. Synthetic NPU models still go through the legacy path because
+      // the progress IPC currently focuses on Ollama warmups.
+      if (!syntheticModel) {
+        void triggerWarmupWithProgress(modelName);
+      }
       const result = await window.electronAPI?.warmupModel(modelName);
       setWarmupReport(result || null);
       if (result?.success) {
@@ -2747,7 +2927,7 @@ function HardwareSettings() {
 
       await refreshRuntimeState();
       const selectedModel = configResult?.model || 'unchanged';
-      const brainMode = caps?.canHetero ? 'Unified Brain (GPU+NPU)' : 'NPU';
+      const brainMode = caps?.canHetero ? 'Unified Brain (Intel GPU+NPU)' : 'NPU';
       // eslint-disable-next-line no-alert
       alert(
         `Laptop Daily Driver profile applied.\n\n` +
@@ -3018,14 +3198,15 @@ function HardwareSettings() {
   const backendOptions = React.useMemo(() => {
     const labelById = {
       'ollama-cuda': 'Standard (Ollama + GPU)',
-      'openvino-hybrid': 'Unified Brain (GPU+NPU)',
+      'llamacpp-spark': 'Unified Brain (Spark)',
+      'openvino-hybrid': 'Unified Brain (Intel GPU+NPU)',
       'llamacpp-vulkan': 'Vulkan (Intel Arc)',
       'openvino-npu': 'OpenVINO NPU Only',
       'ollama-cpu': 'CPU Only (Fallback)',
     };
     const rows = Array.isArray(backends) ? backends : [];
     const byId = new Map(rows.map((row) => [row.id, row]));
-    const preferredOrder = ['ollama-cuda', 'openvino-hybrid', 'llamacpp-vulkan', 'openvino-npu', 'ollama-cpu'];
+    const preferredOrder = ['ollama-cuda', 'llamacpp-spark', 'openvino-hybrid', 'llamacpp-vulkan', 'openvino-npu', 'ollama-cpu'];
     const orderedIds = [
       ...preferredOrder.filter((id) => byId.has(id)),
       ...rows.map((row) => row.id).filter((id) => !preferredOrder.includes(id)),
@@ -3048,20 +3229,102 @@ function HardwareSettings() {
     }
 
     if (options.length > 0) {
-      return options.filter((option) => hybridCaps?.canHetero || option.id !== 'openvino-hybrid');
+      let filtered = options.filter((option) => hybridCaps?.canHetero || option.id !== 'openvino-hybrid');
+      if (isSparkHardware) {
+        filtered = filtered.filter((o) =>
+          !['openvino-hybrid', 'openvino-npu', 'llamacpp-vulkan'].includes(o.id),
+        );
+      }
+      return filtered;
     }
 
+    const intelFallback = [];
+    if (!isSparkHardware && hybridCaps?.canHetero) {
+      intelFallback.push({ id: 'openvino-hybrid', label: labelById['openvino-hybrid'], available: true });
+    }
+    if (!isSparkHardware) {
+      intelFallback.push(
+        { id: 'llamacpp-vulkan', label: labelById['llamacpp-vulkan'], available: true },
+        { id: 'openvino-npu', label: labelById['openvino-npu'], available: true },
+      );
+    }
     return [
       { id: 'ollama-cuda', label: labelById['ollama-cuda'], available: true },
-      ...(hybridCaps?.canHetero ? [{ id: 'openvino-hybrid', label: labelById['openvino-hybrid'], available: true }] : []),
-      { id: 'llamacpp-vulkan', label: labelById['llamacpp-vulkan'], available: true },
-      { id: 'openvino-npu', label: labelById['openvino-npu'], available: true },
+      ...(isSparkHardware ? [{ id: 'llamacpp-spark', label: labelById['llamacpp-spark'], available: true }] : []),
+      ...intelFallback,
       { id: 'ollama-cpu', label: labelById['ollama-cpu'], available: true },
     ];
-  }, [backend, backends, hybridCaps]);
+  }, [backend, backends, hybridCaps, sparkProbe, isSparkHardware]);
+
+  const HardwareIcon = hardwareProfile.icon;
 
   return (
     <div className="space-y-6">
+      <div className={`rounded-xl border p-4 ${hardwareProfile.shell}`}>
+        <div className="flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className={`rounded-xl border p-2 ${hardwareProfile.pill}`}>
+                <HardwareIcon size={18} />
+              </div>
+              <div>
+                <h3 className={`text-sm font-semibold ${hardwareProfile.title}`}>
+                  Hardware Profile: {hardwareProfile.label}
+                </h3>
+                <p className={`mt-0.5 text-[11px] ${hardwareProfile.muted}`}>
+                  Accent: {hardwareProfile.accentName} · Auto-detected from local hardware and runtime probes
+                </p>
+              </div>
+              <span className={`rounded-full border px-2 py-1 text-[10px] font-medium ${hardwareProfile.pill}`}>
+                {hardwareProfile.shortLabel}
+              </span>
+            </div>
+            <p className={`mt-3 max-w-3xl text-xs leading-5 ${hardwareProfile.text}`}>
+              {hardwareProfile.description}
+            </p>
+            {isSparkHardware && (
+              <div className="mt-3 grid gap-2 text-[11px] text-[#d8ffb0]/70 sm:grid-cols-3">
+                <div className="rounded-lg border border-[#76b900]/20 bg-black/20 px-3 py-2">
+                  <div className="text-[#d8ffb0]/45">Unified Memory</div>
+                  <div className="font-medium text-[#d8ffb0]">
+                    {sparkProbe?.unifiedMemoryGiB ? `${Number(sparkProbe.unifiedMemoryGiB).toFixed(1)} GiB` : 'Detecting'}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-[#76b900]/20 bg-black/20 px-3 py-2">
+                  <div className="text-[#d8ffb0]/45">Available Now</div>
+                  <div className="font-medium text-[#d8ffb0]">
+                    {sparkProbe?.memAvailableGiB ? `${Number(sparkProbe.memAvailableGiB).toFixed(1)} GiB` : 'Detecting'}
+                  </div>
+                </div>
+                <div className="rounded-lg border border-[#76b900]/20 bg-black/20 px-3 py-2">
+                  <div className="text-[#d8ffb0]/45">Runtime Policy</div>
+                  <div className="font-medium text-[#d8ffb0]">MoE-safe Spark</div>
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={handleRunSparkProbe}
+              disabled={sparkProbeBusy}
+              className={`rounded-lg border px-3 py-2 text-xs font-medium transition ${hardwareProfile.button} disabled:opacity-50`}
+            >
+              {sparkProbeBusy ? 'Detecting...' : 'Auto Detect'}
+            </button>
+            {isSparkHardware && profile !== 'spark' && (
+              <button
+                type="button"
+                onClick={() => handleProfileChange('spark')}
+                className="rounded-lg border border-[#76b900]/30 bg-[#76b900]/20 px-3 py-2 text-xs font-medium text-[#d8ffb0] transition hover:bg-[#76b900]/30"
+              >
+                Apply Spark Profile
+              </button>
+            )}
+          </div>
+        </div>
+      </div>
+
       <div className="p-4 border border-forge-border rounded-lg bg-forge-bg/40">
         <h3 className="text-sm font-medium text-text-primary mb-2">System Health Overview</h3>
         <div className="grid gap-2">
@@ -3071,12 +3334,14 @@ function HardwareSettings() {
               {ollamaStatus?.running ? 'Running' : 'Not running'}
             </span>
           </div>
+          {intelAcceleratorRelevant ? (
           <div className="flex items-center justify-between text-xs">
             <span className="text-text-muted">NPU Server</span>
             <span className={npuStatus?.serverRunning ? 'text-status-success' : 'text-status-warning'}>
               {npuStatus?.serverRunning ? 'Online' : 'Offline'}
             </span>
           </div>
+          ) : null}
           <div className="flex items-center justify-between text-xs">
             <span className="text-text-muted">Routing</span>
             <span className={backendAligned ? 'text-status-success' : 'text-status-warning'}>
@@ -3186,7 +3451,9 @@ function HardwareSettings() {
             type="button"
             onClick={async () => {
               await refreshRuntimeState();
-              await refreshNpuStatus(true);
+              if (intelAcceleratorRelevant) {
+                await refreshNpuStatus(true);
+              }
             }}
             className="text-xs px-2 py-1 rounded border border-forge-border hover:border-workspace-code/50"
           >
@@ -3278,13 +3545,13 @@ function HardwareSettings() {
             <div className="flex items-center justify-between">
               <span className="text-text-muted">GPU load (top)</span>
               <span className="text-text-primary">
-                {Math.round(runtimeState.deviceUtilization.gpus[0]?.utilizationGpu || 0)}%
+                {Math.round(Math.min(100, Number(runtimeState.deviceUtilization.gpus[0]?.utilizationGpu || 0)))}%
                 {' '}
-                / VRAM {Math.round(runtimeState.deviceUtilization.gpus[0]?.vramPercent || 0)}%
+                / VRAM {Math.round(Math.min(100, Number(runtimeState.deviceUtilization.gpus[0]?.vramPercent || 0)))}%
               </span>
             </div>
           )}
-          {runtimeState?.deviceUtilization?.npu && (
+          {intelAcceleratorRelevant && runtimeState?.deviceUtilization?.npu && (
             <div className="flex items-center justify-between">
               <span className="text-text-muted">NPU state</span>
               <span className={runtimeState.deviceUtilization.npu.serverRunning ? 'text-status-success' : 'text-status-warning'}>
@@ -3382,21 +3649,33 @@ function HardwareSettings() {
         <select
           value={backend}
           onChange={(e) => handleBackendChange(e.target.value)}
-          className="input w-full"
+          className={`input w-full ${hardwareProfile.focus}`}
         >
           <option value="ollama-cuda">Standard (Ollama + GPU)</option>
-          {hybridCaps?.canHetero && (
-            <option value="openvino-hybrid">Unified Brain (GPU+NPU) — Experimental</option>
-          )}
-          <option value="llamacpp-vulkan">Vulkan (Intel Arc)</option>
-          <option value="openvino-npu">OpenVINO NPU Only</option>
+          {isSparkHardware ? (
+            <option value="llamacpp-spark">Unified Brain (Spark)</option>
+          ) : null}
+          {intelAcceleratorRelevant && hybridCaps?.canHetero ? (
+          <option value="openvino-hybrid">Unified Brain (Intel GPU+NPU) — Experimental</option>
+          ) : null}
+          {intelAcceleratorRelevant ? (
+            <>
+              <option value="llamacpp-vulkan">Vulkan (Intel Arc)</option>
+              <option value="openvino-npu">OpenVINO NPU Only</option>
+            </>
+          ) : null}
           <option value="ollama-cpu">CPU Only (Fallback)</option>
         </select>
         <p className="text-[11px] text-text-muted mt-1">
           Runtime detected {backendOptions.filter((option) => option.available).length} available backend(s).
         </p>
         <p className="text-xs text-text-muted mt-2">
-          Standard mode loads models into GPU VRAM via Ollama — reliable and fast.{hybridCaps?.canHetero ? ' Unified Brain is experimental and splits one model across GPU + NPU as a single pipeline.' : ''}
+          Standard mode loads models into GPU VRAM via Ollama — reliable and fast.
+          {!isSparkHardware && hybridCaps?.canHetero
+            ? ' Unified Brain (Intel) is experimental and splits one model across GPU + NPU as a single pipeline.'
+            : isSparkHardware
+              ? ' On Spark you get unified-memory telemetry with MoE-aware guardrails; Intel NPU and OpenVINO are hidden because they don’t apply.'
+              : ''}
         </p>
       </div>
 
@@ -3406,17 +3685,23 @@ function HardwareSettings() {
           value={profile}
           onChange={(e) => handleProfileChange(e.target.value)}
           disabled={profileLoading}
-          className="input w-full"
+          className={`input w-full ${hardwareProfile.focus}`}
         >
-          <option value="laptop">Laptop Daily Driver (Hybrid GPU + NPU)</option>
-          <option value="speed">Speed (Prefer GPU/NPU)</option>
+          {intelAcceleratorRelevant ? (
+            <option value="laptop">Laptop Daily Driver (Hybrid GPU + NPU)</option>
+          ) : null}
+          <option value="spark">Spark Unified Brain (NVIDIA GB10)</option>
+          <option value="speed">{intelAcceleratorRelevant ? 'Speed (Prefer GPU/NPU)' : 'Speed (CUDA / unified memory)'}</option>
           <option value="balanced">Balanced</option>
-          <option value="efficiency">Efficiency (Prefer NPU/CPU)</option>
+          {intelAcceleratorRelevant ? (
+            <option value="efficiency">Efficiency (Prefer NPU/CPU)</option>
+          ) : null}
         </select>
         <p className="text-xs text-text-muted mt-2">
           Profiles influence how DevForge schedules work across all backends and how the job queue
           prioritizes requests.
         </p>
+        {intelAcceleratorRelevant ? (
         <div className="mt-3">
           <button
             type="button"
@@ -3427,9 +3712,60 @@ function HardwareSettings() {
             {laptopBusy ? 'Applying laptop profile...' : 'Apply Laptop Daily Driver Tune-Up'}
           </button>
         </div>
+        ) : null}
       </div>
 
-      {/* NPU One-Click Setup */}
+      {(isSparkHardware || profile === 'spark') && (
+        <div className="rounded-lg border border-[#76b900]/25 bg-[#76b900]/10 p-4">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+            <div className="min-w-0">
+              <h3 className="text-sm font-medium text-[#d8ffb0]">Spark Runtime Alignment</h3>
+              <p className="mt-1 text-xs leading-5 text-[#d8ffb0]/70">
+                DevForge detected NVIDIA Spark-style unified memory. MoE-safe guardrails are active:
+                ctx 4096 for heavy MoE loads, q4_0 KV cache, one loaded model, and live unified-memory telemetry.
+              </p>
+              <div className="mt-2 flex flex-wrap gap-2 text-[11px] text-[#d8ffb0]/65">
+                <span>GPU: {sparkProbe?.gpuName || 'NVIDIA GB10'}</span>
+                {sparkProbe?.memAvailableGiB ? <span>Available: {Number(sparkProbe.memAvailableGiB).toFixed(1)} GiB</span> : null}
+                {sparkProbe?.unifiedMemoryGiB ? <span>Unified: {Number(sparkProbe.unifiedMemoryGiB).toFixed(1)} GiB</span> : null}
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={handleRunSparkProbe}
+              disabled={sparkProbeBusy}
+              className="shrink-0 rounded-lg border border-[#76b900]/30 bg-[#76b900]/15 px-3 py-2 text-xs font-medium text-[#d8ffb0] transition hover:bg-[#76b900]/25 disabled:opacity-50"
+            >
+              {sparkProbeBusy ? 'Probing...' : 'Run Spark Probe'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="rounded-lg border border-forge-border bg-forge-bg p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="min-w-0">
+            <h3 className="text-sm font-medium text-text-primary">Auto-warm last model on launch</h3>
+            <p className="mt-1 text-xs text-text-muted">
+              When enabled, DevForge will preload the last-used model into your runtime when the
+              app starts. Default is OFF — most setups feel snappier when the model loads on the
+              first chat instead of at launch. Use the top-bar Eject anytime to free the model.
+            </p>
+          </div>
+          <label className="inline-flex shrink-0 items-center gap-2 select-none">
+            <input
+              type="checkbox"
+              className="h-4 w-4 cursor-pointer accent-cyan-500"
+              checked={autoWarmupOnLaunch}
+              onChange={(e) => handleToggleAutoWarmupOnLaunch(e.target.checked)}
+            />
+            <span className="text-xs text-text-secondary">{autoWarmupOnLaunch ? 'On' : 'Off'}</span>
+          </label>
+        </div>
+      </div>
+
+      {/* NPU One-Click Setup — Intel / OpenVINO only */}
+      {intelAcceleratorRelevant ? (
       <div className="p-4 bg-forge-bg border border-forge-border rounded-lg">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="flex-1 min-w-0">
@@ -3522,15 +3858,16 @@ function HardwareSettings() {
           </div>
         </div>
       </div>
+      ) : null}
 
-      {/* Unified Brain Mode (Hybrid GPU+NPU) */}
-      {hybridCaps?.available && (
+      {/* Unified Brain Mode (Intel Hybrid GPU+NPU) */}
+      {intelAcceleratorRelevant && hybridCaps?.available && (
         <div className="p-4 bg-gradient-to-br from-violet-500/10 to-indigo-500/10 border border-violet-500/25 rounded-lg space-y-4">
           <div className="flex items-center justify-between gap-3">
             <div className="flex-1">
               <h3 className="text-sm font-medium text-text-primary flex items-center gap-2">
                 <Brain size={16} className={hybridStatus?.enabled ? 'text-violet-400' : 'text-text-muted'} />
-                Unified Brain Mode
+                Unified Brain (Intel) Mode
               </h3>
               <p className="text-xs text-text-muted mt-1">
                 {hybridCaps?.canHetero
@@ -3628,7 +3965,7 @@ function HardwareSettings() {
       )}
 
       {/* NPU Model Converter — also available here for discoverability */}
-      <NPUModelConverter />
+      {intelAcceleratorRelevant ? <NPUModelConverter /> : null}
 
       {/* Image Generation Backend */}
       <ImageBackendControl imageStatus={imageStatus} setImageStatus={setImageStatus} />

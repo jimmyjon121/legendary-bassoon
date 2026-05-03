@@ -607,6 +607,18 @@ export const createModelSlice = (set, get) => {
         set({ isWarmingUp: true, modelStatus: 'warming' });
         try {
           console.log(`[Model] Auto-warming up "${model}"...`);
+          // Surface progress in the global overlay whenever an Ollama model is
+          // being warmed (skip the synthetic NPU path -- legacy verifier runs
+          // there). Importing lazily avoids a circular dependency between the
+          // slice and the warmup store.
+          if (!syntheticModel && typeof window !== 'undefined') {
+            try {
+              const { triggerWarmupWithProgress } = await import('../modelWarmupStore.js');
+              void triggerWarmupWithProgress(model);
+            } catch (importError) {
+              console.warn('[Model] Could not surface warmup overlay:', importError?.message || importError);
+            }
+          }
           warmupResult = await api.warmupModel(model);
         } catch (error) {
           warmupResult = { success: false, error: error?.message || String(error) };
@@ -725,6 +737,14 @@ export const createModelSlice = (set, get) => {
 
       set({ isWarmingUp: true, modelStatus: 'warming' });
       try {
+        if (!isSyntheticModel(model) && typeof window !== 'undefined') {
+          try {
+            const { triggerWarmupWithProgress } = await import('../modelWarmupStore.js');
+            void triggerWarmupWithProgress(model);
+          } catch (importError) {
+            console.warn('[Model] Could not surface warmup overlay:', importError?.message || importError);
+          }
+        }
         const result = await api.warmupModel(model);
         set({ llmLastWarmup: result || null });
         await get().refreshLlmRuntime({

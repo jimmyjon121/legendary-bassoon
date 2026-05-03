@@ -19,7 +19,6 @@ import {
   RefreshCw,
   Search,
   Settings,
-  Sparkles,
   Star,
   Upload,
   X,
@@ -30,12 +29,11 @@ import { motion } from 'framer-motion';
 import { ErrorBoundary } from '../ErrorBoundary';
 import { useAppStore } from '../../stores/appStore';
 import { api as electronAPI } from '../../utils/electronAPI';
+import { triggerWarmupWithProgress } from '../../stores/modelWarmupStore';
 import { ModelExperienceWorkbench } from '../../chat-v2/ui/ModelExperienceWorkbench';
 import {
   DEVICE_PIN_OPTIONS,
-  SOURCE_LABELS,
   buildLibraryIndex,
-  buildSmartGroups,
   estimateFit,
   formatBytes,
   groupModels,
@@ -48,10 +46,30 @@ const QUANT_FILTERS = ['all', 'Q4', 'Q5', 'Q6', 'Q8', 'F16'];
 const SORT_OPTIONS = [
   { id: 'recommended', label: 'Recommended' },
   { id: 'recent', label: 'Recent' },
+  { id: 'added', label: 'Added' },
   { id: 'speed', label: 'Speed' },
   { id: 'size', label: 'Size' },
   { id: 'name', label: 'Name' },
 ];
+const SOURCE_FILTERS = [
+  { id: 'all', label: 'All sources' },
+  { id: 'ollama', label: 'Ollama' },
+  { id: 'lmstudio', label: 'LM Studio' },
+  { id: 'llamanode', label: 'Imported GGUF' },
+  { id: 'npu', label: 'OpenVINO NPU' },
+];
+const ADDED_FILTERS = [
+  { id: 'all', label: 'Any added date' },
+  { id: '24h', label: 'Added today' },
+  { id: '7d', label: 'Added 7 days' },
+  { id: '30d', label: 'Added 30 days' },
+  { id: 'unknown', label: 'Unknown date' },
+];
+const ADDED_FILTER_MS = {
+  '24h': 24 * 60 * 60 * 1000,
+  '7d': 7 * 24 * 60 * 60 * 1000,
+  '30d': 30 * 24 * 60 * 60 * 1000,
+};
 
 function recordSelectorEvent(type, payload = {}) {
   try {
@@ -73,21 +91,71 @@ function renderToken(value, fallback = 'auto') {
   return fallback;
 }
 
-function SourceStatusPill({ source, state }) {
-  const status = state?.status || 'idle';
-  const tone = status === 'ready'
-    ? 'border-emerald-500/25 bg-emerald-500/10 text-emerald-200'
-    : status === 'error'
-      ? 'border-rose-500/25 bg-rose-500/10 text-rose-200'
-      : status === 'loading'
-        ? 'border-sky-500/25 bg-sky-500/10 text-sky-200'
-        : 'border-white/10 bg-white/[0.03] text-text-muted';
-  return (
-    <span title={state?.error || status} className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-[10px] ${tone}`}>
-      {status === 'loading' && <Loader size={10} className="animate-spin" />}
-      {SOURCE_LABELS[source] || source}: {status}
-    </span>
-  );
+function parseModelTime(value) {
+  if (!value) return 0;
+  if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function getModelAddedInfo(model) {
+  const candidates = [
+    ['Added', model.library?.addedAt],
+    ['Added', model.meta?.addedAt],
+    ['Registered', model.meta?.registeredAt],
+    ['Modified', model.meta?.modifiedAt],
+    ['Modified', model.meta?.modified_at],
+    ['Updated', model.library?.updatedAt],
+    ['Last used', model.library?.lastUsed],
+    ['Last used', model.meta?.lastUsedAt],
+    ['Last tested', model.insight?.outcomeSummary?.lastSuccessAt],
+  ];
+  for (const [label, value] of candidates) {
+    const time = parseModelTime(value);
+    if (time > 0) return { label, time, value };
+  }
+  return { label: 'Added', time: 0, value: null };
+}
+
+function formatModelAddedInfo(model) {
+  const info = getModelAddedInfo(model);
+  if (!info.time) return 'Added date unknown';
+  const date = new Date(info.time);
+  return `${info.label} ${date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}`;
+}
+
+function matchesAddedFilter(model, filter) {
+  if (filter === 'all') return true;
+  const addedTime = getModelAddedInfo(model).time;
+  if (filter === 'unknown') return !addedTime;
+  const range = ADDED_FILTER_MS[filter];
+  if (!range || !addedTime) return false;
+  return Date.now() - addedTime <= range;
+}
+
+function isSparkMoeCandidate(value = '') {
+  const lower = String(value || '').toLowerCase();
+  return lower.includes('gpt-oss') || lower.includes('mixtral') || lower.includes('moe') || /qwen.*a\d+b/.test(lower);
+}
+
+async function saveSparkPreset(modelName, level = 'recommended') {
+  const profiles = {
+    stable: { context_length: 4096, advanced_options: { num_ctx: 4096, num_batch: 48, kv_cache_type: 'q4_0', num_gpu: -1, flash_attn: true, num_predict: 768 } },
+    recommended: { context_length: 8192, advanced_options: { num_ctx: 8192, num_batch: 64, kv_cache_type: 'q4_0', num_gpu: -1, flash_attn: true, num_predict: 1024 } },
+    aggressive: { context_length: 12288, advanced_options: { num_ctx: 12288, num_batch: 96, kv_cache_type: 'q4_0', num_gpu: -1, flash_attn: true, num_predict: 1536 } },
+  };
+  const profile = profiles[level] || profiles.recommended;
+  return electronAPI.saveModelPreset?.({
+    model_name: modelName,
+    workspace: 'casual',
+    is_default: true,
+    temperature: 0.2,
+    top_p: 0.9,
+    top_k: 40,
+    context_length: profile.context_length,
+    task_intent: 'reasoning',
+    advanced_options: profile.advanced_options,
+  });
 }
 
 function FitBar({ fit }) {
@@ -201,7 +269,7 @@ function VariantRow({
                 Autopilot: {renderToken(plan.explicitBackendPin || plan.softBackendPreference)} · ctx {renderToken(plan.effectiveOptions?.num_ctx || model.contextLength)}
               </p>
               <p className="mt-1 text-[11px] text-text-muted">
-                Last runs: {outcome.successCount || 0} success / {outcome.failureCount || 0} fail
+                {formatModelAddedInfo(model)} · Last runs: {outcome.successCount || 0} success / {outcome.failureCount || 0} fail
                 {outcome.avgTokensPerSecond ? ` · ${outcome.avgTokensPerSecond.toFixed(1)} TPS` : ''}
                 {outcome.avgFirstTokenMs ? ` · ${Math.round(outcome.avgFirstTokenMs)} ms TTFT` : ''}
               </p>
@@ -247,7 +315,7 @@ function StateBanner({ state, selectorError, onStartOllama, onOpenHub, onUseLoca
       <p className="mt-1 text-xs text-text-secondary">{copy[1]}</p>
       <div className="mt-3 flex flex-wrap gap-2">
         <button type="button" onClick={onStartOllama} className="btn btn-secondary px-3 py-1.5 text-xs">Start Ollama</button>
-        <button type="button" onClick={onOpenHub} className="btn btn-secondary px-3 py-1.5 text-xs">Open Model Hub</button>
+        <button type="button" onClick={onOpenHub} className="btn btn-secondary px-3 py-1.5 text-xs">Open Runtime Center</button>
         <button type="button" onClick={onUseLocal} className="btn btn-secondary px-3 py-1.5 text-xs">Use local GGUF</button>
         <button type="button" onClick={onRefresh} className="btn btn-secondary px-3 py-1.5 text-xs"><RefreshCw size={12} /> Refresh</button>
       </div>
@@ -275,13 +343,13 @@ function AddModelMenu({ open, onToggle, onOpenHub, onUseLocal, onOpenNpu }) {
         <div
           role="menu"
           aria-label="Add model"
-          className="absolute right-0 z-30 mt-2 w-64 overflow-hidden rounded-lg border border-forge-border bg-forge-panel shadow-2xl"
+          className="absolute right-0 z-30 mt-2 w-64 overflow-hidden rounded-lg border border-forge-border bg-surface-2 shadow-2xl"
         >
           <button type="button" role="menuitem" onClick={() => run(onOpenHub)} className="flex w-full items-start gap-3 px-3 py-2.5 text-left hover:bg-white/[0.05]">
             <Download size={15} className="mt-0.5 text-cyan-300" />
             <span>
               <span className="block text-xs font-medium text-text-primary">Pull Ollama variant</span>
-              <span className="block text-[11px] text-text-muted">Open the existing Model Hub pull flow.</span>
+              <span className="block text-[11px] text-text-muted">Open the Models runtime center to pull and manage models.</span>
             </span>
           </button>
           <button type="button" role="menuitem" onClick={() => run(onOpenHub)} className="flex w-full items-start gap-3 px-3 py-2.5 text-left hover:bg-white/[0.05]">
@@ -308,8 +376,8 @@ function AddModelMenu({ open, onToggle, onOpenHub, onUseLocal, onOpenNpu }) {
           <button type="button" role="menuitem" onClick={() => run(onOpenHub)} className="flex w-full items-start gap-3 border-t border-forge-border px-3 py-2.5 text-left hover:bg-white/[0.05]">
             <FolderSearch size={15} className="mt-0.5 text-text-secondary" />
             <span>
-              <span className="block text-xs font-medium text-text-primary">Open Model Hub</span>
-              <span className="block text-[11px] text-text-muted">Browse all existing discovery flows.</span>
+              <span className="block text-xs font-medium text-text-primary">Open Runtime Center</span>
+              <span className="block text-[11px] text-text-muted">Manage installed, loaded, and recommended models.</span>
             </span>
           </button>
         </div>
@@ -321,7 +389,7 @@ function AddModelMenu({ open, onToggle, onOpenHub, onUseLocal, onOpenNpu }) {
 function CompareDrawer({ models, onClose, onUse, onWorkbench }) {
   if (!models.length) return null;
   return (
-    <div role="dialog" aria-label="Compare selected models" className="absolute inset-y-0 right-0 z-20 w-full max-w-xl border-l border-forge-border bg-forge-panel shadow-2xl">
+    <div role="dialog" aria-label="Compare selected models" className="absolute inset-y-0 right-0 z-20 w-full max-w-xl border-l border-forge-border bg-surface-2 shadow-2xl">
       <div className="flex items-center justify-between border-b border-forge-border p-4">
         <div>
           <p className="text-sm font-semibold text-text-primary">Compare</p>
@@ -362,7 +430,7 @@ function CompareDrawer({ models, onClose, onUse, onWorkbench }) {
 function DetailsDrawer({ model, onClose, onCopy, onAlias, onFavorite, onRate }) {
   if (!model) return null;
   return (
-    <div role="dialog" aria-label="Model details" className="absolute inset-y-0 right-0 z-20 w-full max-w-lg border-l border-forge-border bg-forge-panel shadow-2xl">
+    <div role="dialog" aria-label="Model details" className="absolute inset-y-0 right-0 z-20 w-full max-w-lg border-l border-forge-border bg-surface-2 shadow-2xl">
       <div className="flex items-center justify-between border-b border-forge-border p-4">
         <div className="min-w-0">
           <p className="truncate text-sm font-semibold text-text-primary">{model.displayName}</p>
@@ -436,7 +504,7 @@ function PinDialog({ model, onClose, onSave }) {
   if (!model) return null;
   return (
     <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/60 p-4">
-      <div role="dialog" aria-label="Pin model device" className="w-full max-w-sm rounded-xl border border-forge-border bg-forge-panel p-4 shadow-2xl">
+      <div role="dialog" aria-label="Pin model device" className="w-full max-w-sm rounded-xl border border-forge-border bg-surface-2 p-4 shadow-2xl">
         <div className="flex items-center justify-between">
           <p className="text-sm font-semibold text-text-primary">Pin device</p>
           <button type="button" onClick={onClose} className="rounded-md p-1.5 text-text-muted hover:bg-white/10"><X size={14} /></button>
@@ -461,7 +529,7 @@ function AliasDialog({ model, onClose, onSave }) {
   if (!model) return null;
   return (
     <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/60 p-4">
-      <div role="dialog" aria-label="Edit model alias" className="w-full max-w-sm rounded-xl border border-forge-border bg-forge-panel p-4 shadow-2xl">
+      <div role="dialog" aria-label="Edit model alias" className="w-full max-w-sm rounded-xl border border-forge-border bg-surface-2 p-4 shadow-2xl">
         <div className="flex items-center justify-between">
           <p className="text-sm font-semibold text-text-primary">Model alias</p>
           <button type="button" onClick={onClose} className="rounded-md p-1.5 text-text-muted hover:bg-white/10"><X size={14} /></button>
@@ -492,7 +560,6 @@ export function ModelSelector({ onClose }) {
   const invalidateModelCatalog = useAppStore((s) => s.invalidateModelCatalog);
   const modelCatalog = useAppStore((s) => s.modelCatalog);
   const modelCatalogStatus = useAppStore((s) => s.modelCatalogStatus);
-  const modelCatalogSources = useAppStore((s) => s.modelCatalogSources);
   const modelCatalogLastError = useAppStore((s) => s.modelCatalogLastError);
   const storeNpuStatus = useAppStore((s) => s.npuStatus);
   const toggleModelHub = useAppStore((s) => s.toggleModelHub);
@@ -500,6 +567,8 @@ export function ModelSelector({ onClose }) {
 
   const [searchQuery, setSearchQuery] = useState('');
   const [quantFilter, setQuantFilter] = useState('all');
+  const [sourceFilter, setSourceFilter] = useState('all');
+  const [addedFilter, setAddedFilter] = useState('all');
   const [sortKey, setSortKey] = useState('recent');
   const [viewMode, setViewMode] = useState('catalogue');
   const [groupingEnabled, setGroupingEnabled] = useState(true);
@@ -779,13 +848,23 @@ export function ModelSelector({ onClose }) {
         || model.familyName.toLowerCase().includes(query)
         || model.capabilities.some((cap) => cap.toLowerCase().includes(query));
       const matchesQuant = quantFilter === 'all' || model.quant?.startsWith(quantFilter);
+      const matchesSource = sourceFilter === 'all' || model.source === sourceFilter;
+      const matchesAdded = matchesAddedFilter(model, addedFilter);
       const matchesTab = modelTab !== 'agentic' || model.capabilities.some((cap) => ['Code', 'Reasoning'].includes(cap)) || model.score >= 60;
       const vaultOpen = !isVaultWorkspace || model.insight?.catalogEnrichment?.vaultModelGating !== 'allowlist' || model.insight?.activePreset?.vault_allowed === true;
-      return matchesQuery && matchesQuant && matchesTab && vaultOpen;
+      return matchesQuery && matchesQuant && matchesSource && matchesAdded && matchesTab && vaultOpen;
     });
     if (effectiveSortKey === 'name') list = list.sort((a, b) => a.displayName.localeCompare(b.displayName));
     else if (effectiveSortKey === 'size') list = list.sort((a, b) => Number(b.sizeBytes || 0) - Number(a.sizeBytes || 0));
     else if (effectiveSortKey === 'speed') list = list.sort((a, b) => Number(b.insight?.outcomeSummary?.avgTokensPerSecond || 0) - Number(a.insight?.outcomeSummary?.avgTokensPerSecond || 0));
+    else if (effectiveSortKey === 'added') {
+      list = list.sort((a, b) => {
+        const tb = getModelAddedInfo(b).time;
+        const ta = getModelAddedInfo(a).time;
+        if (tb !== ta) return tb - ta;
+        return b.score - a.score;
+      });
+    }
     else if (effectiveSortKey === 'recent') {
       list = list.sort((a, b) => {
         const tb = new Date(b.library?.lastUsed || b.meta?.lastUsedAt || b.insight?.outcomeSummary?.lastSuccessAt || 0).getTime();
@@ -797,13 +876,14 @@ export function ModelSelector({ onClose }) {
       list = list.sort((a, b) => b.score - a.score);
     }
     return list;
-  }, [effectiveSortKey, isVaultWorkspace, modelTab, normalizedModels, quantFilter, searchQuery]);
+  }, [addedFilter, effectiveSortKey, isVaultWorkspace, modelTab, normalizedModels, quantFilter, searchQuery, sourceFilter]);
 
   const familyGroups = useMemo(() => groupModels(filteredModels), [filteredModels]);
-  const smartGroups = useMemo(() => buildSmartGroups(filteredModels), [filteredModels]);
   const focusedModel = filteredModels[Math.min(focusedIndex, Math.max(0, filteredModels.length - 1))] || null;
   const currentNormalized = normalizedModels.find((model) => model.id === currentModel || model.rawName === currentModel) || null;
   const suggested = filteredModels[0] || null;
+  // alternatives: kept for downstream insight components if needed; primary UI uses the active strip + suggested button.
+  // eslint-disable-next-line no-unused-vars
   const alternatives = filteredModels.filter((model) => model.id !== suggested?.id).slice(0, 3);
 
   const catalogueItems = groupingEnabled ? familyGroups : filteredModels;
@@ -818,7 +898,7 @@ export function ModelSelector({ onClose }) {
 
   useEffect(() => {
     setFocusedIndex(0);
-  }, [searchQuery, quantFilter, viewMode, groupingEnabled]);
+  }, [addedFilter, groupingEnabled, quantFilter, searchQuery, sourceFilter, viewMode]);
 
   const useLocalGgufPath = React.useCallback(async () => {
     const filePath = await electronAPI.selectFile({
@@ -1048,14 +1128,19 @@ export function ModelSelector({ onClose }) {
       >
         <div
           ref={containerRef}
-          className="relative flex h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl border border-forge-border bg-forge-panel shadow-2xl"
+          className="relative flex h-[88vh] w-full max-w-6xl flex-col overflow-hidden rounded-xl border border-forge-border bg-surface-2 shadow-2xl"
         >
-          <header className="border-b border-forge-border bg-forge-bg/70 p-4">
+          <header className="border-b border-forge-border bg-surface-1 p-4">
             <div className="flex items-start justify-between gap-4">
-              <div>
-                <h2 className="text-lg font-semibold text-text-primary">Model Catalogue</h2>
-                <p className="text-xs text-text-muted">
-                  Catalogue-first browsing with aliases, variants, local history, and Autopilot suggestions.
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <h2 className="text-lg font-semibold text-text-primary">Switch Model</h2>
+                  <span className="rounded-md border border-cyan-400/25 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-medium text-cyan-200">
+                    Quick switcher
+                  </span>
+                </div>
+                <p className="mt-1 text-xs text-text-muted">
+                  Pick the active model for chat. For installs, downloads, and runtime control, open the <button type="button" onClick={openHub} className="text-cyan-300 underline-offset-2 hover:underline">Manage hub</button>.
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -1084,7 +1169,7 @@ export function ModelSelector({ onClose }) {
               </div>
             </div>
 
-            <div className="mt-4 grid gap-3 lg:grid-cols-[1fr_auto_auto]">
+            <div className="mt-4 space-y-2">
               <div className="relative">
                 <Search size={15} className="absolute left-3 top-1/2 -translate-y-1/2 text-text-muted" />
                 <input
@@ -1096,25 +1181,51 @@ export function ModelSelector({ onClose }) {
                   autoFocus
                 />
               </div>
-              <select
-                value={sortKey}
-                onChange={(event) => {
-                  setSortKey(event.target.value);
-                  persistPrefs({ sort: event.target.value });
-                }}
-                className="input py-2 text-sm"
-              >
-                {SORT_OPTIONS.map((option) => (
-                  <option key={option.id} value={option.id}>{option.label}</option>
-                ))}
-              </select>
-              <div className="flex items-center gap-1 rounded-lg border border-forge-border bg-forge-bg p-1">
-                <button type="button" onClick={() => setViewMode('catalogue')} className={`h-8 rounded-md px-2 text-xs ${viewMode === 'catalogue' ? 'bg-cyan-500/15 text-cyan-200' : 'text-text-muted hover:text-text-primary'}`}>
-                  <Layers size={13} className="inline" /> Catalogue
-                </button>
-                <button type="button" onClick={() => setViewMode('browse')} className={`h-8 rounded-md px-2 text-xs ${viewMode === 'browse' ? 'bg-cyan-500/15 text-cyan-200' : 'text-text-muted hover:text-text-primary'}`}>
-                  <List size={13} className="inline" /> Browse All
-                </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="shrink-0 text-[10px] font-medium uppercase text-text-muted">
+                  {filteredModels.length} shown
+                </span>
+                <select
+                  value={sourceFilter}
+                  onChange={(event) => setSourceFilter(event.target.value)}
+                  className="input h-8 w-[150px] px-2 py-1 text-xs"
+                  title="Filter by model source"
+                >
+                  {SOURCE_FILTERS.map((option) => (
+                    <option key={option.id} value={option.id}>{option.label}</option>
+                  ))}
+                </select>
+                <select
+                  value={addedFilter}
+                  onChange={(event) => setAddedFilter(event.target.value)}
+                  className="input h-8 w-[150px] px-2 py-1 text-xs"
+                  title="Filter by when the model was added"
+                >
+                  {ADDED_FILTERS.map((option) => (
+                    <option key={option.id} value={option.id}>{option.label}</option>
+                  ))}
+                </select>
+                <select
+                  value={sortKey}
+                  onChange={(event) => {
+                    setSortKey(event.target.value);
+                    persistPrefs({ sort: event.target.value });
+                  }}
+                  className="input h-8 w-[120px] px-2 py-1 text-xs"
+                  title="Sort models"
+                >
+                  {SORT_OPTIONS.map((option) => (
+                    <option key={option.id} value={option.id}>{option.label}</option>
+                  ))}
+                </select>
+                <div className="ml-auto flex items-center gap-1 rounded-lg border border-forge-border bg-surface-base p-1">
+                  <button type="button" onClick={() => setViewMode('catalogue')} className={`h-7 rounded-md px-2 text-xs ${viewMode === 'catalogue' ? 'bg-cyan-500/15 text-cyan-200' : 'text-text-muted hover:text-text-primary'}`}>
+                    <Layers size={13} className="inline" /> Catalogue
+                  </button>
+                  <button type="button" onClick={() => setViewMode('browse')} className={`h-7 rounded-md px-2 text-xs ${viewMode === 'browse' ? 'bg-cyan-500/15 text-cyan-200' : 'text-text-muted hover:text-text-primary'}`}>
+                    <List size={13} className="inline" /> Browse All
+                  </button>
+                </div>
               </div>
             </div>
 
@@ -1152,17 +1263,9 @@ export function ModelSelector({ onClose }) {
               >
                 Agentic Research
               </button>
-              <div className="ml-auto flex flex-wrap gap-1">
-                {Object.entries(modelCatalogSources || {}).map(([source, sourceState]) => (
-                  <SourceStatusPill
-                    key={source}
-                    source={source}
-                    state={source === 'ollama' && isOllamaOffline
-                      ? { status: 'error', error: 'Ollama is stopped; cached models remain available.' }
-                      : sourceState}
-                  />
-                ))}
-              </div>
+              <span className="ml-auto rounded-md border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-[10px] text-emerald-200">
+                Sources ready
+              </span>
             </div>
           </header>
 
@@ -1177,74 +1280,78 @@ export function ModelSelector({ onClose }) {
 
           {viewMode === 'catalogue' && (
             <>
-              <section className="grid gap-3 border-b border-forge-border p-4 lg:grid-cols-3">
-                <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Now</p>
-                  <p className="mt-2 truncate text-sm font-semibold text-text-primary">{currentNormalized?.displayName || currentModel || 'No model selected'}</p>
-                  <p className="mt-1 text-xs text-text-muted">
+              <section className="flex flex-wrap items-center gap-3 border-b border-forge-border bg-surface-1 px-4 py-2.5">
+                <div className="flex min-w-0 flex-1 items-center gap-3">
+                  <span className="rounded-md bg-cyan-500/10 px-2 py-1 text-[10px] font-semibold uppercase tracking-wide text-cyan-200">Active</span>
+                  <span className="truncate text-sm font-semibold text-text-primary">{currentNormalized?.displayName || currentModel || 'No model selected'}</span>
+                  <span className="hidden truncate text-[11px] text-text-muted md:inline">
                     {renderToken(llmRuntimeState?.currentBackend)} · ctx {renderToken(llmRuntimeState?.effectiveOptions?.num_ctx || currentModelInfo?.effectiveContextLength)}
-                  </p>
-                  {Array.isArray(currentModelInfo?.warnings) && currentModelInfo.warnings.length > 0 && (
-                    <p className="mt-2 line-clamp-2 text-xs text-amber-200">{currentModelInfo.warnings[0]}</p>
-                  )}
-                  <div className="mt-3 flex gap-2">
-                    <button type="button" onClick={() => electronAPI.unloadModel()} className="btn btn-secondary px-2 py-1.5 text-xs">Eject</button>
-                    <button type="button" onClick={() => electronAPI.warmupModel(currentModel)} className="btn btn-secondary px-2 py-1.5 text-xs">Warmup</button>
-                  </div>
+                  </span>
                 </div>
-
-                <div className="rounded-lg border border-cyan-400/20 bg-cyan-500/10 p-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-cyan-200">Suggested</p>
-                  <p className="mt-2 truncate text-sm font-semibold text-text-primary">{suggested?.displayName || 'No suggestion yet'}</p>
-                  <p className="mt-1 line-clamp-2 text-xs text-text-secondary">
-                    {suggested ? `${suggested.fit?.label || 'Fit unknown'} · ${suggested.capabilities.join(', ')}` : 'Run a refresh or add a model to populate suggestions.'}
-                  </p>
-                  {suggested && (
-                    <div className="mt-3 flex gap-2">
-                      <button type="button" onClick={() => handleUseModel(suggested)} className="btn btn-primary px-2 py-1.5 text-xs">Use</button>
-                      <button type="button" onClick={() => setWorkbenchModel(suggested)} className="btn btn-secondary px-2 py-1.5 text-xs">Workbench</button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => triggerWarmupWithProgress(currentModel)}
+                    className="btn btn-secondary px-2 py-1 text-[11px]"
+                  >
+                    Warmup
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await Promise.all([
+                        electronAPI.unloadModel(currentModel),
+                        electronAPI.unloadNpuModel?.(),
+                      ]);
+                    }}
+                    className="btn btn-secondary px-2 py-1 text-[11px]"
+                  >
+                    Eject
+                  </button>
+                  {currentModel && window?.electronAPI?.sparkModelHubSetContinueModel && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          await window.electronAPI.sparkModelHubSetContinueModel({
+                            model: currentModel,
+                            title: currentNormalized?.displayName || currentModel,
+                            apiBase: 'http://localhost:11434',
+                            contextLength: 8192,
+                            temperature: 0.2,
+                          });
+                        } catch (_) {
+                          // Surface in toast handled by store on success path; ignore here.
+                        }
+                      }}
+                      className="btn btn-secondary px-2 py-1 text-[11px]"
+                      title="Set this model as the Continue / Cursor coding model"
+                    >
+                      Set for Coding
+                    </button>
+                  )}
+                  {isSparkMoeCandidate(currentModel) && (
+                    <div className="flex items-center gap-1 rounded-md border border-cyan-400/15 bg-cyan-500/[0.06] px-1 py-0.5">
+                      {['stable', 'recommended', 'aggressive'].map((level) => (
+                        <button
+                          key={level}
+                          type="button"
+                          onClick={() => saveSparkPreset(currentModel, level)}
+                          className="rounded px-1.5 py-0.5 text-[10px] text-cyan-100/80 hover:bg-cyan-400/10"
+                          title={`Apply Spark ${level} preset`}
+                        >
+                          {level[0].toUpperCase()}
+                        </button>
+                      ))}
                     </div>
                   )}
-                </div>
-
-                <div className="rounded-lg border border-white/10 bg-white/[0.03] p-3">
-                  <p className="text-xs font-semibold uppercase tracking-wide text-text-muted">Alternatives</p>
-                  <div className="mt-2 space-y-2">
-                    {alternatives.length === 0 ? (
-                      <p className="text-xs text-text-muted">No alternatives yet.</p>
-                    ) : alternatives.map((model) => (
-                      <button key={model.id} type="button" onClick={() => setDetailModel(model)} className="flex w-full items-center justify-between gap-2 rounded-md border border-white/10 bg-black/10 px-2 py-1.5 text-left hover:border-white/20">
-                        <span className="truncate text-xs text-text-secondary">{model.displayName}</span>
-                        <span className="text-[10px] text-cyan-200">{model.score}</span>
-                      </button>
-                    ))}
-                  </div>
+                  {suggested && suggested.id !== currentNormalized?.id && (
+                    <button type="button" onClick={() => handleUseModel(suggested)} className="btn btn-primary px-2 py-1 text-[11px]" title={`Suggested: ${suggested.displayName}`}>
+                      Use suggested
+                    </button>
+                  )}
                 </div>
               </section>
-
-              {smartGroups.length > 0 && (
-                <section className="border-b border-forge-border px-4 py-3">
-                  <div className="mb-2 flex items-center gap-2">
-                    <Sparkles size={14} className="text-cyan-300" />
-                    <p className="text-xs font-semibold text-text-secondary">Smart groups</p>
-                  </div>
-                  <div className="grid gap-2 md:grid-cols-2 lg:grid-cols-3">
-                    {smartGroups.map((group) => (
-                      <div key={group.id} className="rounded-lg border border-white/10 bg-black/15 p-2">
-                        <p className="text-xs font-semibold text-text-primary">{group.title}</p>
-                        <p className="text-[10px] text-text-muted">{group.models.length} shown</p>
-                        <div className="mt-2 flex flex-wrap gap-1">
-                          {group.models.slice(0, 3).map((model) => (
-                            <button key={model.id} type="button" onClick={() => setDetailModel(model)} className="max-w-full truncate rounded-md bg-white/[0.05] px-1.5 py-0.5 text-[10px] text-text-secondary">
-                              {model.displayName}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                </section>
-              )}
 
               <main ref={listParentRef} role="listbox" aria-label="Model catalogue" className="min-h-0 flex-1 overflow-y-auto p-4">
                 {catalogueItems.length === 0 ? (
@@ -1355,7 +1462,7 @@ export function ModelSelector({ onClose }) {
                   </div>
                   {section.models.length === 0 ? (
                     <div className="rounded-lg border border-dashed border-white/10 p-4 text-xs text-text-muted">
-                      {section.id === 'ollama' ? 'No Ollama models found. Start Ollama, refresh, or open the Model Hub.' : `No ${section.title.toLowerCase()} found.`}
+                      {section.id === 'ollama' ? 'No Ollama models found. Start Ollama, refresh, or open the Runtime Center.' : `No ${section.title.toLowerCase()} found.`}
                     </div>
                   ) : (
                     <div className="space-y-2">
@@ -1390,7 +1497,7 @@ export function ModelSelector({ onClose }) {
             </main>
           )}
 
-          <footer className="border-t border-forge-border bg-forge-bg/60 px-4 py-3">
+          <footer className="border-t border-forge-border bg-surface-1 px-4 py-3">
             <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-text-muted">
               <span>
                 {availableModels.length} Ollama · {lmStudioModels.length} LM Studio · {localModels.length} imported{npuModels.length ? ` · ${npuModels.length} NPU` : ''}

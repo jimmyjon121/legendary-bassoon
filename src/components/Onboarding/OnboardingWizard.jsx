@@ -4,6 +4,30 @@ import { useAppStore } from '../../stores/appStore';
 import { motion, AnimatePresence } from 'framer-motion';
 
 const RECOMMENDED_MODEL = 'llama3.2:3b'; // Small, fast, good quality
+const STARTUP_READY_PROBE_DELAY_MS = 1200;
+const STARTUP_SIGNAL_FALLBACK_MS = 8000;
+const OPTIONAL_HEALTH_TIMEOUT_MS = 2500;
+
+async function optionalHealthProbe(label, promise, fallback = null) {
+  if (!promise) return fallback;
+  let timeoutId = null;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((resolve) => {
+        timeoutId = setTimeout(() => {
+          console.warn(`[Onboarding] Optional ${label} health probe timed out; continuing`);
+          resolve(fallback);
+        }, OPTIONAL_HEALTH_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (error) {
+    console.warn(`[Onboarding] Optional ${label} health probe failed:`, error?.message || error);
+    return fallback;
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
 
 export function OnboardingWizard({ onComplete }) {
   const initializeApp = useAppStore((s) => s.initializeApp);
@@ -25,10 +49,15 @@ export function OnboardingWizard({ onComplete }) {
   }, []);
 
   const loadSystemHealth = React.useCallback(async () => {
+    const [ollama, npu, image] = await Promise.all([
+      window.electronAPI?.getOllamaStatus?.(),
+      optionalHealthProbe('NPU', window.electronAPI?.getNpuStatus?.({ force: false })),
+      optionalHealthProbe('image backend', window.electronAPI?.getImageBackendStatus?.()),
+    ]);
     const summary = {
-      ollama: await window.electronAPI?.getOllamaStatus?.(),
-      npu: (await window.electronAPI?.getNpuStatus?.({ force: false })) || null,
-      image: (await window.electronAPI?.getImageBackendStatus?.()) || null,
+      ollama,
+      npu: npu || null,
+      image: image || null,
     };
     setSystemHealth(summary);
     return summary;
@@ -84,8 +113,9 @@ export function OnboardingWizard({ onComplete }) {
     }
   }, [getConfiguredNpuModelId, loadSystemHealth, setModel, setPreferredBackend]);
 
-  const checkSetup = React.useCallback(async () => {
-    console.log('Checking setup...');
+  const checkSetup = React.useCallback(async (options = {}) => {
+    const readyOnly = options.readyOnly === true;
+    console.log('Checking setup...', readyOnly ? '(ready-only probe)' : '');
     setIsSettingUp(true);
     setError('');
     
@@ -117,24 +147,31 @@ export function OnboardingWizard({ onComplete }) {
           console.log('NPU runtime already ready, using it for onboarding');
           setSetupStatus('ready');
           setIsSettingUp(false);
-          return;
+          return true;
         } catch (npuError) {
           console.warn('Failed to auto-select configured NPU model:', npuError);
+          if (readyOnly) {
+            return false;
+          }
           setError(npuError?.message || 'Failed to activate the configured NPU model');
           setSetupStatus('npu-available');
           setIsSettingUp(false);
-          return;
+          return false;
         }
       }
       
       if (!health?.healthy) {
         console.log('Ollama not healthy');
 
+        if (readyOnly) {
+          return false;
+        }
+
         if (npuAvailable) {
           console.log('NPU acceleration is available, offering NPU onboarding path');
           setSetupStatus('npu-available');
           setIsSettingUp(false);
-          return;
+          return false;
         }
         
         // Check if Ollama is installed but just not running
@@ -145,13 +182,13 @@ export function OnboardingWizard({ onComplete }) {
           console.log('Ollama installed but not running');
           setSetupStatus('ollama-not-running');
           setIsSettingUp(false);
-          return;
+          return false;
         }
         
         console.log('Ollama not installed, setting no-ollama');
         setSetupStatus('no-ollama');
         setIsSettingUp(false);
-        return;
+        return false;
       }
       
       // Check if we have models
@@ -162,16 +199,19 @@ export function OnboardingWizard({ onComplete }) {
       console.log('Models:', models);
       
       if (!models || models.length === 0) {
+        if (readyOnly) {
+          return false;
+        }
         if (npuAvailable) {
           console.log('No Ollama models found, but NPU acceleration is available');
           setSetupStatus('npu-available');
           setIsSettingUp(false);
-          return;
+          return false;
         }
         console.log('No models found, setting no-models');
         setSetupStatus('no-models');
         setIsSettingUp(false);
-        return;
+        return false;
       }
       
       // All good!
@@ -184,35 +224,70 @@ export function OnboardingWizard({ onComplete }) {
       if (startupModel) {
         await setModel(startupModel);
       }
+      return true;
       
     } catch (err) {
       console.error('Setup check error:', err);
+      if (readyOnly) {
+        return false;
+      }
       setSetupStatus('no-ollama');
       setError(err.message);
       setIsSettingUp(false);
+      return false;
     }
   }, [getConfiguredNpuModelId, loadSystemHealth, refreshLlmRuntime, setModel, setPreferredBackend]);
 
   useEffect(() => {
     let unsubscribe = null;
-    let safetyTimer = null;
+    let readyProbeTimer = null;
+    let fallbackTimer = null;
+    let checkTimer = null;
     let completed = false;
+    let cancelled = false;
+
+    const clearStartupTimers = () => {
+      if (readyProbeTimer) clearTimeout(readyProbeTimer);
+      if (fallbackTimer) clearTimeout(fallbackTimer);
+      if (checkTimer) clearTimeout(checkTimer);
+    };
+
+    const appendSetupLog = (message) => {
+      setSetupLog((prev) => (Array.isArray(prev) ? prev : []).concat([
+        `[${new Date().toISOString()}] ${message}`,
+      ]));
+    };
 
     const markCompletedAndCheck = (source = 'ipc') => {
-      if (completed) return;
+      if (completed || cancelled) return;
       completed = true;
-      if (safetyTimer) clearTimeout(safetyTimer);
-      if (source === 'timeout') {
-        console.warn('[Onboarding] auto-setup-complete did not arrive within 90s; proceeding with local health check');
-        setSetupLog((prev) => (Array.isArray(prev) ? prev : []).concat([
-          `[${new Date().toISOString()}] [WARN] Startup signal timed out after 90s; continuing with local checks`,
-        ]));
+      clearStartupTimers();
+      if (source === 'fallback') {
+        console.warn(`[Onboarding] auto-setup-complete did not arrive within ${STARTUP_SIGNAL_FALLBACK_MS}ms; proceeding with local health check`);
+        appendSetupLog(`[WARN] Startup signal timed out after ${Math.round(STARTUP_SIGNAL_FALLBACK_MS / 1000)}s; continuing with local checks`);
       }
       setSetupStatus('checking');
-      setTimeout(() => {
-        setIsSettingUp(false);
-        checkSetup();
+      checkTimer = setTimeout(() => {
+        if (cancelled) return;
+        checkSetup({ source });
       }, 300);
+    };
+
+    const runReadyProbe = async () => {
+      if (completed || cancelled) return;
+      const ready = await checkSetup({ readyOnly: true, source: 'local-ready-probe' });
+      if (cancelled) return;
+      if (ready) {
+        if (!completed) {
+          completed = true;
+          clearStartupTimers();
+          appendSetupLog('[INFO] Local runtime was ready before startup signal completed');
+        }
+        return;
+      }
+      if (!completed) {
+        appendSetupLog('[INFO] Local runtime is not ready yet; waiting briefly for startup services');
+      }
     };
 
     if (window.electronAPI?.onAutoSetupComplete) {
@@ -221,20 +296,18 @@ export function OnboardingWizard({ onComplete }) {
         setSetupLog(result?.log || []);
         markCompletedAndCheck('ipc');
       });
-      // Safety net: if the main process never emits auto-setup-complete
-      // (crash, timeout, dead renderer link), fall back to our own probes
-      // so the wizard never sits on the setup screen forever.
-      safetyTimer = setTimeout(() => markCompletedAndCheck('timeout'), 90000);
+      readyProbeTimer = setTimeout(runReadyProbe, STARTUP_READY_PROBE_DELAY_MS);
+      fallbackTimer = setTimeout(() => markCompletedAndCheck('fallback'), STARTUP_SIGNAL_FALLBACK_MS);
     } else {
-      setSetupStatus('checking');
-      checkSetup();
+      markCompletedAndCheck('no-ipc');
     }
 
     return () => {
+      cancelled = true;
       if (typeof unsubscribe === 'function') {
         unsubscribe();
       }
-      if (safetyTimer) clearTimeout(safetyTimer);
+      clearStartupTimers();
     };
   }, [checkSetup]);
 

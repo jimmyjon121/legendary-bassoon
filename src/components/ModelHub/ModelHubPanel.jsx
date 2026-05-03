@@ -23,6 +23,7 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAppStore } from '../../stores/appStore';
 import { safeCall, isElectron } from '../../utils/electronAPI';
+import { SparkModelHubPanel } from './SparkModelHubPanel';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -2849,7 +2850,7 @@ function ComparePanel({ models, hardware, onClose, onRemove }) {
 
 export function ModelHubPanel({ isOpen, onClose }) {
   // ── Tab State ──
-  const [activeTab, setActiveTab] = useState('discover');
+  const [activeTab, setActiveTab] = useState('runtime');
   const [discoverSource, setDiscoverSource] = useState('ollama'); // 'ollama' | 'huggingface' | 'agentic' | 'nsfw'
 
   // ── Hardware ──
@@ -2992,13 +2993,6 @@ export function ModelHubPanel({ isOpen, onClose }) {
   const searchTimeout = useRef(null);
   const openedRef = useRef(false);
   const hfRequestSeqRef = useRef(0);
-
-  useEffect(() => {
-    if (!canAccessPrivateCatalog && discoverSource === 'nsfw') {
-      setDiscoverSource('ollama');
-      setShowDiscoverSourceMenu(false);
-    }
-  }, [canAccessPrivateCatalog, discoverSource]);
 
   const compareSet = useMemo(() => new Set(compareModels.map(m => m.name || m.modelId || m.id)), [compareModels]);
   const detectedVramGB = useMemo(() => getHardwareVramGB(hardware), [hardware]);
@@ -4493,6 +4487,7 @@ export function ModelHubPanel({ isOpen, onClose }) {
   // ─────────────────────────────────────────────────────────────────────────
 
   const TABS = [
+    { id: 'runtime', label: 'AI Runtime', icon: Sparkles },
     { id: 'discover', label: 'Discover', icon: Globe },
     { id: 'downloads', label: 'Downloads', icon: Download, badge: downloadStats.activeCount || null },
     { id: 'library', label: 'Library', icon: HardDrive, badge: libraryModels.length || null },
@@ -4521,7 +4516,7 @@ export function ModelHubPanel({ isOpen, onClose }) {
                 <Package size={18} className="text-white" />
             </div>
             <div>
-                <h2 className="font-semibold text-text-primary">Model Hub</h2>
+                <h2 className="font-semibold text-text-primary">Model Hub / AI Runtime Manager</h2>
                 <div className="flex items-center gap-2 mt-0.5">
                   <StatusChip label="Ollama" ok={ollamaOnline} />
                   {gpuInfo && (
@@ -4584,6 +4579,13 @@ export function ModelHubPanel({ isOpen, onClose }) {
         
         {/* ── CONTENT ── */}
         <div className="flex-1 overflow-hidden relative">
+          {/* RUNTIME CENTER TAB */}
+          {activeTab === 'runtime' && (
+            <div className="h-full overflow-hidden">
+              <SparkModelHubPanel embedded />
+            </div>
+          )}
+
           {/* DISCOVER TAB */}
           {activeTab === 'discover' && (
             <div className="h-full flex flex-col">
@@ -4615,47 +4617,45 @@ export function ModelHubPanel({ isOpen, onClose }) {
                     )})}
                   </div>
 
-                  {canAccessPrivateCatalog && (
-                    <div className="relative">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setShowDiscoverSourceMenu((prev) => !prev);
-                        }}
-                        className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs border transition-colors ${
-                          discoverSource === 'nsfw'
-                            ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
-                            : 'bg-neutral-900 text-text-muted border-neutral-800 hover:text-text-secondary'
-                        }`}
-                        title="More model sources"
-                      >
-                        <Shield size={11} />
-                        {discoverSource === 'nsfw' ? 'Vault' : 'More'}
-                        <ChevronDown size={12} />
-                      </button>
+                  <div className="relative">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setShowDiscoverSourceMenu((prev) => !prev);
+                      }}
+                      className={`flex items-center gap-1 px-2.5 py-1 rounded text-xs border transition-colors ${
+                        discoverSource === 'nsfw'
+                          ? 'bg-rose-500/20 text-rose-300 border-rose-500/30'
+                          : 'bg-neutral-900 text-text-muted border-neutral-800 hover:text-text-secondary'
+                      }`}
+                      title="More model sources"
+                    >
+                      <Shield size={11} />
+                      {discoverSource === 'nsfw' ? 'Uncensored' : 'More'}
+                      <ChevronDown size={12} />
+                    </button>
 
-                      {showDiscoverSourceMenu && (
-                        <div
-                          className="absolute left-0 top-full mt-1 w-44 bg-neutral-900 border border-neutral-800 rounded-lg shadow-[0_18px_44px_-28px_rgba(0,0,0,0.9)] z-40 p-1"
-                          onClick={(e) => e.stopPropagation()}
+                    {showDiscoverSourceMenu && (
+                      <div
+                        className="absolute left-0 top-full mt-1 w-48 bg-neutral-900 border border-neutral-800 rounded-lg shadow-[0_18px_44px_-28px_rgba(0,0,0,0.9)] z-40 p-1"
+                        onClick={(e) => e.stopPropagation()}
+                      >
+                        <button
+                          onClick={() => {
+                            setDiscoverSource('nsfw');
+                            setShowDiscoverSourceMenu(false);
+                          }}
+                          className={`w-full text-left px-2.5 py-1.5 rounded text-xs transition-colors ${
+                            discoverSource === 'nsfw'
+                              ? 'bg-rose-500/20 text-rose-300'
+                              : 'text-text-muted hover:text-text-secondary hover:bg-neutral-800'
+                          }`}
                         >
-                          <button
-                            onClick={() => {
-                              setDiscoverSource('nsfw');
-                              setShowDiscoverSourceMenu(false);
-                            }}
-                            className={`w-full text-left px-2.5 py-1.5 rounded text-xs transition-colors ${
-                              discoverSource === 'nsfw'
-                                ? 'bg-rose-500/20 text-rose-300'
-                                : 'text-text-muted hover:text-text-secondary hover:bg-neutral-800'
-                            }`}
-                          >
-                            Vault Catalog
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
+                          Uncensored / NSFW
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2">
@@ -5411,16 +5411,31 @@ export function ModelHubPanel({ isOpen, onClose }) {
                       </p>
                     </div>
 
+                    {!canAccessPrivateCatalog && (
+                      <div className="mb-3 p-3 rounded-lg border border-amber-500/20 bg-amber-500/10">
+                        <p className="text-xs font-medium text-amber-200 flex items-center gap-1.5">
+                          <Shield size={13} /> Unlock the Vault to browse and queue this catalog.
+                        </p>
+                        <p className="text-[10px] text-text-muted mt-0.5">
+                          The source is still here; private catalog browsing and downloads stay behind the Vault workspace.
+                        </p>
+                      </div>
+                    )}
+
                     {!nsfwLoading && filteredNsfwModels.length === 0 && (
                       <div className="flex flex-col items-center py-12 text-center">
                         <Search size={32} className="text-neutral-600 mb-3" />
                         <p className="text-text-muted text-sm">
-                          {hardwareFitOnly
+                          {!canAccessPrivateCatalog
+                            ? 'Vault is locked.'
+                            : hardwareFitOnly
                             ? 'No hardware-matched NSFW models found.'
                             : searchDebounced ? `No NSFW models found for "${searchDebounced}"` : 'No NSFW models available'}
                         </p>
                         <p className="text-xs text-neutral-600 mt-1">
-                          {hardwareFitOnly
+                          {!canAccessPrivateCatalog
+                            ? 'Switch to the Vault workspace and unlock it to browse uncensored model sources.'
+                            : hardwareFitOnly
                             ? 'Turn off "Best for my hardware" to view the full NSFW catalog.'
                             : 'Try a different category or search term like "uncensored", "abliterated", or a model family.'}
                         </p>
@@ -5608,37 +5623,57 @@ export function ModelHubPanel({ isOpen, onClose }) {
               {/* Stats + Disk usage bar */}
               <div className="px-4 py-2 border-b border-neutral-800/50">
                 {/* Model statistics dashboard */}
-                {modelStats && (
-                  <div className="flex items-center gap-3 mb-2">
-                    <div className="flex items-center gap-1.5 text-[10px]">
-                      <BarChart3 size={11} className="text-blue-400" />
-                      <span className="text-text-muted">{modelStats.totalModels || libraryModels.length} models</span>
+                {modelStats && (() => {
+                  const rawByFormat = modelStats?.byFormat;
+                  const byFormatArray = Array.isArray(rawByFormat)
+                    ? rawByFormat
+                        .map((entry) => ({
+                          format: String(entry?.format || entry?.name || 'unknown').toLowerCase(),
+                          count: Number(entry?.count || entry?.value || 0),
+                        }))
+                        .filter((entry) => Number.isFinite(entry.count))
+                    : (rawByFormat && typeof rawByFormat === 'object'
+                        ? Object.entries(rawByFormat).map(([format, count]) => ({
+                            format: String(format || 'unknown').toLowerCase(),
+                            count: Number(count) || 0,
+                          }))
+                        : [
+                            { format: 'ollama', count: libraryModels.filter(m => m.format === 'ollama').length },
+                            { format: 'gguf', count: libraryModels.filter(m => m.format === 'gguf').length },
+                            { format: 'onnx', count: libraryModels.filter(m => m.format === 'onnx').length },
+                          ]);
+                  const findCount = (formatId) => {
+                    const match = byFormatArray.find((entry) => entry.format === formatId);
+                    return match ? match.count : libraryModels.filter((m) => m.format === formatId).length;
+                  };
+                  const totalModels = Number(modelStats?.totalModels || modelStats?.total) || libraryModels.length;
+                  return (
+                    <div className="flex items-center gap-3 mb-2">
+                      <div className="flex items-center gap-1.5 text-[10px]">
+                        <BarChart3 size={11} className="text-blue-400" />
+                        <span className="text-text-muted">{totalModels} models</span>
+                      </div>
+                      <div className="flex-1 flex items-center gap-1 h-2 rounded-full overflow-hidden bg-neutral-800">
+                        {byFormatArray.filter((f) => f.count > 0).map((f, i) => {
+                          const total = totalModels || 1;
+                          const colors = { ollama: 'bg-blue-500', gguf: 'bg-green-500', onnx: 'bg-amber-500', unknown: 'bg-neutral-500' };
+                          return <div key={`${f.format}-${i}`} className={`h-full ${colors[f.format] || colors.unknown}`} style={{ width: `${(f.count / total) * 100}%` }} />;
+                        })}
+                      </div>
+                      <div className="flex items-center gap-2 text-[9px]">
+                        {[
+                          { label: 'Ollama', color: 'bg-blue-500', count: findCount('ollama') },
+                          { label: 'GGUF', color: 'bg-green-500', count: findCount('gguf') },
+                          { label: 'ONNX', color: 'bg-amber-500', count: findCount('onnx') },
+                        ].filter((s) => s.count > 0).map((s) => (
+                          <span key={s.label} className="flex items-center gap-0.5 text-text-muted">
+                            <span className={`w-1.5 h-1.5 rounded-full ${s.color}`} /> {s.count} {s.label}
+                          </span>
+                        ))}
+                      </div>
                     </div>
-                    {/* Format breakdown as colored segments */}
-                    <div className="flex-1 flex items-center gap-1 h-2 rounded-full overflow-hidden bg-neutral-800">
-                      {(modelStats.byFormat || [
-                        { format: 'ollama', count: libraryModels.filter(m => m.format === 'ollama').length },
-                        { format: 'gguf', count: libraryModels.filter(m => m.format === 'gguf').length },
-                        { format: 'onnx', count: libraryModels.filter(m => m.format === 'onnx').length },
-                      ]).filter(f => f.count > 0).map((f, i) => {
-                        const total = modelStats?.totalModels || libraryModels.length || 1;
-                        const colors = { ollama: 'bg-blue-500', gguf: 'bg-green-500', onnx: 'bg-amber-500', unknown: 'bg-neutral-500' };
-                        return <div key={i} className={`h-full ${colors[f.format] || colors.unknown}`} style={{ width: `${(f.count / total) * 100}%` }} />;
-                      })}
-                    </div>
-                    <div className="flex items-center gap-2 text-[9px]">
-                      {[
-                        { label: 'Ollama', color: 'bg-blue-500', count: modelStats?.byFormat?.find(f => f.format === 'ollama')?.count || libraryModels.filter(m => m.format === 'ollama').length },
-                        { label: 'GGUF', color: 'bg-green-500', count: modelStats?.byFormat?.find(f => f.format === 'gguf')?.count || libraryModels.filter(m => m.format === 'gguf').length },
-                        { label: 'ONNX', color: 'bg-amber-500', count: modelStats?.byFormat?.find(f => f.format === 'onnx')?.count || libraryModels.filter(m => m.format === 'onnx').length },
-                      ].filter(s => s.count > 0).map(s => (
-                        <span key={s.label} className="flex items-center gap-0.5 text-text-muted">
-                          <span className={`w-1.5 h-1.5 rounded-full ${s.color}`} /> {s.count} {s.label}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                  );
+                })()}
                 {/* Disk usage */}
                 {diskUsage && (
                   <>

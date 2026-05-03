@@ -1,16 +1,15 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   MessageCircle, Briefcase, Code2, Beaker, Settings, Image,
-  Plus, ChevronLeft, ChevronRight, Search, Cpu,
-  Globe, Download,
-  GripVertical, RotateCcw, SlidersHorizontal, EyeOff, FolderKanban, Link2, Lock, Shield,
+  Plus, ChevronLeft, ChevronRight, ChevronDown, Cpu,
+  Bot, Download,
+  Calendar, CalendarDays, Star, Pin, Archive, Folder, FolderPlus,
+  Activity, Command, FolderKanban, Lock,
 } from 'lucide-react';
+import { formatDistanceToNow } from 'date-fns';
 import { useAppStore, WORKSPACES } from '../../stores/appStore';
 import { HardwareMonitorCompact } from '../HardwareMonitor/HardwareMonitor';
 import { PowerModeToggle } from '../PowerMode/PowerModeToggle';
-import { FolderTree } from './FolderTree';
-import { QuickFilters, QuickFiltersCompact } from './QuickFilters';
-import { ConversationCard } from './ConversationCard';
 
 const ICONS = { MessageCircle, Briefcase, Code2, Beaker, Lock };
 const FALLBACK_ICON = MessageCircle;
@@ -33,74 +32,7 @@ const WS_SUMMARIES = {
   nsfw: 'Private encrypted vault workspace',
 };
 
-const SIDEBAR_SECTION_META = {
-  workspaces: { label: 'Workspaces' },
-  projects: { label: 'Projects' },
-  compose: { label: 'Start' },
-  filters: { label: 'Filters' },
-  folders: { label: 'Folders' },
-  conversations: { label: 'Conversations' },
-  system: { label: 'System' },
-  actions: { label: 'Shortcuts' },
-};
 const COLLAPSED_SIDEBAR_WIDTH = 72;
-
-const SidebarSectionShell = memo(function SidebarSectionShell({
-  sectionId,
-  label,
-  customizing,
-  isDropTarget,
-  accentColor,
-  onHide,
-  onDragStart,
-  onDragOver,
-  onDragEnd,
-  onDrop,
-  fillSpace = false,
-  children,
-}) {
-  return (
-    <section
-      draggable={customizing}
-      onDragStart={customizing ? onDragStart : undefined}
-      onDragOver={customizing ? onDragOver : undefined}
-      onDrop={customizing ? onDrop : undefined}
-      onDragEnd={customizing ? onDragEnd : undefined}
-      className={[
-        fillSpace ? 'flex min-h-0 flex-1 flex-col' : '',
-        customizing
-          ? 'relative rounded-2xl border border-dashed bg-white/[0.02] transition-colors'
-          : '',
-      ].join(' ')}
-      style={customizing ? {
-        borderColor: isDropTarget ? `${accentColor}55` : 'rgba(255,255,255,0.08)',
-        background: isDropTarget ? `${accentColor}12` : 'rgba(255,255,255,0.02)',
-      } : undefined}
-      data-sidebar-section={sectionId}
-    >
-      {customizing && (
-        <div className="flex items-center justify-between gap-2 px-2 py-2">
-          <div className="flex items-center gap-2 text-[11px] font-medium uppercase tracking-[0.18em] text-text-muted">
-            <GripVertical size={13} />
-            <span>{label}</span>
-          </div>
-          <button
-            type="button"
-            onClick={onHide}
-            className="inline-flex items-center gap-1 rounded-lg border border-white/10 bg-white/[0.04] px-2 py-1 text-[11px] text-text-muted transition-colors hover:border-white/16 hover:text-text-primary"
-            title={`Hide ${label}`}
-          >
-            <EyeOff size={12} />
-            Hide
-          </button>
-        </div>
-      )}
-      <div className={fillSpace ? 'min-h-0 flex-1' : ''}>
-        {children}
-      </div>
-    </section>
-  );
-});
 
 // Memoized workspace tab
 const WorkspaceTab = memo(function WorkspaceTab({ ws, isActive, isCollapsed, onClick }) {
@@ -123,7 +55,7 @@ const WorkspaceTab = memo(function WorkspaceTab({ ws, isActive, isCollapsed, onC
       className={[
         isCollapsed
           ? 'w-10 h-10 rounded-xl'
-          : 'rounded-xl border p-2.5 text-left',
+          : 'h-8 rounded-lg border px-2 text-left',
         'group relative overflow-hidden transition-all duration-150',
         isActive
           ? 'text-text-primary'
@@ -137,23 +69,20 @@ const WorkspaceTab = memo(function WorkspaceTab({ ws, isActive, isCollapsed, onC
           <Icon size={17} />
         </span>
       ) : (
-        <div className="flex items-center gap-2.5">
+        <div className="flex h-full items-center gap-1.5">
           <span className="shrink-0" style={iconStyle}>
-            <Icon size={16} />
+            <Icon size={13} />
           </span>
           <div className="min-w-0 flex-1">
             <span
-              className="block truncate text-[13px] font-semibold"
+              className="block truncate text-[11px] font-semibold"
               style={isActive ? { color } : undefined}
             >
               {ws.name}
             </span>
-            <p className="mt-0.5 truncate text-[10px] leading-3 text-text-muted/70">
-              {summary}
-            </p>
           </div>
           {isActive && (
-            <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: color }} />
+            <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: color }} title={summary} />
           )}
         </div>
       )}
@@ -161,13 +90,123 @@ const WorkspaceTab = memo(function WorkspaceTab({ ws, isActive, isCollapsed, onC
   );
 });
 
+const SectionTitle = memo(function SectionTitle({ children, action }) {
+  return (
+    <div className="mb-1.5 flex h-5 items-center justify-between px-1">
+      <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-text-muted/55">
+        {children}
+      </span>
+      {action}
+    </div>
+  );
+});
+
+const NavRow = memo(function NavRow({
+  icon: Icon,
+  label,
+  count,
+  active,
+  accentColor,
+  onClick,
+  title,
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={title || label}
+      className={[
+        'group flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-[12px] transition-colors',
+        active
+          ? 'bg-white/[0.055] text-text-primary'
+          : 'text-text-muted hover:bg-white/[0.035] hover:text-text-secondary',
+      ].join(' ')}
+      style={active ? { boxShadow: `inset 2px 0 0 ${accentColor}` } : undefined}
+    >
+      <Icon size={14} className="shrink-0" style={active ? { color: accentColor } : undefined} />
+      <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
+      {Number.isFinite(count) && count > 0 && (
+        <span className="rounded-md bg-white/[0.055] px-1.5 py-0.5 text-[10px] text-text-muted">
+          {count > 99 ? '99+' : count}
+        </span>
+      )}
+    </button>
+  );
+});
+
+const RecentConversationRow = memo(function RecentConversationRow({
+  conv,
+  isActive,
+  accentColor,
+  maskPrivateMeta,
+  onSelect,
+}) {
+  const title = maskPrivateMeta ? 'Vault note' : (conv?.title || 'New conversation');
+  const updatedAt = conv?.updated_at ? new Date(conv.updated_at) : null;
+  const relative = updatedAt && !Number.isNaN(updatedAt.getTime())
+    ? formatDistanceToNow(updatedAt, { addSuffix: true })
+    : '';
+  const messageCount = Number(conv?.message_count || 0);
+
+  return (
+    <button
+      type="button"
+      onClick={() => onSelect(conv.id)}
+      className={[
+        'group flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors',
+        isActive
+          ? 'bg-white/[0.055] text-text-primary'
+          : 'text-text-secondary hover:bg-white/[0.035] hover:text-text-primary',
+      ].join(' ')}
+      style={isActive ? { boxShadow: `inset 2px 0 0 ${accentColor}` } : undefined}
+      title={title}
+    >
+      <MessageCircle size={13} className="shrink-0 text-text-muted/70" />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-[12px] font-medium leading-4">{title}</p>
+        <p className="mt-0.5 truncate text-[10px] text-text-muted/70">
+          {[relative, messageCount > 0 ? `${messageCount} msgs` : null].filter(Boolean).join(' · ')}
+        </p>
+      </div>
+      {conv?.pinned === 1 && <Pin size={11} className="shrink-0 rotate-45 text-text-muted/70" />}
+      {conv?.starred === 1 && <Star size={11} className="shrink-0 text-amber-300" fill="currentColor" />}
+    </button>
+  );
+});
+
+const SystemFooter = memo(function SystemFooter() {
+  const [expanded, setExpanded] = useState(false);
+
+  return (
+    <div className="border-t border-white/[0.06] p-2">
+      <button
+        type="button"
+        onClick={() => setExpanded((prev) => !prev)}
+        className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[12px] text-text-secondary transition-colors hover:bg-white/[0.035] hover:text-text-primary"
+      >
+        <span className="flex h-5 w-5 items-center justify-center rounded-md bg-emerald-500/10 text-emerald-300">
+          <Activity size={12} />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="block text-[12px] font-medium">Local Ready</span>
+          <span className="block truncate text-[10px] text-text-muted">System healthy</span>
+        </span>
+        <ChevronDown size={13} className={`text-text-muted transition-transform ${expanded ? 'rotate-180' : ''}`} />
+      </button>
+      {expanded && (
+        <div className="mt-2 rounded-lg border border-white/[0.06] bg-black/10 py-1">
+          <HardwareMonitorCompact />
+        </div>
+      )}
+    </div>
+  );
+});
+
 export function Sidebar() {
   const asideRef = useRef(null);
   const resizeFrameRef = useRef(0);
   const latestDragWidthRef = useRef(320);
-  const draggedSectionRef = useRef(null);
   const [isResizingSidebar, setIsResizingSidebar] = useState(false);
-  const [dragOverSectionId, setDragOverSectionId] = useState(null);
 
   // Store subscriptions
   const currentWorkspace = useAppStore(s => s.currentWorkspace);
@@ -175,38 +214,23 @@ export function Sidebar() {
   const currentConversationId = useAppStore(s => s.currentConversationId);
   const selectConversation = useAppStore(s => s.selectConversation);
   const createConversation = useAppStore(s => s.createConversation);
-  const deleteConversation = useAppStore(s => s.deleteConversation);
   const sidebarCollapsed = useAppStore(s => s.sidebarCollapsed);
   const sidebarWidth = useAppStore(s => s.sidebarWidth);
-  const sidebarCustomizing = useAppStore(s => s.sidebarCustomizing);
-  const sidebarSectionOrder = useAppStore(s => s.sidebarSectionOrder);
-  const sidebarSectionVisibility = useAppStore(s => s.sidebarSectionVisibility);
   const toggleSidebar = useAppStore(s => s.toggleSidebar);
   const setSidebarWidth = useAppStore(s => s.setSidebarWidth);
-  const toggleSidebarCustomizing = useAppStore(s => s.toggleSidebarCustomizing);
-  const setSidebarSectionVisibility = useAppStore(s => s.setSidebarSectionVisibility);
-  const reorderSidebarSection = useAppStore(s => s.reorderSidebarSection);
-  const resetSidebarCustomization = useAppStore(s => s.resetSidebarCustomization);
   const toggleSettings = useAppStore(s => s.toggleSettings);
   const toggleImageGen = useAppStore(s => s.toggleImageGen);
   const toggleModelHub = useAppStore(s => s.toggleModelHub);
   const toggleModelSelector = useAppStore(s => s.toggleModelSelector);
   const toggleDownloadCenter = useAppStore(s => s.toggleDownloadCenter);
-  const isLocked = useAppStore(s => s.isLocked);
-  const lockNsfw = useAppStore(s => s.lockNsfw);
   const projects = useAppStore(s => s.projects);
-  const projectsLoading = useAppStore(s => s.projectsLoading);
   const activeProjectId = useAppStore(s => s.activeProjectId);
-  const activeProject = useAppStore(s => s.activeProject);
-  const activeProjectConversationIds = useAppStore(s => s.activeProjectConversationIds);
-  const activeProjectDocumentIds = useAppStore(s => s.activeProjectDocumentIds);
   const loadProjects = useAppStore(s => s.loadProjects);
   const createProject = useAppStore(s => s.createProject);
   const setActiveProject = useAppStore(s => s.setActiveProject);
-  const linkConversationToActiveProject = useAppStore(s => s.linkConversationToActiveProject);
-  const refreshActiveProjectLinks = useAppStore(s => s.refreshActiveProjectLinks);
 
   // Organization state
+  const folders = useAppStore(s => s.folders);
   const conversations = useAppStore(s => s.conversations);
   const loadConversations = useAppStore(s => s.loadConversations);
   const searchQuery = useAppStore(s => s.searchQuery);
@@ -214,9 +238,11 @@ export function Sidebar() {
   const getFilteredConversations = useAppStore(s => s.getFilteredConversations);
   const loadFolders = useAppStore(s => s.loadFolders);
   const loadWorkspaceTags = useAppStore(s => s.loadWorkspaceTags);
-  // Subscribe to activeFilter so component re-renders when filter changes
+  const createFolder = useAppStore(s => s.createFolder);
   const activeFilter = useAppStore(s => s.activeFilter);
+  const setActiveFilter = useAppStore(s => s.setActiveFilter);
   const activeFolderId = useAppStore(s => s.activeFolderId);
+  const setActiveFolder = useAppStore(s => s.setActiveFolder);
 
   const refreshConversationList = useCallback(async () => {
     const next = await loadConversations?.();
@@ -234,11 +260,7 @@ export function Sidebar() {
     return () => window.removeEventListener('chat-v2-title-updated', handleTitleUpdate);
   }, [refreshConversationList]);
 
-  // Get filtered conversations using the organization slice
-  // This will re-run when activeFilter, activeFolderId, searchQuery, or conversations change
-  const filteredConversations = useMemo(() => {
-    return getFilteredConversations();
-  }, [getFilteredConversations, activeFilter, activeFolderId, searchQuery, conversations]);
+  const filteredConversations = getFilteredConversations();
 
   // Load folders and tags when workspace changes
   useEffect(() => {
@@ -266,36 +288,57 @@ export function Sidebar() {
     await refreshConversationList();
   }, [currentConversationId, refreshConversationList, setActiveProject]);
 
-  const handleLinkCurrentConversation = useCallback(async () => {
-    if (!currentConversationId || !activeProjectId) return;
-    await linkConversationToActiveProject?.(currentConversationId);
-    await refreshActiveProjectLinks?.();
-    await refreshConversationList();
-  }, [
-    activeProjectId,
-    currentConversationId,
-    linkConversationToActiveProject,
-    refreshActiveProjectLinks,
-    refreshConversationList,
-  ]);
+  const handleCreateFolder = useCallback(async () => {
+    const name = window.prompt('Folder name');
+    if (!name || !name.trim()) return;
+    await createFolder?.(name.trim());
+    await loadFolders?.();
+  }, [createFolder, loadFolders]);
+
+  const handleSmartView = useCallback((filterId) => {
+    setActiveFilter?.(filterId);
+    setActiveFolder?.(null);
+  }, [setActiveFilter, setActiveFolder]);
+
   const accentColor = WS_COLORS[currentWorkspace] || WS_COLORS.casual;
   const maskPrivateMeta = currentWorkspace === 'nsfw';
-  const isVaultWorkspace = currentWorkspace === 'nsfw';
 
   const workspaceTabs = useMemo(() => (
     ENABLED_WORKSPACES
       .map((id) => WORKSPACES[id])
       .filter(Boolean)
   ), []);
-  const visibleSectionMap = sidebarSectionVisibility || {};
-  const orderedSectionIds = useMemo(() => (
-    Array.isArray(sidebarSectionOrder)
-      ? sidebarSectionOrder.filter((id) => SIDEBAR_SECTION_META[id])
-      : Object.keys(SIDEBAR_SECTION_META)
-  ), [sidebarSectionOrder]);
-  const renderedSectionIds = useMemo(() => (
-    orderedSectionIds.filter((id) => visibleSectionMap[id] !== false)
-  ), [orderedSectionIds, visibleSectionMap]);
+
+  const chatCounts = useMemo(() => {
+    const now = new Date();
+    const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const startOfWeek = new Date(startOfToday);
+    startOfWeek.setDate(startOfWeek.getDate() - 7);
+    const list = conversations || [];
+    return {
+      all: list.length,
+      today: list.filter((c) => new Date(c.updated_at) >= startOfToday).length,
+      week: list.filter((c) => new Date(c.updated_at) >= startOfWeek).length,
+      starred: list.filter((c) => c.starred === 1).length,
+      pinned: list.filter((c) => c.pinned === 1).length,
+      archived: list.filter((c) => c.archived === 1 || c.archived === true).length,
+    };
+  }, [conversations]);
+
+  const folderCounts = useMemo(() => {
+    const counts = {};
+    (conversations || []).forEach((conversation) => {
+      if (conversation.folder_id) {
+        counts[conversation.folder_id] = (counts[conversation.folder_id] || 0) + 1;
+      }
+    });
+    return counts;
+  }, [conversations]);
+
+  const recentConversations = useMemo(
+    () => filteredConversations.slice(0, 14),
+    [filteredConversations],
+  );
   useEffect(() => {
     latestDragWidthRef.current = sidebarWidth;
   }, [sidebarWidth]);
@@ -347,252 +390,22 @@ export function Sidebar() {
     window.addEventListener('mouseup', handleUp);
   }, [setSidebarWidth, sidebarCollapsed]);
 
-  const handleSectionDragStart = useCallback((sectionId) => (event) => {
-    draggedSectionRef.current = sectionId;
-    event.dataTransfer.effectAllowed = 'move';
-    event.dataTransfer.setData('text/plain', sectionId);
-  }, []);
+  const smartViews = useMemo(() => ([
+    { id: 'all', label: 'All Chats', icon: MessageCircle, count: chatCounts.all },
+    { id: 'today', label: 'Today', icon: Calendar, count: chatCounts.today },
+    { id: 'week', label: 'This Week', icon: CalendarDays, count: chatCounts.week },
+    { id: 'starred', label: 'Starred', icon: Star, count: chatCounts.starred },
+    { id: 'pinned', label: 'Pinned', icon: Pin, count: chatCounts.pinned },
+    { id: 'archived', label: 'Archived', icon: Archive, count: chatCounts.archived },
+  ]), [chatCounts]);
 
-  const handleSectionDragOver = useCallback((sectionId) => (event) => {
-    event.preventDefault();
-    if (dragOverSectionId !== sectionId) {
-      setDragOverSectionId(sectionId);
-    }
-  }, [dragOverSectionId]);
-
-  const handleSectionDrop = useCallback((sectionId) => (event) => {
-    event.preventDefault();
-    const draggedId = event.dataTransfer.getData('text/plain') || draggedSectionRef.current;
-    if (draggedId && draggedId !== sectionId) {
-      reorderSidebarSection(draggedId, sectionId);
-    }
-    draggedSectionRef.current = null;
-    setDragOverSectionId(null);
-  }, [reorderSidebarSection]);
-
-  const handleSectionDragEnd = useCallback(() => {
-    draggedSectionRef.current = null;
-    setDragOverSectionId(null);
-  }, []);
-
-  const renderSectionContent = useCallback((sectionId) => {
-    switch (sectionId) {
-      case 'workspaces':
-        return (
-          <div className="px-3 pb-2">
-            <div className="mb-2.5 flex items-center justify-between px-0.5">
-              <span className="text-[10px] font-medium uppercase tracking-[0.2em] text-text-muted/60">Workspaces</span>
-              <div
-                className="rounded-md border px-2 py-0.5 text-[10px] font-medium"
-                style={{ borderColor: `${accentColor}28`, color: accentColor, background: `${accentColor}0e` }}
-              >
-                {WORKSPACES[currentWorkspace]?.name || 'Casual'}
-              </div>
-            </div>
-            <div className="grid grid-cols-2 gap-1.5">
-              {workspaceTabs.map((ws) => (
-                <WorkspaceTab
-                  key={ws.id}
-                  ws={ws}
-                  isActive={currentWorkspace === ws.id}
-                  isCollapsed={false}
-                  onClick={() => setWorkspace(ws.id)}
-                />
-              ))}
-            </div>
-          </div>
-        );
-      case 'compose':
-        return (
-          <div className="px-3 pb-2.5 space-y-1.5">
-            <button
-              onClick={handleNewChat}
-              className="h-10 w-full rounded-xl text-[13px] font-medium text-white transition-all flex items-center justify-center gap-2"
-              style={{
-                background: `linear-gradient(135deg, ${accentColor} 0%, ${accentColor}cc 100%)`,
-              }}
-            >
-              <Plus size={15} />
-              New Chat
-            </button>
-
-            <label className="flex w-full items-center gap-2 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5 text-[13px] text-text-muted transition-colors focus-within:border-white/15">
-              <Search size={13} className="shrink-0" />
-              <input
-                value={searchQuery}
-                onChange={(event) => setSearchQuery(event.target.value)}
-                placeholder="Search..."
-                className="flex-1 bg-transparent text-text-primary outline-none placeholder:text-text-muted/70"
-              />
-            </label>
-          </div>
-        );
-      case 'projects':
-        return (
-          <div className="px-3 pb-2.5 space-y-2">
-            <div className="flex items-center justify-between px-0.5">
-              <span className="text-[10px] font-medium uppercase tracking-[0.2em] text-text-muted/60">Project Scope</span>
-              <button
-                type="button"
-                onClick={handleCreateProject}
-                className="inline-flex h-7 items-center gap-1 rounded-lg border border-white/10 bg-white/[0.04] px-2 text-[11px] text-text-muted transition-colors hover:border-white/16 hover:text-text-primary"
-                title="Create project"
-              >
-                <Plus size={12} />
-                New
-              </button>
-            </div>
-
-            <label className="flex w-full items-center gap-2 rounded-xl border border-white/[0.06] bg-white/[0.025] px-3 py-2.5 text-[13px] text-text-muted transition-colors focus-within:border-white/15">
-              <FolderKanban size={13} className="shrink-0" />
-              <select
-                value={activeProjectId || ''}
-                onChange={(event) => handleProjectChange(event.target.value)}
-                className="w-full bg-transparent text-text-primary outline-none"
-              >
-                <option value="">No project scope</option>
-                {(projects || []).map((project) => (
-                  <option key={project.id} value={project.id}>
-                    {project.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            {activeProject ? (
-              <div className="rounded-xl border border-white/[0.08] bg-white/[0.02] px-3 py-2.5">
-                <p className="text-xs font-medium text-text-primary truncate">{activeProject.name}</p>
-                {activeProject.description ? (
-                  <p className="mt-1 line-clamp-2 text-[11px] text-text-muted">{activeProject.description}</p>
-                ) : (
-                  <p className="mt-1 text-[11px] text-text-muted">Project instructions, linked chats, and docs are injected into prompts.</p>
-                )}
-                <div className="mt-2 flex items-center gap-2 text-[10px] text-text-muted">
-                  <span>{activeProjectConversationIds.length} chats</span>
-                  <span>{activeProjectDocumentIds.length} docs</span>
-                  {projectsLoading && <span>Syncing...</span>}
-                </div>
-                <button
-                  type="button"
-                  onClick={handleLinkCurrentConversation}
-                  disabled={!currentConversationId}
-                  className="mt-2 inline-flex h-7 items-center gap-1 rounded-lg border border-white/10 bg-white/[0.04] px-2 text-[11px] text-text-muted transition-colors hover:border-white/16 hover:text-text-primary disabled:cursor-not-allowed disabled:opacity-50"
-                  title={currentConversationId ? 'Link current chat to project' : 'Open a conversation first'}
-                >
-                  <Link2 size={11} />
-                  Link Current Chat
-                </button>
-              </div>
-            ) : (
-              <p className="px-0.5 text-[11px] text-text-muted">
-                Pick a project to keep chats, memory, and docs together.
-              </p>
-            )}
-          </div>
-        );
-      case 'filters':
-        return (
-          <div className="px-3 pb-2">
-            <QuickFilters />
-          </div>
-        );
-      case 'folders':
-        return (
-          <div className="px-1 pb-2">
-            <FolderTree />
-          </div>
-        );
-      case 'conversations':
-        return (
-          <div className="min-h-[180px] overflow-hidden">
-            {filteredConversations.length > 0 ? (
-              <div className="max-h-[42vh] overflow-y-auto scrollbar-premium px-2 py-2">
-                <div className="space-y-2">
-                  {filteredConversations.map((conv) => (
-                    <ConversationCard
-                      key={conv.id}
-                      conv={conv}
-                      isActive={currentConversationId === conv.id}
-                      onSelect={selectConversation}
-                      onDelete={deleteConversation}
-                      accentColor={accentColor}
-                      maskPrivateMeta={maskPrivateMeta}
-                    />
-                  ))}
-                </div>
-              </div>
-            ) : (
-              <div className="px-4 py-12 text-center">
-                <p className="text-sm text-text-secondary">No conversations yet</p>
-                <p className="mt-1 text-xs text-text-muted">Start a new chat</p>
-              </div>
-            )}
-          </div>
-        );
-      case 'system':
-        return (
-          <div className="border-t border-border-subtle">
-            <HardwareMonitorCompact />
-          </div>
-        );
-      case 'actions':
-        return (
-          <div className="border-t border-border-subtle p-2">
-            <div className="flex flex-wrap gap-1">
-              <PowerModeToggle compact />
-              {[
-                { action: () => setWorkspace('nsfw'), icon: Lock, label: isLocked ? 'Vault' : 'Vault On', title: isLocked ? 'Open Vault' : 'Vault unlocked' },
-                { action: toggleModelSelector, icon: Cpu, label: 'Model', title: 'Select Model' },
-                { action: toggleModelHub, icon: Globe, label: 'Hub', title: 'Model Hub' },
-                { action: toggleDownloadCenter, icon: Download, label: 'Downloads', title: 'Downloads' },
-                { action: toggleImageGen, icon: Image, label: 'Images', title: 'Image Gen' },
-                { action: toggleSettings, icon: Settings, label: 'Settings', title: 'Settings' },
-              ].map(({ action, icon: Icon, label, title }) => (
-                <button
-                  key={label}
-                  onClick={() => action()}
-                  className="flex h-8 items-center gap-1.5 rounded-lg px-2.5 text-text-muted/80 transition-colors hover:bg-white/[0.05] hover:text-text-primary"
-                  title={title}
-                >
-                  <Icon size={14} />
-                  <span className="text-[11px] font-medium">{label}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-        );
-      default:
-        return null;
-    }
-  }, [
-    activeProject,
-    activeProjectConversationIds,
-    activeProjectDocumentIds,
-    activeProjectId,
-    accentColor,
-    currentConversationId,
-    currentWorkspace,
-    deleteConversation,
-    filteredConversations,
-    handleCreateProject,
-    handleNewChat,
-    handleLinkCurrentConversation,
-    handleProjectChange,
-    isLocked,
-    maskPrivateMeta,
-    projects,
-    projectsLoading,
-    searchQuery,
-    selectConversation,
-    setSearchQuery,
-    setWorkspace,
-    toggleDownloadCenter,
-    toggleImageGen,
-    toggleModelHub,
-    toggleModelSelector,
-    toggleSettings,
-    workspaceTabs,
-  ]);
+  const footerTools = useMemo(() => ([
+    { action: toggleModelSelector, icon: Cpu, label: 'Pick', title: 'Pick the active chat model' },
+    { action: toggleModelHub, icon: Bot, label: 'Hub', title: 'Open Model Hub / AI Runtime Manager' },
+    { action: toggleDownloadCenter, icon: Download, label: 'Files', title: 'Downloads' },
+    { action: toggleImageGen, icon: Image, label: 'Images', title: 'Image Gen' },
+    { action: toggleSettings, icon: Settings, label: 'Setup', title: 'Settings' },
+  ]), [toggleDownloadCenter, toggleImageGen, toggleModelHub, toggleModelSelector, toggleSettings]);
 
   return (
     <aside
@@ -601,94 +414,23 @@ export function Sidebar() {
       style={{ width: sidebarCollapsed ? `${COLLAPSED_SIDEBAR_WIDTH}px` : `${sidebarWidth}px` }}
     >
       {!sidebarCollapsed && (
-        <>
-          <div className="px-3 pt-3 pb-2">
-            <div className="flex items-center justify-between gap-2">
-              <div className="min-w-0">
-                <div className="text-sm font-semibold text-text-primary">Chats</div>
-                <div className="mt-0.5 text-[11px] text-text-muted">
-                  {isVaultWorkspace
-                    ? 'Vault mode: encrypted, private, and lockable'
-                    : 'Clean workspace and project-scoped context'}
-                </div>
-              </div>
-              <div className="flex items-center gap-1.5">
-                <div
-                  className="rounded-md border px-2 py-0.5 text-[10px] font-medium"
-                  style={{ borderColor: `${accentColor}28`, color: accentColor, background: `${accentColor}0e` }}
-                >
-                  {WORKSPACES[currentWorkspace]?.name || 'Casual'}
-                </div>
-                {isVaultWorkspace && !isLocked && (
-                  <button
-                    type="button"
-                    onClick={() => lockNsfw?.()}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-pink-400/30 bg-pink-500/10 px-2.5 text-[11px] text-pink-300 transition-colors hover:bg-pink-500/20"
-                    title="Lock Vault and return to safe workspace"
-                  >
-                    <Shield size={13} />
-                    Lock
-                  </button>
-                )}
-                {sidebarCustomizing && (
-                  <button
-                    type="button"
-                    onClick={resetSidebarCustomization}
-                    className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 text-[11px] text-text-muted transition-colors hover:border-white/16 hover:text-text-primary"
-                    title="Reset sidebar layout"
-                  >
-                    <RotateCcw size={13} />
-                    Reset
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={toggleSidebarCustomizing}
-                  className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-white/10 bg-white/[0.04] px-2.5 text-[11px] text-text-secondary transition-colors hover:border-white/16 hover:text-text-primary"
-                  title="Customize sidebar layout"
-                >
-                  <SlidersHorizontal size={13} />
-                  {sidebarCustomizing ? 'Done' : 'Customize'}
-                </button>
+        <div className="shrink-0 px-3 pb-2 pt-3">
+          <div className="flex items-center gap-2">
+            <div
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[11px] font-bold text-white"
+              style={{ background: accentColor }}
+            >
+              DF
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="truncate text-sm font-semibold text-text-primary">DevForge</div>
+              <div className="mt-0.5 flex items-center gap-1.5 text-[10px] font-medium text-emerald-300">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                Local Ready
               </div>
             </div>
           </div>
-
-          {sidebarCustomizing && (
-            <div className="px-3 pb-3">
-              <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-3">
-                <p className="text-sm font-semibold text-text-primary">Layout edit mode</p>
-                <p className="mt-1 text-xs leading-5 text-text-muted">
-                  Drag sections to reorder them, use the sidebar edge to resize, and hide anything you do not want in view.
-                </p>
-                <div className="mt-3 flex flex-wrap gap-2">
-                  {orderedSectionIds.map((sectionId) => {
-                    const visible = visibleSectionMap[sectionId] !== false;
-                    return (
-                      <button
-                        key={sectionId}
-                        type="button"
-                        onClick={() => setSidebarSectionVisibility(sectionId, !visible)}
-                        className={`rounded-full border px-3 py-1.5 text-[11px] font-medium transition-colors ${
-                          visible
-                            ? 'border-white/12 bg-white/[0.05] text-text-secondary hover:text-text-primary'
-                            : 'text-text-primary'
-                        }`}
-                        style={visible ? undefined : {
-                          borderColor: `${accentColor}32`,
-                          background: `${accentColor}14`,
-                          color: accentColor,
-                        }}
-                      >
-                        {visible ? 'Hide' : 'Add'} {SIDEBAR_SECTION_META[sectionId]?.label || sectionId}
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          )}
-        </>
+        </div>
       )}
 
       {sidebarCollapsed ? (
@@ -715,21 +457,30 @@ export function Sidebar() {
               <Plus size={18} />
             </button>
 
-            <QuickFiltersCompact />
+            <div className="flex flex-col items-center gap-1">
+              {smartViews.slice(0, 4).map((view) => (
+                <button
+                  key={view.id}
+                  onClick={() => handleSmartView(view.id)}
+                  className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
+                    activeFilter === view.id
+                      ? 'bg-white/[0.08]'
+                      : 'text-text-muted hover:bg-white/[0.05] hover:text-text-primary'
+                  }`}
+                  style={activeFilter === view.id ? { color: accentColor } : undefined}
+                  title={view.label}
+                >
+                  <view.icon size={15} />
+                </button>
+              ))}
+            </div>
           </div>
 
           <div className="flex-1" />
 
           <div className="flex flex-col items-center gap-1 border-t border-border-subtle p-2">
             <PowerModeToggle compact />
-            {[
-              { action: () => setWorkspace('nsfw'), icon: Lock, label: isLocked ? 'Vault' : 'Vault On', title: isLocked ? 'Open Vault' : 'Vault unlocked' },
-              { action: toggleModelSelector, icon: Cpu, label: 'Model', title: 'Select Model' },
-              { action: toggleModelHub, icon: Globe, label: 'Hub', title: 'Model Hub' },
-              { action: toggleDownloadCenter, icon: Download, label: 'Downloads', title: 'Downloads' },
-              { action: toggleImageGen, icon: Image, label: 'Images', title: 'Image Gen' },
-              { action: toggleSettings, icon: Settings, label: 'Settings', title: 'Settings' },
-            ].map(({ action, icon: Icon, label, title }) => (
+            {footerTools.map(({ action, icon: Icon, label, title }) => (
               <button
                 key={label}
                 onClick={() => action()}
@@ -742,24 +493,179 @@ export function Sidebar() {
           </div>
         </>
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col overflow-y-auto scrollbar-premium pb-2">
-          {renderedSectionIds.map((sectionId) => (
-            <SidebarSectionShell
-              key={sectionId}
-              sectionId={sectionId}
-              label={SIDEBAR_SECTION_META[sectionId]?.label || sectionId}
-              customizing={sidebarCustomizing}
-              isDropTarget={dragOverSectionId === sectionId}
-              accentColor={accentColor}
-              onHide={() => setSidebarSectionVisibility(sectionId, false)}
-              onDragStart={handleSectionDragStart(sectionId)}
-              onDragOver={handleSectionDragOver(sectionId)}
-              onDragEnd={handleSectionDragEnd}
-              onDrop={handleSectionDrop(sectionId)}
-            >
-              {renderSectionContent(sectionId)}
-            </SidebarSectionShell>
-          ))}
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <div className="min-h-0 flex-1 overflow-y-auto scrollbar-premium px-3 pb-3">
+            <section className="pb-3">
+              <SectionTitle
+                action={(
+                  <button
+                    type="button"
+                    onClick={handleCreateProject}
+                    className="flex h-6 w-6 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-white/[0.05] hover:text-text-primary"
+                    title="Create project or scope"
+                  >
+                    <Plus size={13} />
+                  </button>
+                )}
+              >
+                Working In
+              </SectionTitle>
+              <label className="flex h-9 w-full items-center gap-2 rounded-lg bg-white/[0.025] px-2 text-[12px] text-text-muted ring-1 ring-white/[0.06] transition-colors focus-within:ring-white/15">
+                <FolderKanban size={13} className="shrink-0" />
+                <select
+                  value={activeProjectId || ''}
+                  onChange={(event) => handleProjectChange(event.target.value)}
+                  className="w-full bg-transparent text-text-primary outline-none"
+                >
+                  <option value="">No project scope</option>
+                  {(projects || []).map((project) => (
+                    <option key={project.id} value={project.id}>{project.name}</option>
+                  ))}
+                </select>
+              </label>
+            </section>
+
+            <section className="pb-3">
+              <SectionTitle>Primary Actions</SectionTitle>
+              <button
+                type="button"
+                onClick={handleNewChat}
+                className="mb-1.5 flex h-9 w-full items-center justify-center gap-2 rounded-lg text-[12px] font-semibold text-white transition-opacity hover:opacity-95"
+                style={{ background: accentColor }}
+              >
+                <Plus size={14} />
+                New Chat
+              </button>
+              <label className="flex h-9 w-full items-center gap-2 rounded-lg bg-white/[0.025] px-2.5 text-[12px] text-text-muted ring-1 ring-white/[0.06] transition-colors focus-within:ring-white/15">
+                <Command size={13} className="shrink-0" />
+                <input
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  placeholder="Search or command..."
+                  className="min-w-0 flex-1 bg-transparent text-text-primary outline-none placeholder:text-text-muted/65"
+                />
+              </label>
+            </section>
+
+            <section className="pb-3">
+              <SectionTitle>Spaces</SectionTitle>
+              <div className="space-y-0.5">
+                {workspaceTabs.map((ws) => {
+                  const Icon = ICONS[ws.icon] || FALLBACK_ICON;
+                  return (
+                    <NavRow
+                      key={ws.id}
+                      icon={Icon}
+                      label={ws.id === 'nsfw' ? 'Vault' : ws.name}
+                      active={currentWorkspace === ws.id}
+                      accentColor={accentColor}
+                      onClick={() => setWorkspace(ws.id)}
+                    />
+                  );
+                })}
+              </div>
+            </section>
+
+            <section className="pb-3">
+              <SectionTitle>Smart Views</SectionTitle>
+              <div className="space-y-0.5">
+                {smartViews.map((view) => (
+                  <NavRow
+                    key={view.id}
+                    icon={view.icon}
+                    label={view.label}
+                    count={view.count}
+                    active={activeFilter === view.id && !activeFolderId}
+                    accentColor={accentColor}
+                    onClick={() => handleSmartView(view.id)}
+                  />
+                ))}
+              </div>
+            </section>
+
+            <section className="pb-3">
+              <SectionTitle>Recent Chats</SectionTitle>
+              <div className="space-y-0.5">
+                {recentConversations.length > 0 ? (
+                  recentConversations.map((conv) => (
+                    <RecentConversationRow
+                      key={conv.id}
+                      conv={conv}
+                      isActive={currentConversationId === conv.id}
+                      accentColor={accentColor}
+                      maskPrivateMeta={maskPrivateMeta}
+                      onSelect={selectConversation}
+                    />
+                  ))
+                ) : (
+                  <div className="rounded-lg px-2 py-3 text-[11px] text-text-muted">
+                    No recent chats yet.
+                  </div>
+                )}
+              </div>
+            </section>
+
+            <section className="pb-2">
+              <SectionTitle
+                action={(
+                  <button
+                    type="button"
+                    onClick={handleCreateFolder}
+                    className="flex h-6 items-center gap-1 rounded-md px-1.5 text-[10px] text-text-muted transition-colors hover:bg-white/[0.05] hover:text-text-primary"
+                    title="Create folder"
+                  >
+                    <FolderPlus size={12} />
+                    New
+                  </button>
+                )}
+              >
+                Folders
+              </SectionTitle>
+              <div className="space-y-0.5">
+                {(folders || []).length > 0 ? (
+                  folders.map((folder) => (
+                    <NavRow
+                      key={folder.id}
+                      icon={Folder}
+                      label={folder.name}
+                      count={folderCounts[folder.id] || 0}
+                      active={activeFolderId === folder.id}
+                      accentColor={folder.color || accentColor}
+                      onClick={() => setActiveFolder?.(folder.id)}
+                    />
+                  ))
+                ) : (
+                  <button
+                    type="button"
+                    onClick={handleCreateFolder}
+                    className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-[12px] text-text-muted transition-colors hover:bg-white/[0.035] hover:text-text-secondary"
+                  >
+                    <FolderPlus size={13} />
+                    Create folder
+                  </button>
+                )}
+              </div>
+            </section>
+          </div>
+
+          <div className="shrink-0 border-t border-white/[0.06] p-2">
+            <div className="mb-1 grid grid-cols-5 gap-1">
+              <PowerModeToggle compact />
+              {footerTools.map(({ action, icon: Icon, label, title }) => (
+                <button
+                  key={label}
+                  type="button"
+                  onClick={() => action()}
+                  className="flex h-7 items-center justify-center rounded-md text-text-muted/80 transition-colors hover:bg-white/[0.05] hover:text-text-primary"
+                  title={title}
+                >
+                  <Icon size={13} />
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <SystemFooter />
         </div>
       )}
 
