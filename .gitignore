@@ -51,6 +51,7 @@ npu-models/
 
 # Backups and archives
 *.tar.gz
+*.tar.xz
 *.tgz
 *_backup_*
 
@@ -61,3 +62,9 @@ npu-models/
 
 # Misc
 *.log
+
+# Embedded Node toolchain
+.tooling/
+
+# Stray binary-garbage filenames
+\001*
