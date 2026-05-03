@@ -1,3 +1,5 @@
+import modelOptimizer from '../services/modelOptimizer';
+
 /**
  * Core model resolver boundary.
  *
@@ -8,8 +10,6 @@
 
 export {
   MODEL_FAMILIES,
-  QUANTIZATION_PROFILES,
-  SIZE_PROFILES,
   buildOptimizedOllamaOptions,
   buildOptimizedOllamaOptionsWithInfo,
   describeSettings,
@@ -18,3 +18,6 @@ export {
   isThinkingModel,
   parseModelName,
 } from '../services/modelOptimizer';
+
+export const QUANTIZATION_PROFILES = modelOptimizer.QUANTIZATION_PROFILES;
+export const SIZE_PROFILES = modelOptimizer.SIZE_PROFILES;
