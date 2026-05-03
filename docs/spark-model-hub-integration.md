@@ -2,7 +2,7 @@
 
 ## What this module is
 
-This is a feature-rich drop-in module for DevForge that turns your DGX Spark into a manageable local AI headquarters.
+This began as a feature-rich drop-in module and is now integrated into DevForge as the Spark Model Hub surface. It turns a DGX Spark / NVIDIA Spark-style host into a manageable local AI headquarters.
 
 It does **not** replace Cursor, Continue, Ollama, Open WebUI, or LM Studio. It controls and explains them.
 
@@ -42,103 +42,22 @@ electron/ipc/spark-model-hub-handlers.js
 src/components/ModelHub/SparkModelHubPanel.jsx
     Feature-rich React panel for the dashboard.
 
+src/core/sparkAdapter.js
+    Renderer-side Spark IPC and MoE candidate helpers used by the panel.
+
+electron/services/spark-adapter.js
+    Main-process Spark profile/backend adapter used by the inference orchestrator.
+
 scripts/spark-model-hub-smoke.js
     Simple CLI smoke test.
-
-patches/preload-additions.js
-    Methods to add to `electron/preload.js`.
-
-patches/ipc-index-additions.js
-    Wiring to add to `electron/ipc/index.js`.
-
-patches/app-wiring-example.jsx
-    Quick example for rendering the panel.
 ```
 
-## Install into your DevForge project
+## Current wiring
 
-From your DevForge root:
-
-```bash
-cp -a /path/to/dropin/electron/services/spark-model-hub-service.js electron/services/
-cp -a /path/to/dropin/electron/ipc/spark-model-hub-handlers.js electron/ipc/
-cp -a /path/to/dropin/src/components/ModelHub/SparkModelHubPanel.jsx src/components/ModelHub/
-cp -a /path/to/dropin/scripts/spark-model-hub-smoke.js scripts/
-```
-
-Then edit three existing files.
-
----
-
-## 1. Wire IPC handlers
-
-Open:
-
-```text
-electron/ipc/index.js
-```
-
-Add this near the other imports:
-
-```js
-const { setupSparkModelHubHandlers } = require('./spark-model-hub-handlers');
-```
-
-Inside `setupModularHandlers(...)`, add:
-
-```js
-setupSparkModelHubHandlers(ipcMain, mainWindow, store);
-```
-
-If your build path uses `electron/ipc-handlers.js` instead of the modular index, register it there in the same style.
-
----
-
-## 2. Expose methods in preload
-
-Open:
-
-```text
-electron/preload.js
-```
-
-Inside the object passed to `contextBridge.exposeInMainWorld('electronAPI', { ... })`, paste the contents of:
-
-```text
-patches/preload-additions.js
-```
-
-Be careful with commas. This is the only fussy part.
-
----
-
-## 3. Render the UI
-
-Simplest temporary test:
-
-Open:
-
-```text
-src/App.jsx
-```
-
-Add lazy import:
-
-```js
-const SparkModelHubPanel = lazy(() => import('./components/ModelHub/SparkModelHubPanel').then(m => ({ default: m.SparkModelHubPanel || m.default })));
-```
-
-Then, where the existing `showModelHub` overlay renders, temporarily render:
-
-```jsx
-{showModelHub && (
-  <Suspense fallback={<LoadingFallback />}>
-    <SparkModelHubPanel onClose={toggleModelHub} />
-  </Suspense>
-)}
-```
-
-Better long-term path: put `SparkModelHubPanel` as a tab inside the existing `src/components/ModelHub/ModelHubPanel.jsx`.
+- IPC handlers are registered through `electron/ipc/spark-model-hub-handlers.js` and `electron/ipc/index.js`.
+- Preload methods are exposed from `electron/preload.js`.
+- The React panel is rendered from the existing Model Hub flow, not copied in at runtime.
+- Spark-specific routing in `inference-orchestrator.js` is isolated behind `electron/services/spark-adapter.js`.
 
 ---
 

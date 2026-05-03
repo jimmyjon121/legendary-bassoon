@@ -32,10 +32,21 @@ DevForge is a local-first AI workstation built with Electron, React, and SQLite.
 
 ### 4. React Frontend (`src/`)
 
+- **Core Boundary**: `src/core/` holds renderer-side business logic façades and shared contracts:
+  - `chatEngine.js` re-exports Chat V2 orchestration behind a stable import path.
+  - `modelResolver.js` centralizes model family/default resolver imports.
+  - `modelCatalogService.js` owns model catalog source fetching and dedupe.
+  - `sparkAdapter.js` owns renderer Spark Model Hub IPC and MoE-name helpers.
 - **State Management**: Zustand store (`src/stores/appStore.js`)
 - **Components**: React components for UI
 - **Styling**: Tailwind CSS with custom workspace themes
 - **Routing**: Single-page app with workspace switching
+
+### 5. Electron Service Adapters (`electron/services/`)
+
+- **Inference Orchestration**: `inference-orchestrator.js` remains the main routing coordinator.
+- **Spark Adapter**: `spark-adapter.js` isolates Spark profile detection, llama.cpp Spark backend registration, and Spark MoE backend selection.
+- **Model Hub Services**: `spark-model-hub-service.js` owns Spark dashboard data, model fit estimates, Ollama operations, LM Studio scans, and Continue config updates.
 
 ## Data Flow
 
@@ -50,11 +61,11 @@ DevForge is a local-first AI workstation built with Electron, React, and SQLite.
 7. UI updates incrementally through engine subscriptions
 8. Final assistant turn is committed to SQLite-backed conversation history
 
-### Encryption Flow (NSFW Workspace)
+### Encryption Flow (Vault Workspace)
 
 1. User sets password via `nsfw:setPassword` IPC
 2. Password hashed with scrypt plus random salt
-3. Hash stored in `nsfw_auth` table
+3. Hash stored in `nsfw_auth` table. The persisted workspace id remains `nsfw` for compatibility, while UI and code helpers refer to the workspace as Vault.
 4. When sending message:
    - Content encrypted with password-derived key
    - Encrypted data stored in `messages.content`
@@ -100,7 +111,7 @@ DevForge is a local-first AI workstation built with Electron, React, and SQLite.
 
 1. **Context Isolation**: Renderer cannot access Node.js directly
 2. **Sandbox**: Renderer runs in sandboxed environment
-3. **Encryption**: NSFW workspace uses AES-256-GCM
+3. **Encryption**: Vault workspace uses AES-256-GCM
 4. **Password Storage**: Only hashes stored, never plaintext
 5. **Local-Only**: No external network calls (except user-configured backends)
 

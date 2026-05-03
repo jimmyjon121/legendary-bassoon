@@ -34,12 +34,20 @@ It is designed to be the "Forever Brain" that you own, independent of any compan
 **Quick Onboarding for AI Agents:**
 
 ### 🗺️ Codebase Map
-- **Core Logic:** `electron/services/`
+- **Renderer Core:** `src/core/`
+  - `chatEngine.js`: Stable import boundary for Chat V2 orchestration.
+  - `modelResolver.js`: Model family/default resolver façade.
+  - `modelCatalogService.js`: Shared model catalog source loading and dedupe.
+  - `sparkAdapter.js`: Renderer-side Spark Model Hub IPC and MoE helpers.
+- **Electron Services:** `electron/services/`
   - `inference-orchestrator.js`: The "Cortex". Routes prompts to the best backend (Ollama/CUDA, OpenVINO/NPU) based on load and capability.
+  - `spark-adapter.js`: Spark profile/backend/MoE routing adapter for the main process.
   - `research/`: Autonomous web research agents (browser automation, content extraction).
   - `intent-compiler/`: Natural language to system action translation.
 - **Frontend:** `src/`
   - `chat-v2/ui/`: Main chat interface and session surface.
+  - `components/Settings/`: Settings UI, including extracted `NPUModelConverter.jsx` and `SparkSettings.jsx`.
+  - `components/ModelHub/`: Model Hub UI, including shared `ModelCard.jsx` and `ModelFitIndicator.jsx`.
   - `stores/`: Zustand state management for workspace, messages, and settings.
 - **Evaluation:** `scripts/`
   - `casual-eval.js`: Quick sanity check for chat capabilities.

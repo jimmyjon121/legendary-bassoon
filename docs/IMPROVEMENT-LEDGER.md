@@ -22,6 +22,21 @@ Use this file as the current source of truth for completed work, active risks, a
 
 ## Completed Tracks
 
+### Core-First Cleanup
+
+- Renderer business logic now has a small `src/core/` boundary:
+  - `src/core/chatEngine.js`
+  - `src/core/modelResolver.js`
+  - `src/core/modelCatalogService.js`
+  - `src/core/sparkAdapter.js`
+  - `src/core/types.js`
+- Vault workspace checks now route through shared helpers while preserving the persisted `nsfw` workspace id for compatibility.
+- Model catalog source fetching and dedupe moved out of the Zustand slice and into `src/core/modelCatalogService.js`.
+- Large UI surfaces were split incrementally:
+  - Settings: `NPUModelConverter.jsx`, `SparkSettings.jsx`
+  - Model Hub: `ModelCard.jsx`, `ModelFitIndicator.jsx`
+- Spark orchestration logic moved behind `electron/services/spark-adapter.js`.
+
 ### Security and IPC Guardrails
 
 - DOMPurify is installed and used for markdown/HTML rendering paths.
@@ -47,12 +62,14 @@ Use this file as the current source of truth for completed work, active risks, a
   - `electron/services/spark-memory-estimator.js`
   - `electron/services/families/spark-moe-profiles.js`
 - Spark-specific llama.cpp backend support exists at `electron/services/backends/llamacpp-spark-backend.js`.
+- Spark inference routing adapter exists at `electron/services/spark-adapter.js`.
 - Spark user guide lives at `docs/spark-linux-profile.md`.
 
 ### Spark Model Hub
 
 - Spark Model Hub service exists at `electron/services/spark-model-hub-service.js`.
 - Spark Model Hub panel exists at `src/components/ModelHub/SparkModelHubPanel.jsx`.
+- Renderer Spark helpers exist at `src/core/sparkAdapter.js`.
 - Spark Model Hub IPC/preload surface is wired.
 - Smoke test exists at `scripts/spark-model-hub-smoke.js`.
 - Original drop-in rationale is preserved at `docs/spark-model-hub-integration.md`.
@@ -96,11 +113,8 @@ Spec-decode correctness is wired and opt-in, but speedup gates remain open for p
 ## Recommended Next Work
 
 1. Finish the `electron/ipc-handlers.js` to `electron/ipc/*.js` migration in small domain commits.
-2. Reduce lint warnings in recently active surfaces first: `SettingsModal.jsx`, `ModelHubPanel.jsx`, `Sidebar.jsx`, and Spark-specific components.
-3. Split large UI files only when actively changing them:
-   - `src/components/Settings/SettingsModal.jsx`
-   - `src/components/ModelHub/ModelHubPanel.jsx`
-   - `src/components/Sidebar/Sidebar.jsx`
+2. Continue reducing lint warnings in recently active surfaces first: `SettingsModal.jsx`, `ModelHubPanel.jsx`, `Sidebar.jsx`, and Spark-specific components.
+3. Continue splitting large UI files only when actively changing them, with `Sidebar.jsx` as the next best candidate.
 4. Organize smoke/eval scripts into subdirectories and update `package.json` scripts.
 5. Do a separate platform packaging cleanup for Windows vs Linux artifacts and docs.
 
