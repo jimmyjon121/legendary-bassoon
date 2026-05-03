@@ -1172,11 +1172,6 @@ function NPUModelConverter() {
     return () => { cancelled = true; };
   }, []);
 
-  // Intel/OpenVINO NPU path — not offered on NVIDIA DGX Spark.
-  if (probeSparkHost || llmRuntimeSpark) {
-    return null;
-  }
-
   const [modelInput, setModelInput] = React.useState('');
   const [busy, setBusy] = React.useState(false);
   const [actionResult, setActionResult] = React.useState(null);
@@ -1277,6 +1272,11 @@ function NPUModelConverter() {
       return () => clearInterval(timerRef.current);
     }
   }, [busy]);
+
+  // Intel/OpenVINO NPU path is not offered on NVIDIA DGX Spark.
+  if (probeSparkHost || llmRuntimeSpark) {
+    return null;
+  }
 
   // Load a pre-converted OpenVINO model — configure the path then hot-load or restart
   const loadPreConverted = async (modelId) => {
