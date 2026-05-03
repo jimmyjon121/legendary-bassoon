@@ -21,6 +21,7 @@ const { setupModelHandlers } = require('./model-handlers');
 const { setupImageHandlers } = require('./image-handlers');
 const { setupCodeToolsHandlers } = require('./code-tools-handlers');
 const { setupWebSearchHandlers } = require('./web-search-handlers');
+const { setupSparkModelHubHandlers } = require('./spark-model-hub-handlers');
 
 /**
  * Setup all modular IPC handlers
@@ -52,6 +53,9 @@ function setupModularHandlers(ipcMain, mainWindow, store, db) {
   
   // Web search handlers (DuckDuckGo search for AI)
   setupWebSearchHandlers(ipcMain);
+
+  // Spark Model Hub handlers (local AI runtime command center)
+  setupSparkModelHubHandlers(ipcMain, mainWindow, store);
   
   console.log('[IPC] Modular handlers setup complete');
 }

@@ -71,14 +71,58 @@ contextBridge.exposeInMainWorld('electronAPI', {
   },
   getModels: () => ipcRenderer.invoke('llm:models'),
   loadModel: (modelPath) => ipcRenderer.invoke('llm:load', modelPath),
-  unloadModel: () => ipcRenderer.invoke('llm:unload'),
+  unloadModel: (modelName) => ipcRenderer.invoke('llm:unload', modelName),
   checkLLMHealth: () => ipcRenderer.invoke('llm:health'),
   warmupModel: (modelName) => ipcRenderer.invoke('llm:warmup', modelName),
+  // Detailed warmup with progress events. Returns a small handle so the
+  // renderer can subscribe to progress updates and resolve when done.
+  warmupModelWithProgress: (modelName, onProgress) => {
+    const channel = `llm:warmupProgress:${makeStreamChannelId().split(':').pop()}`;
+    const handler = (_, chunk) => {
+      try { onProgress?.(chunk); } catch (_) { /* renderer detached */ }
+    };
+    ipcRenderer.on(channel, handler);
+    const finalize = () => ipcRenderer.removeListener(channel, handler);
+    const resultPromise = ipcRenderer
+      .invoke('llm:warmupWithProgress', { model: modelName, channel })
+      .finally(finalize);
+    return {
+      channel,
+      promise: resultPromise,
+      unsubscribe: finalize,
+    };
+  },
   getModelInfo: (modelName) => ipcRenderer.invoke('llm:modelInfo', modelName),
   getRunningModels: () => ipcRenderer.invoke('llm:running'),
   getLlmRuntimeState: () => ipcRenderer.invoke('llm:getRuntimeState'),
+  sparkProbe: (options = {}) => ipcRenderer.invoke('llm:sparkProbe', options),
   runLlmBenchmark: (payload) => ipcRenderer.invoke('llm:benchmark', payload),
   embedTexts: (payload) => ipcRenderer.invoke('llm:embed', payload),
+
+  // Spark Model Hub - fixed runtime-control IPC surface
+  sparkModelHubDashboard: () => ipcRenderer.invoke('sparkModelHub:dashboard'),
+  sparkModelHubStatus: () => ipcRenderer.invoke('sparkModelHub:status'),
+  sparkModelHubOllamaHealth: () => ipcRenderer.invoke('sparkModelHub:ollamaHealth'),
+  sparkModelHubOllamaModels: () => ipcRenderer.invoke('sparkModelHub:ollamaModels'),
+  sparkModelHubLoadedModels: () => ipcRenderer.invoke('sparkModelHub:loadedModels'),
+  sparkModelHubScanLmStudio: () => ipcRenderer.invoke('sparkModelHub:scanLmStudio'),
+  sparkModelHubRecommendations: () => ipcRenderer.invoke('sparkModelHub:recommendations'),
+  sparkModelHubJobs: () => ipcRenderer.invoke('sparkModelHub:jobs'),
+  sparkModelHubOpenWebUiStatus: () => ipcRenderer.invoke('sparkModelHub:openWebUiStatus'),
+  sparkModelHubPullModel: (modelName) => ipcRenderer.invoke('sparkModelHub:pullModel', modelName),
+  sparkModelHubRunModel: (modelName) => ipcRenderer.invoke('sparkModelHub:runModel', modelName),
+  sparkModelHubStopModel: (modelName) => ipcRenderer.invoke('sparkModelHub:stopModel', modelName),
+  sparkModelHubDeleteModel: (modelName) => ipcRenderer.invoke('sparkModelHub:deleteModel', modelName),
+  sparkModelHubRestartOllama: () => ipcRenderer.invoke('sparkModelHub:restartOllama'),
+  sparkModelHubImportGgufToOllama: (payload) => ipcRenderer.invoke('sparkModelHub:importGgufToOllama', payload || {}),
+  sparkModelHubRegisterLocalGguf: (payload) => ipcRenderer.invoke('sparkModelHub:registerLocalGguf', payload || {}),
+  sparkModelHubSetContinueModel: (payload) => ipcRenderer.invoke('sparkModelHub:setContinueModel', payload || {}),
+  sparkModelHubGetContinueConfigStatus: () => ipcRenderer.invoke('sparkModelHub:getContinueConfigStatus'),
+  onSparkModelHubJob: (callback) => {
+    const handler = (_, job) => callback(job);
+    ipcRenderer.on('sparkModelHub:job', handler);
+    return () => ipcRenderer.removeListener('sparkModelHub:job', handler);
+  },
   
   // Image Generation (raw ComfyUI passthrough - prefer imageAuto:* or generateImage for full service)
   imageRawGenerate: (payload) => ipcRenderer.invoke('image:generate', payload),
