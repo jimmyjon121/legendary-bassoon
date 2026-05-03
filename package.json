@@ -11,6 +11,7 @@
     "preapp": "node scripts/ensure-deps.js",
     "app:prepare": "node scripts/build-if-needed.js",
     "app": "npm run app:prepare && node scripts/launch-electron.js",
+    "app:spark": "bash ./run-devforge-spark.sh",
     "predev": "node scripts/ensure-deps.js",
     "dev": "concurrently \"npm run dev:vite\" \"npm run dev:electron\"",
     "dev:vite": "vite",

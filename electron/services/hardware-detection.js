@@ -15,6 +15,7 @@ try {
 
 const { exec } = require('child_process');
 const os = require('os');
+const { detectSparkProfile, readMemInfo } = require('./spark-profile');
 
 // Cache for hardware info (doesn't change during runtime)
 let cachedHardware = null;
@@ -356,10 +357,90 @@ let lastOllamaStatsUpdate = 0;
 let cachedNvidiaSmi = null;
 let lastNvidiaSmiUpdate = 0;
 
+/** NVIDIA reports memory values in MiB for our query schema. */
+const MIN_VRAM_TOTAL_MIB_SANE = 1024;
+
+function clampPercent(raw) {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 0;
+  return Math.min(100, Math.max(0, Math.round(n)));
+}
+
+/** Parse CSV noheader:nounits for the first GPU line only — never flatten multiline stdout. */
+function parseNvidiaSmiGpuLine(stdout) {
+  const line = String(stdout || '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean)[0];
+  if (!line) return null;
+  const parts = line.split(',').map((segment) => parseFloat(String(segment).trim()));
+  if (parts.length < 3 || !parts.slice(0, 3).every((v) => Number.isFinite(v))) {
+    return null;
+  }
+  const utilizationGpu = Math.min(100, Math.max(0, Math.round(parts[0])));
+  const vramUsed = Math.round(Math.max(0, parts[1]));
+  const vramTotal = Math.round(Math.max(0, parts[2]));
+  const temperature = parts.length >= 4 && Number.isFinite(parts[3]) ? Math.round(parts[3]) : null;
+  let vramPercent = vramTotal > 0 ? clampPercent((vramUsed / vramTotal) * 100) : 0;
+
+  /* Guard: multi-GPU / CSV merge bugs occasionally yield absurd ratios */
+  if (vramPercent > 100 || (vramTotal > 0 && vramUsed > vramTotal * 1.3)) {
+    vramPercent = vramTotal > 0 ? 100 : 0;
+  }
+
+  return { utilizationGpu, vramUsed, vramTotal, temperature, vramPercent };
+}
+
 /**
- * Query nvidia-smi directly for real GPU utilization and VRAM.
- * systeminformation's si.graphics() returns 0 for NVIDIA on Windows,
- * so nvidia-smi is the only reliable source.
+ * Prefer Ollama model footprint when `memory.used` stays at 0 despite a loaded model,
+ * or when `memory.total` from the stack is plainly wrong vs unified-memory hosts.
+ */
+function alignPrimaryGpuTelemetry(gpu0, ollamaStats, sparkProfile) {
+  if (!gpu0 || typeof gpu0 !== 'object') return;
+
+  let used = Math.round(Number(gpu0.vramUsed || 0));
+  let total = Math.round(Number(gpu0.vramTotal || 0));
+  const ollamaMiB = Number(ollamaStats?.totalVramMB);
+  const ollamaOk = Number.isFinite(ollamaMiB) && ollamaMiB > 0;
+
+  gpu0.utilizationGpu = clampPercent(Number(gpu0.utilizationGpu || 0));
+
+  /* Model VRAM footprint is authoritative when driver-reported usage is missing or stale */
+  if (ollamaOk && (used === 0 || used < ollamaMiB * 0.85)) {
+    used = Math.max(used, Math.round(ollamaMiB));
+  }
+
+  const totalTinyVsUsed = total > 0 && used > 0 && total < MIN_VRAM_TOTAL_MIB_SANE && used > total;
+  const unifiedDenominatorGiB = Number(sparkProfile?.memTotalGiB || sparkProfile?.unifiedMemoryGiB || 0);
+  const unifiedOk = sparkProfile?.isSpark && unifiedDenominatorGiB > 16;
+  /* Treat implausible totals like "124 MiB" on a workstation as corrupt */
+  if (totalTinyVsUsed || totalLooksCorruptVersusFootprint(total, used, unifiedOk)) {
+    if (unifiedOk) {
+      total = Math.round(unifiedDenominatorGiB * 1024);
+    } else if (used > 0) {
+      total = Math.max(used * 6, MIN_VRAM_TOTAL_MIB_SANE * 4);
+    }
+  }
+
+  gpu0.vramUsed = Math.max(0, used);
+  gpu0.vramTotal = Math.max(0, total);
+  gpu0.vramPercent = total > 0 ? clampPercent((used / total) * 100) : 0;
+  gpu0.utilizationMemory = gpu0.vramPercent;
+
+  if (ollamaOk) {
+    gpu0.ollamaVramUsed = Math.round(ollamaMiB);
+    gpu0.ollamaModels = ollamaStats.models;
+  }
+}
+
+function totalLooksCorruptVersusFootprint(total, used, isSparkUnified) {
+  if (total <= 0 || used <= 0) return false;
+  if (used > total * 2) return true;
+  if (isSparkUnified && total < MIN_VRAM_TOTAL_MIB_SANE && used > MIN_VRAM_TOTAL_MIB_SANE) return true;
+  return false;
+}
+
+/**
+ * Query nvidia-smi directly for real GPU utilization and memory. On Spark
+ * Linux, systeminformation cannot see the unified memory pool correctly, so
+ * nvidia-smi is the reliable path there too.
  */
 async function getNvidiaSmiStats() {
   const now = Date.now();
@@ -368,36 +449,31 @@ async function getNvidiaSmiStats() {
   }
 
   return new Promise((resolve) => {
-    if (process.platform !== 'win32') {
-      resolve(null);
-      return;
-    }
-    exec(
+    const cmds = [
+      'nvidia-smi -i 0 --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits',
       'nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu --format=csv,noheader,nounits',
-      { timeout: 3000 },
-      (error, stdout) => {
+    ];
+    const run = (index) => {
+      if (index >= cmds.length) {
+        resolve(cachedNvidiaSmi || null);
+        return;
+      }
+      exec(cmds[index], { timeout: 3500 }, (error, stdout) => {
         if (error || !stdout?.trim()) {
-          resolve(cachedNvidiaSmi || null);
+          run(index + 1);
           return;
         }
-        try {
-          const parts = stdout.trim().split(',').map(s => parseFloat(s.trim()));
-          if (parts.length >= 3 && parts.every(v => Number.isFinite(v))) {
-            cachedNvidiaSmi = {
-              utilizationGpu: Math.round(parts[0]),
-              vramUsed: Math.round(parts[1]),
-              vramTotal: Math.round(parts[2]),
-              temperature: parts.length >= 4 ? Math.round(parts[3]) : null,
-              vramPercent: parts[2] > 0 ? Math.round((parts[1] / parts[2]) * 100) : 0,
-            };
-            lastNvidiaSmiUpdate = now;
-          }
-          resolve(cachedNvidiaSmi);
-        } catch {
-          resolve(cachedNvidiaSmi || null);
+        const parsed = parseNvidiaSmiGpuLine(stdout);
+        if (parsed) {
+          cachedNvidiaSmi = parsed;
+          lastNvidiaSmiUpdate = Date.now();
+          resolve(parsed);
+          return;
         }
-      }
-    );
+        run(index + 1);
+      });
+    };
+    run(0);
   });
 }
 
@@ -493,9 +569,11 @@ async function getHardwareStats() {
   // SIMPLIFIED: Use Node.js os module directly for faster, more reliable stats
   try {
     const cpus = os.cpus();
-    const totalMem = os.totalmem();
-    const freeMem = os.freemem();
-    const usedMem = totalMem - freeMem;
+    const memInfo = readMemInfo();
+    const totalMem = memInfo.totalBytes || os.totalmem();
+    const freeMem = memInfo.availableBytes || os.freemem();
+    const usedMem = Math.max(0, totalMem - freeMem);
+    const sparkProfile = await detectSparkProfile().catch(() => null);
     
     // Calculate CPU usage by comparing with previous measurement
     let cpuUsage = 0;
@@ -569,7 +647,7 @@ async function getHardwareStats() {
             temperature: gpu.temperatureGpu || null,
             vramUsed: Math.round(gpu.memoryUsed || 0),
             vramTotal: Math.round(gpu.vram || cachedHardware.gpus[i]?.vram || 0),
-            vramPercent: gpu.vram ? Math.round((gpu.memoryUsed || 0) / gpu.vram * 100) : 0
+            vramPercent: gpu.vram ? clampPercent(((gpu.memoryUsed || 0) / gpu.vram) * 100) : 0
           }));
         } catch {
           gpuData = cachedHardware.gpus.map(gpu => ({
@@ -683,18 +761,8 @@ async function getHardwareStats() {
       // Non-fatal
     }
     
-    // Merge Ollama VRAM usage into GPU data
-    if (ollamaStats && ollamaStats.totalVramMB > 0 && gpuData.length > 0) {
-      // Add Ollama's VRAM usage to the first GPU (usually where models load)
-      gpuData[0].ollamaVramUsed = ollamaStats.totalVramMB;
-      gpuData[0].ollamaModels = ollamaStats.models;
-      // If systeminformation didn't detect VRAM usage, use Ollama's data
-      if (gpuData[0].vramUsed === 0) {
-        gpuData[0].vramUsed = ollamaStats.totalVramMB;
-        if (gpuData[0].vramTotal > 0) {
-          gpuData[0].vramPercent = Math.round((ollamaStats.totalVramMB / gpuData[0].vramTotal) * 100);
-        }
-      }
+    if (gpuData.length > 0) {
+      alignPrimaryGpuTelemetry(gpuData[0], ollamaStats || null, sparkProfile || null);
     }
 
     cachedStats = {
@@ -709,6 +777,16 @@ async function getHardwareStats() {
         available: Math.round(freeMem / (1024 * 1024 * 1024)),
         usagePercent: Math.round((usedMem / totalMem) * 100)
       },
+      unifiedMemory: sparkProfile?.isSpark ? {
+        totalGiB: sparkProfile.memTotalGiB,
+        availableGiB: sparkProfile.memAvailableGiB,
+        usedGiB: Math.max(0, sparkProfile.memTotalGiB - sparkProfile.memAvailableGiB),
+        usagePercent: sparkProfile.memTotalGiB > 0
+          ? Math.round(((sparkProfile.memTotalGiB - sparkProfile.memAvailableGiB) / sparkProfile.memTotalGiB) * 100)
+          : 0,
+        gpuName: sparkProfile.gpuName,
+      } : null,
+      spark: sparkProfile,
       gpus: gpuData,
       npu: npuStatus,
       ollama: ollamaStats, // Include Ollama stats for UI display

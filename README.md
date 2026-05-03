@@ -49,6 +49,7 @@ It is designed to be the "Forever Brain" that you own, independent of any compan
 ### ⚡ Key Commands
 ```bash
 npm run dev          # Start the full stack (Electron + Vite)
+npm run app:spark    # Start the NVIDIA Spark Linux profile
 npm run eval:casual  # Run basic chat evaluation
 npm run eval:coding  # Run coding capability tests
 npm run build:win    # Build Windows installer
@@ -147,6 +148,18 @@ ollama pull mixtral         # 26GB - Powerful, needs good GPU
 npm run dev
 ```
 
+### NVIDIA Spark Linux
+
+On NVIDIA Spark Linux, use the dedicated launch profile:
+
+```bash
+./run-devforge-spark.sh
+# or
+npm run app:spark
+```
+
+This profile uses the repo-local Node runtime when available, applies Spark-friendly Electron/Ollama defaults, and keeps experimental Mosaic/spec-decode paths opt-in. macOS and Windows remain on the standard `npm run app`, `npm run dev`, `npm run build:mac`, and `npm run build:win` commands.
+
 ---
 
 ## Hardware Recommendations
@@ -201,6 +214,7 @@ devforge/
 - [Wireless Brain API Spec](docs/wireless-brain-api-spec.md)
 - [Wireless Brain Auth Model](docs/wireless-brain-auth-model.md)
 - [Wireless Brain Threat Model](docs/wireless-brain-threat-model.md)
+- [NVIDIA Spark Linux Profile](docs/spark-linux-profile.md)
 - [Unified Runtime Tracker](docs/unified-runtime-tracker.md)
 - [Phase 2 Spec Decode Measurement](docs/perf/phase2-spec-decode-measurement.md)
 - [Mosaic Gate 1 Decision](docs/perf/mosaic-gate1.md)

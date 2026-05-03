@@ -92,13 +92,12 @@ class AutoSetup {
         ollamaEnv.CUDA_VISIBLE_DEVICES = '0';
       }
       ollamaEnv.OLLAMA_FLASH_ATTENTION = ollamaEnv.OLLAMA_FLASH_ATTENTION || '1';
-      // Keep models resident by default (LM Studio-style). The inference
-      // orchestrator sets a profile-aware per-request keep_alive that
-      // overrides this env value; the env default only matters for
-      // requests that bypass the orchestrator.
-      ollamaEnv.OLLAMA_KEEP_ALIVE = ollamaEnv.OLLAMA_KEEP_ALIVE || '24h';
-      ollamaEnv.OLLAMA_NUM_PARALLEL = ollamaEnv.OLLAMA_NUM_PARALLEL || '1';
-      ollamaEnv.OLLAMA_MAX_LOADED_MODELS = ollamaEnv.OLLAMA_MAX_LOADED_MODELS || '1';
+      // Spark unified memory is safer with one resident model and short
+      // keep-alive; per-request policies can still extend this intentionally.
+      ollamaEnv.OLLAMA_KEEP_ALIVE = ollamaEnv.OLLAMA_KEEP_ALIVE || '30m';
+      ollamaEnv.OLLAMA_NUM_PARALLEL = '1';
+      ollamaEnv.OLLAMA_MAX_LOADED_MODELS = '1';
+      ollamaEnv.OLLAMA_KV_CACHE_TYPE = ollamaEnv.OLLAMA_KV_CACHE_TYPE || 'q4_0';
 
       const ollamaProcess = spawn(ollamaPath, ['serve'], {
         detached: true,

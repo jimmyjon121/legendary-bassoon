@@ -374,7 +374,7 @@ const DEFAULT_SETTINGS = {
   autoLockTimeout: 5, // minutes
   
   // Performance
-  performanceProfile: 'balanced', // 'speed' | 'balanced' | 'efficiency' | 'laptop'
+  performanceProfile: 'balanced', // 'speed' | 'balanced' | 'efficiency' | 'laptop' | 'spark'
   preferredBackend: 'ollama-cuda',
   maxConcurrentInferences: 1,
   enableGpuAcceleration: true,
@@ -383,6 +383,9 @@ const DEFAULT_SETTINGS = {
   autoStartOllama: true,
   autoSelectModel: true,
   autoDetectHardware: true,
+  // Default OFF: don't preload the last-used model on launch. Users explicitly
+  // opt in (Settings -> Performance) if they want a warm model at startup.
+  autoWarmupOnLaunch: false,
   
   // Keyboard Shortcuts
   shortcuts: {

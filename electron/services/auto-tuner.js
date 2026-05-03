@@ -9,6 +9,9 @@
 
 const hardwareDetection = require('./hardware-detection');
 const { inspectModel } = require('./model-inspector');
+const { detectSparkProfile } = require('./spark-profile');
+const { resolveSparkMoeProfile } = require('./families/spark-moe-profiles');
+const { inspectMoE } = require('./moe-detector');
 
 let cachedHardware = null;
 
@@ -78,7 +81,13 @@ function recommendBatchSize(estimatedVramBytes, gpuVramMb) {
 }
 
 async function autoTuneModel(modelPath) {
-  const [hardware, modelInfo] = await Promise.all([getHardware(), inspectModel(modelPath)]);
+  const [hardware, modelInfo, sparkProfile] = await Promise.all([
+    getHardware(),
+    inspectModel(modelPath),
+    detectSparkProfile().catch(() => ({ isSpark: false })),
+  ]);
+  const moe = inspectMoE(modelInfo || {}, modelPath);
+  const sparkMoeProfile = sparkProfile?.isSpark ? resolveSparkMoeProfile(modelPath, { level: 'recommended' }) : null;
 
   const notes = [];
   const result = {
@@ -107,11 +116,32 @@ async function autoTuneModel(modelPath) {
     kvCachePrecision: 'fp16',
     flashAttention: true,
     notes,
+    moe,
+    sparkProfile,
+    sparkMoeProfile,
   };
 
   const paramsB = modelInfo.parametersB || 0;
   const estimatedVramBytes = modelInfo.estimatedVramBytes || null;
   const bestGpu = pickBestGpu(hardware.gpus);
+
+  if (sparkProfile?.isSpark) {
+    result.preset = sparkMoeProfile ? 'spark-moe-recommended' : 'spark-dense';
+    result.backend = 'ollama-cuda';
+    result.device = sparkProfile.gpuName || 'NVIDIA Spark unified memory';
+    result.gpuLayers = -1;
+    result.contextLength = sparkMoeProfile?.num_ctx || (moe?.isMoE ? 4096 : 8192);
+    result.batchSize = sparkMoeProfile?.num_batch || (moe?.isMoE ? 64 : 128);
+    result.kvCachePrecision = sparkMoeProfile?.kv_cache_type || (moe?.isMoE ? 'q4_0' : 'q8_0');
+    result.flashAttention = true;
+    result.threads = recommendThreads(hardware.cpu);
+    notes.push(
+      moe?.isMoE
+        ? 'Spark MoE profile selected: conservative context, q4_0 KV, full CUDA offload with one loaded model.'
+        : 'Spark unified-memory profile selected: CUDA first, full offload, guarded batch/context.',
+    );
+    return result;
+  }
 
   // Backend selection -- route to the best accelerator for this model
   if (hardware.npu?.detected && paramsB && paramsB <= 7) {
