@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useAppStore } from '../../stores/appStore';
 import { pollingCoordinator } from '../../services/pollingCoordinator';
-import { ChatV2Engine } from '../engine/chatEngine';
+import { ChatV2Engine } from '../../core/chatEngine';
 import { createMockRuntimeAdapter } from '../runtime/mockRuntimeAdapter';
 import { createElectronRuntimeAdapter } from '../runtime/createElectronRuntimeAdapter';
 import { ChatV2Surface } from './ChatV2Surface';
 import { VaultSafetyBar } from './VaultSafetyBar';
+import { RUNTIME_MODES, WORKSPACE_IDS } from '../../core/types';
 import { buildChatV2InferenceOptions } from '../runtime/buildInferenceOptions';
 import { attachAudioLayer } from '../runtime/audioLayer';
 import { attachHapticBridge } from '../runtime/hapticBridge';
@@ -19,25 +20,25 @@ export function ChatV2Harness({ forceMode = null, title = null }) {
   const syncRef = useRef({ conversationListSignature: '' });
 
   const mode = useMemo(() => {
-    if (forceMode === 'live' || forceMode === 'mock') return forceMode;
-    if (typeof window === 'undefined') return 'live';
+    if (forceMode === RUNTIME_MODES.LIVE || forceMode === RUNTIME_MODES.MOCK) return forceMode;
+    if (typeof window === 'undefined') return RUNTIME_MODES.LIVE;
     const queryMock = new URLSearchParams(window.location.search).get('chatv2mock') === '1';
-    return queryMock ? 'mock' : 'live';
+    return queryMock ? RUNTIME_MODES.MOCK : RUNTIME_MODES.LIVE;
   }, [forceMode]);
 
   const engine = useMemo(() => {
     const storeState = useAppStore.getState();
-    const workspace = storeState.currentWorkspace || 'casual';
-    const runtime = mode === 'live'
+    const workspace = storeState.currentWorkspace || WORKSPACE_IDS.CASUAL;
+    const runtime = mode === RUNTIME_MODES.LIVE
       ? createElectronRuntimeAdapter({
           workspace,
-          getWorkspace: () => useAppStore.getState().currentWorkspace || 'casual',
+          getWorkspace: () => useAppStore.getState().currentWorkspace || WORKSPACE_IDS.CASUAL,
           getPrivatePassword: () => useAppStore.getState().nsfwPassword || null,
           getInferenceOptions: async (request = {}) => {
             const state = useAppStore.getState();
             return buildChatV2InferenceOptions({
               model: request.model || state.currentModel,
-              workspace: request.workspace || state.currentWorkspace || 'casual',
+              workspace: request.workspace || state.currentWorkspace || WORKSPACE_IDS.CASUAL,
               prompt: request.prompt || '',
               controls: request.controls || {},
             });
@@ -47,7 +48,7 @@ export function ChatV2Harness({ forceMode = null, title = null }) {
 
     return new ChatV2Engine(runtime, {
       workspace,
-      model: mode === 'live' ? storeState.currentModel || null : 'chat-v2-mock',
+      model: mode === RUNTIME_MODES.LIVE ? storeState.currentModel || null : 'chat-v2-mock',
     });
   }, [mode]);
 
@@ -69,32 +70,32 @@ export function ChatV2Harness({ forceMode = null, title = null }) {
   }, [engine]);
 
   useEffect(() => {
-    engine.setWorkspace(currentWorkspace || 'casual');
+    engine.setWorkspace(currentWorkspace || WORKSPACE_IDS.CASUAL);
   }, [engine, currentWorkspace]);
 
   useEffect(() => {
-    if (mode !== 'live') return undefined;
-    if (currentWorkspace !== 'nsfw') return undefined;
+    if (mode !== RUNTIME_MODES.LIVE) return undefined;
+    if (currentWorkspace !== WORKSPACE_IDS.VAULT) return undefined;
     const detach = attachAudioLayer(engine, { workspace: currentWorkspace });
     return () => { try { detach?.(); } catch (_) { /* noop */ } };
   }, [engine, mode, currentWorkspace]);
 
   useEffect(() => {
-    if (mode !== 'live') return undefined;
+    if (mode !== RUNTIME_MODES.LIVE) return undefined;
     const detach = attachHapticBridge(engine, {
-      getWorkspace: () => useAppStore.getState().currentWorkspace || 'casual',
+      getWorkspace: () => useAppStore.getState().currentWorkspace || WORKSPACE_IDS.CASUAL,
     });
     return () => { try { detach?.(); } catch (_) { /* noop */ } };
   }, [engine, mode]);
 
   useEffect(() => {
-    if (mode === 'live') {
+    if (mode === RUNTIME_MODES.LIVE) {
       engine.setModel(currentModel || null);
     }
   }, [engine, mode, currentModel]);
 
   useEffect(() => {
-    if (mode !== 'live' || !currentModel) return;
+    if (mode !== RUNTIME_MODES.LIVE || !currentModel) return;
     const api = window.electronAPI;
     if (!api || typeof api.prewarmSpecDecodeVerifier !== 'function') return;
     let cancelled = false;
@@ -106,7 +107,7 @@ export function ChatV2Harness({ forceMode = null, title = null }) {
   }, [mode, currentModel]);
 
   useEffect(() => {
-    if (mode !== 'live') return;
+    if (mode !== RUNTIME_MODES.LIVE) return;
     void engine.refreshRuntimeState(true);
     const unsub = pollingCoordinator.subscribe('chatV2:runtimeRefresh', {
       run: () => { void engine.refreshRuntimeState(); },
@@ -119,7 +120,7 @@ export function ChatV2Harness({ forceMode = null, title = null }) {
   // don't auto-warmup on each model switch (users can warm manually).
 
   useEffect(() => {
-    if (mode !== 'live') return;
+    if (mode !== RUNTIME_MODES.LIVE) return;
     const conversationId = normalizeId(currentConversationId);
     const branchId = normalizeId(currentBranchId);
     const engineState = engine.getState();
@@ -130,7 +131,7 @@ export function ChatV2Harness({ forceMode = null, title = null }) {
       if (activeConversationId || engineState.messages.length > 0 || engineState.error || engineState.draftAttachments.length > 0) {
         engine.resetConversation({
           preserveRuntimeState: true,
-          workspace: currentWorkspace || 'casual',
+          workspace: currentWorkspace || WORKSPACE_IDS.CASUAL,
         });
       }
       syncRef.current.conversationListSignature = '';
@@ -187,7 +188,7 @@ export function ChatV2Harness({ forceMode = null, title = null }) {
     return unsub;
   }, [engine, normalizeId, refreshConversationList]);
 
-  const surfaceTitle = title || (mode === 'live'
+  const surfaceTitle = title || (mode === RUNTIME_MODES.LIVE
     ? (currentModel || 'Chat')
     : 'Chat (Demo)');
 

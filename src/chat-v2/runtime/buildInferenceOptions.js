@@ -1,4 +1,4 @@
-import { buildOptimizedOllamaOptionsWithInfo } from '../../services/modelOptimizer';
+import { buildOptimizedOllamaOptionsWithInfo } from '../../core/modelResolver';
 import { useAdaptiveGeneration } from '../../services/adaptiveGeneration';
 import { useAppStore } from '../../stores/appStore';
 import { useChatV2SessionStore } from '../../stores/chatV2SessionStore';
