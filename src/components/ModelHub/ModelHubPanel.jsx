@@ -24,6 +24,8 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { useAppStore } from '../../stores/appStore';
 import { safeCall, isElectron } from '../../utils/electronAPI';
 import { SparkModelHubPanel } from './SparkModelHubPanel';
+import { ModelCard } from './ModelCard';
+import { ModelFitIndicator } from './ModelFitIndicator';
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CONSTANTS
@@ -1996,11 +1998,7 @@ function OllamaModelCard({
               {effectiveBadge === 'fit' && (
                 <TagBadge color="bg-emerald-500/10 text-emerald-400">Fits your hardware</TagBadge>
               )}
-              {compatibilityScore !== null && (
-                <TagBadge color={getCompatibilityBadgeClass(compatibilityTier)}>
-                  {compatibilityScore}/100 fit
-                </TagBadge>
-              )}
+              <ModelFitIndicator score={compatibilityScore} tier={compatibilityTier} />
           </div>
             <p className="text-xs text-text-muted mt-1 line-clamp-2">{description}</p>
             {recommendationChips.length > 0 && (
@@ -2118,10 +2116,7 @@ function HfModelCard({ model, onSelect, hardwareMeta = null, recommendationChips
   const compatibilityTier = hardwareMeta?.compatibilityTier || 'fair';
 
   return (
-    <div
-      className="bg-neutral-900/80 border border-neutral-800 hover:border-blue-500/30 rounded-xl overflow-hidden cursor-pointer transition-all group h-full flex flex-col"
-      onClick={() => onSelect?.(model)}
-    >
+    <ModelCard className="cursor-pointer" onClick={() => onSelect?.(model)}>
       <div className="p-4 flex-1">
         {/* Header */}
         <div className="flex items-start justify-between gap-2">
@@ -2195,11 +2190,7 @@ function HfModelCard({ model, onSelect, hardwareMeta = null, recommendationChips
               {ggufFiles} GGUF
             </span>
           )}
-          {compatibilityScore !== null && (
-            <span className={`text-[10px] px-2 py-0.5 rounded font-medium ${getCompatibilityBadgeClass(compatibilityTier)}`}>
-              {compatibilityScore}/100 fit
-            </span>
-          )}
+          <ModelFitIndicator score={compatibilityScore} tier={compatibilityTier} />
         </div>
 
         {recommendationChips.length > 0 && (
@@ -2230,17 +2221,17 @@ function HfModelCard({ model, onSelect, hardwareMeta = null, recommendationChips
               <Clock size={10} /> {new Date(model.lastModified).toLocaleDateString()}
             </span>
           )}
-          {Number.isFinite(hardwareMeta?.estimatedNeed) && hardwareMeta.estimatedNeed > 0 && (
-            <span className={`flex items-center gap-1 ${hardwareMeta.fits ? 'text-emerald-300' : 'text-amber-300'}`}>
-              <Cpu size={10} /> ~{hardwareMeta.estimatedNeed.toFixed(1)}GB
-            </span>
-          )}
+          <ModelFitIndicator
+            variant="memory"
+            estimatedNeed={hardwareMeta?.estimatedNeed}
+            fits={hardwareMeta?.fits}
+          />
           <span className="text-blue-400/70 ml-auto flex items-center gap-0.5 opacity-70 md:opacity-0 md:group-hover:opacity-100 transition-opacity">
             View Files <ChevronRight size={9} />
           </span>
         </div>
       </div>
-    </div>
+    </ModelCard>
   );
 }
 
