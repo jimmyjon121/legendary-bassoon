@@ -6,15 +6,17 @@
 const OllamaBackend = require('./backends/ollama-backend');
 const LlamaCppBackend = require('./backends/llamacpp-backend');
 const LlamaNodeBackend = require('./backends/llamanode-backend');
-const LlamaCppSparkBackend = require('./backends/llamacpp-spark-backend');
 const MosaicBackend = require('./backends/mosaic-backend');
 const OpenVinoBackend = require('./backends/openvino-backend');
 const { isGgufModelId } = require('./backends/llamanode-backend');
 const { getLaneCandidates } = require('./lane-registry');
 const { isMosaicRuntimeEnabled } = require('./mosaic-coordinator');
 const hardwareDetection = require('./hardware-detection');
-const { detectSparkProfile } = require('./spark-profile');
-const { inspectMoE } = require('./moe-detector');
+const {
+  detectAndApplySparkProfile,
+  registerSparkBackend,
+  trySelectSparkMoeBackend,
+} = require('./spark-adapter');
 const JobQueue = require('./job-queue');
 const { getPowerMode } = require('./power-mode');
 const { embedTextsWithRouting } = require('./embedding-service');
@@ -230,11 +232,9 @@ class InferenceOrchestrator {
     console.log('[Orchestrator] Initializing...');
     try {
       this.hardware = await hardwareDetection.detectHardware();
-      this.sparkProfile = await detectSparkProfile();
-      if (this.sparkProfile?.isSpark && !this.store?.get?.('performanceProfileUserSet')) {
-        this.profile = 'spark';
-        this.store?.set?.('performanceProfile', 'spark');
-      }
+      const sparkResolution = await detectAndApplySparkProfile({ store: this.store });
+      this.sparkProfile = sparkResolution.sparkProfile;
+      if (sparkResolution.performanceProfile) this.profile = sparkResolution.performanceProfile;
       console.log('[Orchestrator] Hardware detected:', {
         gpus: this.hardware.gpus?.length || 0,
         npu: this.hardware.npu?.detected || false,
@@ -307,13 +307,12 @@ class InferenceOrchestrator {
       priority: 2,
     }));
 
-    if (this.sparkProfile?.isSpark) {
-      const sparkEndpoint = this.store?.get('llamaCppSparkEndpoint') || 'http://127.0.0.1:11500';
-      this.backends.set('llamacpp-spark', new LlamaCppSparkBackend({
-        endpoint: sparkEndpoint,
-        device: primaryGpu?.name || 'NVIDIA GB10 unified memory',
-        priority: 0,
-      }));
+    if (registerSparkBackend({
+      backends: this.backends,
+      sparkProfile: this.sparkProfile,
+      store: this.store,
+      primaryGpu,
+    })) {
       console.log('[Orchestrator] Spark detected — registered llamacpp-spark backend (fallback-safe)');
     }
 
@@ -1423,35 +1422,18 @@ class InferenceOrchestrator {
     const specDecodeSelection = await this._trySelectSpecDecodeBackend(payload, buildDecision, rejectedCandidates);
     if (specDecodeSelection) return specDecodeSelection;
 
-    // Spark MoE routing: once the dedicated llama.cpp Spark server is present,
-    // MoE families use its tensor-placement recipes. Until then this branch is
-    // fallback-safe and records why we stayed on Ollama.
-    const moeInfo = inspectMoE(payload?.modelInfo || {}, payload.model || '');
-    if (this.sparkProfile?.isSpark && moeInfo?.isMoE && this.backends.has('llamacpp-spark')) {
-      const sparkBackend = this.backends.get('llamacpp-spark');
-      const health = await this._safeBackendHealth(sparkBackend);
-      if (health.available) {
-        return {
-          backend: sparkBackend,
-          fallbackReason: null,
-          decisionEvidence: buildDecision({
-            selectedBackend: sparkBackend.id,
-            fallbackReason: null,
-            candidateOrder: ['llamacpp-spark', ...order],
-            scored: [{ backendId: sparkBackend.id, score: 100, index: 0 }],
-            rejected: rejectedCandidates,
-            selectionSource: 'spark-moe',
-            extra: { moe: moeInfo },
-          }),
-        };
-      }
-      rejectedCandidates.push({
-        backendId: sparkBackend.id,
-        reason: 'spark_moe_backend_unavailable',
-        healthStatus: health?.status || 'unavailable',
-        error: health?.error || null,
-      });
-    }
+    // Spark MoE routing is isolated in the Spark adapter so the generic
+    // orchestrator stays focused on backend ordering and fallback policy.
+    const sparkMoeSelection = await trySelectSparkMoeBackend({
+      sparkProfile: this.sparkProfile,
+      backends: this.backends,
+      payload,
+      safeBackendHealth: (backend) => this._safeBackendHealth(backend),
+      buildDecision,
+      rejectedCandidates,
+      order,
+    });
+    if (sparkMoeSelection) return sparkMoeSelection;
 
     // Direct GGUF models (id starts with "gguf:") are force-routed to
     // llamanode. This is the path LM Studio imports and local file loads

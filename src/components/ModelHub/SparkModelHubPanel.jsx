@@ -30,12 +30,7 @@ import {
   Wand2,
   X,
 } from 'lucide-react';
-
-const callHub = async (method, ...args) => {
-  const api = window?.electronAPI;
-  if (!api?.[method]) throw new Error(`Missing electronAPI.${method}. Add the Spark Model Hub preload wiring.`);
-  return api[method](...args);
-};
+import { callSparkHub, isSparkMoeCandidateName } from '../../core/sparkAdapter';
 
 const fitStyles = {
   excellent: 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200',
@@ -130,11 +125,6 @@ function ActionButton({ children, onClick, disabled, tone = 'primary', icon: Ico
   );
 }
 
-function isMoeCandidateName(value = '') {
-  const lower = String(value || '').toLowerCase();
-  return lower.includes('gpt-oss') || lower.includes('mixtral') || lower.includes('moe') || /qwen.*a\d+b/.test(lower);
-}
-
 function ModelCard({ model, onRun, onStop, onDelete, onSetCoding, onImport, onApplySparkPreset, installed, loaded }) {
   const name = model.name || model.title || model.model;
   const required = model.requiredGiB ? `${model.requiredGiB.toFixed(1)} GiB est.` : 'estimate unknown';
@@ -184,7 +174,7 @@ function ModelCard({ model, onRun, onStop, onDelete, onSetCoding, onImport, onAp
         {onSetCoding ? <ActionButton icon={Code2} tone="soft" onClick={() => onSetCoding(model.model || model.name, model.title || model.name)}>Add to Cursor/Continue</ActionButton> : null}
         {onDelete ? <ActionButton icon={Trash2} tone="danger" onClick={() => onDelete(model.model || model.name)}>Delete</ActionButton> : null}
       </div>
-      {onApplySparkPreset && isMoeCandidateName(name) ? (
+      {onApplySparkPreset && isSparkMoeCandidateName(name) ? (
         <div className="mt-3 rounded-xl border border-cyan-400/15 bg-cyan-500/[0.05] p-3">
           <div className="mb-2 text-xs font-medium text-cyan-100">Spark quality preset</div>
           <div className="flex flex-wrap gap-2">
@@ -233,7 +223,7 @@ export function SparkModelHubPanel({ embedded = false, onClose }) {
   const refresh = useCallback(async () => {
     setError(null);
     try {
-      const data = await callHub('sparkModelHubDashboard');
+      const data = await callSparkHub('sparkModelHubDashboard');
       setDashboard(data);
     } catch (err) {
       setError(err.message || String(err));
@@ -292,11 +282,11 @@ export function SparkModelHubPanel({ embedded = false, onClose }) {
     }
   };
 
-  const runModel = (model) => doAction(`Run ${model}`, () => callHub('sparkModelHubRunModel', model));
-  const stopModel = (model) => doAction(`Stop ${model}`, () => callHub('sparkModelHubStopModel', model));
-  const deleteModel = (model) => doAction(`Delete ${model}`, () => callHub('sparkModelHubDeleteModel', model));
-  const pullModel = (model) => doAction(`Pull ${model}`, () => callHub('sparkModelHubPullModel', model));
-  const setCoding = (model, title) => doAction('Set coding model', () => callHub('sparkModelHubSetContinueModel', {
+  const runModel = (model) => doAction(`Run ${model}`, () => callSparkHub('sparkModelHubRunModel', model));
+  const stopModel = (model) => doAction(`Stop ${model}`, () => callSparkHub('sparkModelHubStopModel', model));
+  const deleteModel = (model) => doAction(`Delete ${model}`, () => callSparkHub('sparkModelHubDeleteModel', model));
+  const pullModel = (model) => doAction(`Pull ${model}`, () => callSparkHub('sparkModelHubPullModel', model));
+  const setCoding = (model, title) => doAction('Set coding model', () => callSparkHub('sparkModelHubSetContinueModel', {
     model,
     title,
     apiBase: 'http://localhost:11434',
@@ -322,11 +312,11 @@ export function SparkModelHubPanel({ embedded = false, onClose }) {
       advanced_options: profile.advanced_options,
     });
   });
-  const restartOllama = () => doAction('Restart Ollama', () => callHub('sparkModelHubRestartOllama'));
+  const restartOllama = () => doAction('Restart Ollama', () => callSparkHub('sparkModelHubRestartOllama'));
   const startOllamaProvider = () => doAction('Start Ollama', () => window?.electronAPI?.startOllama?.());
   const stopOllamaProvider = () => doAction('Stop Ollama', () => window?.electronAPI?.stopOllama?.());
   const installOllamaProvider = () => doAction('Install Ollama', () => window?.electronAPI?.installOllama?.());
-  const importGguf = (model) => doAction(`Import ${model.name}`, () => callHub('sparkModelHubImportGgufToOllama', {
+  const importGguf = (model) => doAction(`Import ${model.name}`, () => callSparkHub('sparkModelHubImportGgufToOllama', {
     filePath: model.primaryPath,
     modelName: model.name,
     contextLength: 8192,
