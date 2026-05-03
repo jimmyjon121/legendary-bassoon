@@ -1,5 +1,5 @@
 import React from 'react';
-import { Server, Zap, Loader } from 'lucide-react';
+import { Zap, Loader } from 'lucide-react';
 import { shallow } from 'zustand/shallow';
 import { useAppStore } from '../../stores/appStore';
 import { api } from '../../utils/electronAPI';
@@ -309,7 +309,6 @@ export function NPUModelConverter() {
 
   // For the manual input field — detect if it looks like a pre-converted OV repo
   const isPreConverted = (id) => /^OpenVINO\//i.test(id) || /-ov$/.test(id) || /openvino/i.test(id);
-  const converting = busy && !isPreConverted(modelInput);
   const loading = busy && isPreConverted(modelInput);
 
   return (

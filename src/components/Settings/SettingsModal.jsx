@@ -1,4 +1,4 @@
-import React, { useState, useEffect, Suspense, lazy, memo } from 'react';
+import React, { useState, useEffect, Suspense, lazy } from 'react';
 import { X, Settings, Server, Image, Shield, Keyboard, FolderOpen, Loader, Cpu, Zap, Bug, Search, Monitor } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { api } from '../../utils/electronAPI';
@@ -15,7 +15,7 @@ import { SparkSettings } from './SparkSettings';
 import { motion } from 'framer-motion';
 import { shallow } from 'zustand/shallow';
 
-import { Database, Trash2, Download, HardDrive, Brain, BarChart2 } from 'lucide-react';
+import { Database, Trash2, Brain } from 'lucide-react';
 
 // Lazy load heavy components for faster initial render
 const HardwareMonitorFull = lazy(() => 
@@ -127,7 +127,6 @@ export function SettingsModal() {
   };
 
   const handleSave = async () => {
-    let saved = false;
     // Save all settings in a single batched IPC call for performance
     try {
       await window.electronAPI?.setSettingsBatch?.({
@@ -144,7 +143,6 @@ export function SettingsModal() {
         discoveryNetworkAccess: settings.discoveryNetworkAccess || 'on',
         vaultModelGating: settings.vaultModelGating || 'open',
       });
-      saved = true;
     } catch (error) {
       console.error('Failed to save settings:', error);
     }
@@ -417,7 +415,6 @@ function LLMSettings({ settings, setSettings, onSelectFolder, onOpenModelsDirect
   const setFastChatMode = useAppStore((state) => state.setFastChatMode);
   const [knowledgeMessage, setKnowledgeMessage] = React.useState(null);
   const [isCheckingModel, setIsCheckingModel] = React.useState(false);
-  const platform = window.electronAPI?.getPlatform?.();
 
   const checkHealth = React.useCallback(async () => {
     setIsChecking(true);
@@ -1395,7 +1392,7 @@ function ResearchSettings({ settings, setSettings }) {
   );
 }
 
-function PrivacySettings({ settings, setSettings, onClose }) {
+function PrivacySettings({ settings, setSettings }) {
   const lockNsfw = useAppStore((s) => s.lockNsfw);
   const isLocked = useAppStore((s) => s.isLocked);
   const setWorkspace = useAppStore((s) => s.setWorkspace);
@@ -2468,14 +2465,12 @@ function HardwareSettings() {
       return { success: true, cancelled: false };
     };
 
-    console.log('[NPU Optimize] Starting NPU start/setup flow...');
     setNpuBusy(true);
 
     try {
       await window.electronAPI?.clearNpuCache?.();
       await window.electronAPI?.clearHardwareCache?.();
       let status = await refreshNpuStatus(true);
-      console.log('[NPU Optimize] Initial status:', status);
 
       // Step 1: Install OpenVINO only when it is actually missing.
       if (!status?.openvinoInstalled || status.setupRequired) {
@@ -2488,7 +2483,6 @@ function HardwareSettings() {
         }
 
         status = await refreshNpuStatus(true);
-        console.log('[NPU Optimize] Status after setup:', status);
       }
 
       if (!status?.openvinoInstalled) {
@@ -2511,15 +2505,13 @@ function HardwareSettings() {
       // Step 2: Keep model configuration best-effort and non-blocking.
       if (window.electronAPI.autoConfigureNpuModel) {
         try {
-          console.log('[NPU Optimize] Auto-configuring NPU model...');
-          const configResult = await window.electronAPI.autoConfigureNpuModel({
+          await window.electronAPI.autoConfigureNpuModel({
             enableAutoStart: true,
             workload: 'chat',
             profile,
             forceReconfigure: true,
             forceStatusRefresh: true,
           });
-          console.log('[NPU Optimize] Model config result:', configResult);
         } catch (configError) {
           console.warn('[NPU Optimize] Auto-configure skipped:', configError);
         }
@@ -2527,7 +2519,6 @@ function HardwareSettings() {
 
       // Step 3: Restart only when already running; otherwise start.
       if (status?.serverRunning && window.electronAPI.stopNpuServer) {
-        console.log('[NPU Optimize] Restart requested - stopping current server first...');
         await window.electronAPI.stopNpuServer();
         await new Promise((resolve) => setTimeout(resolve, 800));
         status = await refreshNpuStatus(true);
@@ -2535,11 +2526,9 @@ function HardwareSettings() {
 
       if (!status?.serverRunning && window.electronAPI.startNpuServer) {
         const startDevice = hybridStatus?.enabled ? (hybridStatus.device || 'HETERO:GPU,NPU') : 'NPU';
-        console.log('[NPU Optimize] Starting NPU server with device:', startDevice);
         let serverResult = await window.electronAPI.startNpuServer({
           device: startDevice,
         });
-        console.log('[NPU Optimize] Server start result:', serverResult);
 
         if (!serverResult?.success && (serverResult?.setupRequired || /OpenVINO/i.test(String(serverResult?.error || '')))) {
           const setupResult = await runOpenVinoSetup();
@@ -2547,7 +2536,6 @@ function HardwareSettings() {
             await window.electronAPI?.clearNpuCache?.();
             await window.electronAPI?.clearHardwareCache?.();
             serverResult = await window.electronAPI.startNpuServer({ device: startDevice });
-            console.log('[NPU Optimize] Server start retry result:', serverResult);
           }
         }
 
@@ -2570,7 +2558,6 @@ function HardwareSettings() {
         await window.electronAPI?.clearNpuCache?.();
         await window.electronAPI?.clearHardwareCache?.();
         status = await refreshNpuStatus(true);
-        console.log('[NPU Optimize] Status after server start:', status);
       }
 
       status = await refreshNpuStatus(true);
@@ -3432,7 +3419,6 @@ function ImageBackendControl({ imageStatus, setImageStatus }) {
     const unsub = window.electronAPI?.onImageAutoEvent?.((data) => {
       if (!data) return;
       const { event, message, percent, error: eventError } = data;
-      console.log('[ImageBackend] Event:', event, message || '', percent != null ? `${percent}%` : '');
 
       if (event === 'setup:complete' || event === 'backend:ready' || event === 'install:complete' || event === 'model:complete') {
         setProgress({ step: 'done', message: message || 'Ready!', percent: 100 });
@@ -3514,7 +3500,6 @@ function ImageBackendControl({ imageStatus, setImageStatus }) {
     setBusy(false);
   };
 
-  const showSetupButton = !imageStatus?.installed && !imageStatus?.needsModel;
   const showModelNeeded = imageStatus?.installed && (imageStatus?.models?.length === 0 || imageStatus?.needsModel);
 
   return (
