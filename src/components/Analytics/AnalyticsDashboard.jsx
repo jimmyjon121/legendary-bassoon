@@ -3,7 +3,7 @@ import { motion } from 'framer-motion';
 import { 
   MessageSquare, Zap, Clock, Brain, Folder,
   TrendingUp, Activity, BarChart2, PieChart,
-  Calendar, Timer, Sparkles
+  Timer
 } from 'lucide-react';
 import { useAnalyticsStore } from '../../stores/analyticsStore';
 
@@ -306,7 +306,6 @@ function formatNumber(num) {
 }
 
 export default AnalyticsDashboard;
-
 
 
 

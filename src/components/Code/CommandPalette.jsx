@@ -1,10 +1,9 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { 
-  Search, FileText, Terminal, GitBranch, Bot, Settings, 
-  Play, Save, FolderOpen, RefreshCw, Zap, Code, Bug,
+  Search, FileText, Terminal, GitBranch, Bot,
+  Save, FolderOpen, RefreshCw, Zap, Code, Bug,
   FileSearch, Replace, Palette, Keyboard, HelpCircle
 } from 'lucide-react';
-import { useEditorStore } from '../../stores/editorStore';
 
 const COMMANDS = [
   // File commands
@@ -182,7 +181,6 @@ export function CommandPalette({ isOpen, onClose, onCommand }) {
 }
 
 export default CommandPalette;
-
 
 
 

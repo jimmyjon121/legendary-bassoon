@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
-import { FileCode, FolderTree, ChevronRight, X, Hash } from 'lucide-react';
+import { FileCode, FolderTree, X } from 'lucide-react';
 
 /**
  * FileMentionInput - A textarea wrapper that supports @file mentions
@@ -59,7 +59,6 @@ export function FileMentionInput({
   value,
   onChange,
   onKeyDown,
-  onSubmit,
   placeholder,
   disabled,
   projectFiles = [],

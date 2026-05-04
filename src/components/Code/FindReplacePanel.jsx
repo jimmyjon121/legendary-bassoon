@@ -1,6 +1,6 @@
 import React, { useState, useCallback } from 'react';
-import { Search, Replace, FileText, CheckCircle2, XCircle, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
-import { findInFiles, previewReplace, replaceInFiles } from '../../services/multiFileOps';
+import { Search, FileText, CheckCircle2, XCircle, ChevronDown, ChevronRight, RefreshCw } from 'lucide-react';
+import { findInFiles, replaceInFiles } from '../../services/multiFileOps';
 import { hasCodeIndex } from '../../services/codeIndexer';
 import { useEditorStore } from '../../stores/editorStore';
 
@@ -11,7 +11,6 @@ export function FindReplacePanel() {
   const [wholeWord, setWholeWord] = useState(false);
   const [useRegex, setUseRegex] = useState(false);
   const [results, setResults] = useState([]);
-  const [preview, setPreview] = useState([]);
   const [isSearching, setIsSearching] = useState(false);
   const [isReplacing, setIsReplacing] = useState(false);
   const [replaceResult, setReplaceResult] = useState(null);
@@ -46,12 +45,6 @@ export function FindReplacePanel() {
     setExpandedFiles(expanded);
   }, [searchTerm, caseSensitive, wholeWord, useRegex]);
 
-  const handlePreviewReplace = useCallback(() => {
-    if (!searchTerm.trim() || !replaceTerm) return;
-    const changes = previewReplace(searchTerm, replaceTerm, { caseSensitive, wholeWord, regex: useRegex });
-    setPreview(changes);
-  }, [searchTerm, replaceTerm, caseSensitive, wholeWord, useRegex]);
-
   const handleReplaceAll = useCallback(async () => {
     if (!searchTerm.trim()) return;
     setIsReplacing(true);
@@ -68,7 +61,6 @@ export function FindReplacePanel() {
       // Clear results after successful replace
       if (result.success && result.modifiedFiles > 0) {
         setResults([]);
-        setPreview([]);
       }
     } catch (error) {
       setReplaceResult({ success: false, error: error.message });
@@ -242,7 +234,6 @@ export function FindReplacePanel() {
 }
 
 export default FindReplacePanel;
-
 
 
 

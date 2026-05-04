@@ -21,3 +21,4 @@ Add one entry per logical slice:
 
 | Slice | Commit | Files | Behavior Notes | Tests | LOC / Build / Bundle |
 | --- | --- | --- | --- | --- | --- |
+| 1 - low-risk lint hygiene | pending | `src/chat-v2/runtime/audioLayer.js`, `src/components/Analytics/AnalyticsDashboard.jsx`, `src/components/Code/CommandPalette.jsx`, `src/components/Code/FileMentionInput.jsx`, `src/components/Code/FindReplacePanel.jsx` | Removed unused imports/locals and an unreachable preview-replace helper with no UI trigger. No strings, layout, IPC, store, route, or payload changes. | Lint PASS; `eval:chat-v2` PASS; `eval:model-selector` PASS; `build:app` PASS; release gate still has the same 3 baseline failures. | LOC `191228 -> 191214`; lint output lines `273 -> 260`; build wall `18.13s -> 18.08s`; bundle `17M -> 17M`. |

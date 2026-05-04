@@ -18,7 +18,6 @@
 
 import { isVaultWorkspace, WORKSPACE_IDS } from '../../core/types';
 
-const SENTENCE_REGEX = /[^.!?\n]+[.!?]+|\n[^\n]+$/g;
 const DEFAULT_AMBIENCE_FADE_MS = 1200;
 
 const attached = new WeakMap();
@@ -57,7 +56,7 @@ function speakWebSpeech(text, { voiceHint, volume = 0.8, onEnd } = {}) {
   };
 }
 
-async function speakPiper(text, { voice, volume = 0.8, onEnd, audioCtx } = {}) {
+async function speakPiper(text, { voice, volume = 0.8, onEnd } = {}) {
   try {
     const res = await window.electronAPI?.audioSynthesize?.({ text, voice });
     if (!res?.success || !res.wavPath) { onEnd?.(); return () => {}; }
