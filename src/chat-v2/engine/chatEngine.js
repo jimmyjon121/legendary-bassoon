@@ -1781,9 +1781,12 @@ export class ChatV2Engine {
       );
     }
     if (!nextContent) {
-      nextContent = buildConservativeFallback(userMessage?.content, this.state.workspace, {
-        webEnabled: request?.canUseWebSearch,
-      });
+      const hadThinking = thinkTelemetry && (thinkTelemetry.tokens > 0 || thinkTelemetry.closedContent);
+      nextContent = hadThinking
+        ? "I finished thinking but didn't produce a final answer — the context window may have filled up during reasoning. Try again, or enable Think Longer for more room."
+        : buildConservativeFallback(userMessage?.content, this.state.workspace, {
+          webEnabled: request?.canUseWebSearch,
+        });
     }
 
     const validation = validateAssistantResponse(userMessage?.content, nextContent, {

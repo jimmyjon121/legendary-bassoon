@@ -31,6 +31,7 @@ import { useAppStore } from '../../stores/appStore';
 import { api as electronAPI } from '../../utils/electronAPI';
 import { triggerWarmupWithProgress } from '../../stores/modelWarmupStore';
 import { ModelExperienceWorkbench } from '../../chat-v2/ui/ModelExperienceWorkbench';
+import { isVaultWorkspace } from '../../core/types';
 import {
   DEVICE_PIN_OPTIONS,
   buildLibraryIndex,
@@ -602,7 +603,6 @@ export function ModelSelector({ onClose }) {
   const searchRef = useRef(null);
   const listParentRef = useRef(null);
 
-  const isVaultWorkspace = currentWorkspace === 'nsfw';
   const selectorError = localError || modelCatalogLastError || (String(error || '').trim() || null);
 
   const loadLocalModels = React.useCallback(async () => {
@@ -851,7 +851,7 @@ export function ModelSelector({ onClose }) {
       const matchesSource = sourceFilter === 'all' || model.source === sourceFilter;
       const matchesAdded = matchesAddedFilter(model, addedFilter);
       const matchesTab = modelTab !== 'agentic' || model.capabilities.some((cap) => ['Code', 'Reasoning'].includes(cap)) || model.score >= 60;
-      const vaultOpen = !isVaultWorkspace || model.insight?.catalogEnrichment?.vaultModelGating !== 'allowlist' || model.insight?.activePreset?.vault_allowed === true;
+      const vaultOpen = !isVaultWorkspace(currentWorkspace) || model.insight?.catalogEnrichment?.vaultModelGating !== 'allowlist' || model.insight?.activePreset?.vault_allowed === true;
       return matchesQuery && matchesQuant && matchesSource && matchesAdded && matchesTab && vaultOpen;
     });
     if (effectiveSortKey === 'name') list = list.sort((a, b) => a.displayName.localeCompare(b.displayName));
@@ -876,7 +876,7 @@ export function ModelSelector({ onClose }) {
       list = list.sort((a, b) => b.score - a.score);
     }
     return list;
-  }, [addedFilter, effectiveSortKey, isVaultWorkspace, modelTab, normalizedModels, quantFilter, searchQuery, sourceFilter]);
+  }, [addedFilter, currentWorkspace, effectiveSortKey, modelTab, normalizedModels, quantFilter, searchQuery, sourceFilter]);
 
   const familyGroups = useMemo(() => groupModels(filteredModels), [filteredModels]);
   const focusedModel = filteredModels[Math.min(focusedIndex, Math.max(0, filteredModels.length - 1))] || null;

@@ -203,6 +203,10 @@ function inferFamily(modelName = '', modelInfo = null, profile = null) {
   if (lower.includes('deepseek-coder')) return 'deepseek-coder';
   if (lower.includes('deepseek-r1')) return 'deepseek-r1';
   if (lower.includes('deepseek')) return 'deepseek';
+  if (lower.includes('qwq')) return 'qwq';
+  if (lower.includes('qwen3')) return 'qwen3';
+  if (lower.includes('qwen2.5')) return 'qwen2.5';
+  if (lower.includes('qwen2')) return 'qwen2';
   if (lower.includes('qwen')) return 'qwen';
   if (lower.includes('llama')) return 'llama';
   if (lower.includes('mistral') || lower.includes('mixtral')) return 'mistral';
@@ -265,7 +269,7 @@ function resolveModelContextLimit(modelName = '', modelInfo = null, profile = nu
   }
 
   const lower = String(modelName || '').toLowerCase();
-  if (lower.includes('llama3.1') || lower.includes('llama3.2') || lower.includes('qwen2.5')) return 131072;
+  if (lower.includes('llama3.1') || lower.includes('llama3.2') || lower.includes('qwen2.5') || lower.includes('qwen3')) return 131072;
   if (lower.includes('deepseek-r1') || lower.includes('qwq')) return 131072;
   if (lower.includes('mistral') || lower.includes('mixtral')) return 32768;
   if (lower.includes('deepseek-coder') || lower.includes('starcoder')) return 16384;
@@ -321,11 +325,17 @@ function applyProfileHints(options, profile, trace) {
   return next;
 }
 
-function applyModelScale(options, paramBillions, quantization, trace) {
+function applyModelScale(options, paramBillions, quantization, trace, { taskIntent = 'chat', hasAutoTune = false } = {}) {
   const next = { ...options };
   const size = Number(paramBillions);
   if (Number.isFinite(size) && size >= 30) {
-    next.num_ctx = Math.min(Number(next.num_ctx) || 4096, 4096);
+    const isReasoningTask = taskIntent === 'reasoning';
+    if (!hasAutoTune) {
+      // Reasoning/thinking models need room for the think block — 8192 minimum.
+      // AutoTune skips this cap entirely since it measured the actual hardware ceiling.
+      const ctxFloor = isReasoningTask ? 8192 : 4096;
+      next.num_ctx = Math.min(Number(next.num_ctx) || ctxFloor, ctxFloor);
+    }
     next.num_batch = Math.min(Number(next.num_batch) || 64, 64);
     next.num_predict = Math.min(Number(next.num_predict) || 1024, 1536);
     trace.push('large-model-guardrail');
@@ -349,7 +359,8 @@ function applyHardwareGuardrails(options, { runtimeState = null, performanceProf
 
   if (autoTuneResult && typeof autoTuneResult === 'object') {
     if (Number.isFinite(Number(autoTuneResult.contextLength)) && autoTuneResult.contextLength > 0) {
-      next.num_ctx = Math.min(Number(next.num_ctx) || autoTuneResult.contextLength, Number(autoTuneResult.contextLength));
+      // AutoTune measured the actual hardware ceiling — let it win over static guardrails.
+      next.num_ctx = Math.floor(Number(autoTuneResult.contextLength));
     }
     if (Number.isFinite(Number(autoTuneResult.batchSize)) && autoTuneResult.batchSize > 0) {
       next.num_batch = Math.min(Number(next.num_batch) || autoTuneResult.batchSize, Number(autoTuneResult.batchSize));
@@ -656,7 +667,10 @@ function resolveModelExperiencePlan(payload = {}) {
   overrideTrace.push('base-defaults');
 
   effectiveOptions = applyProfileHints(effectiveOptions, profileInput, overrideTrace);
-  effectiveOptions = applyModelScale(effectiveOptions, paramBillions, quantization, overrideTrace);
+  effectiveOptions = applyModelScale(effectiveOptions, paramBillions, quantization, overrideTrace, {
+    taskIntent,
+    hasAutoTune: Boolean(autoTuneResult),
+  });
   effectiveOptions = applyHardwareGuardrails(effectiveOptions, {
     runtimeState,
     performanceProfile,

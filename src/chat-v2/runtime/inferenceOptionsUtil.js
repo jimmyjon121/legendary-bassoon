@@ -1,6 +1,6 @@
 const NUMERIC_KEYS = new Set([
   'num_ctx', 'num_predict', 'num_batch', 'num_gpu', 'num_thread',
-  'temperature', 'top_p', 'top_k',
+  'temperature', 'top_p', 'top_k', 'min_p',
   'repeat_penalty', 'frequency_penalty', 'presence_penalty',
 ]);
 

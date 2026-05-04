@@ -115,6 +115,10 @@ export const MODEL_FAMILIES = {
     type: 'chat', temperature: 0.7, top_p: 0.8, top_k: 20, repeat_penalty: 1.05,
     maxContext: 131072,
   },
+  'qwen3': {
+    type: 'chat', temperature: 0.6, top_p: 0.8, top_k: 20, repeat_penalty: 1.05,
+    maxContext: 131072,
+  },
   'qwq': {
     type: 'reasoning', temperature: 0.6, top_p: 0.95, top_k: 40, repeat_penalty: 1.0,
     maxContext: 131072,
@@ -404,6 +408,7 @@ export function parseModelName(modelName) {
     { pattern: /phi[-_]?3/i, family: 'phi3' },
     { pattern: /gemma[-_]?3/i, family: 'gemma3' },
     { pattern: /gemma[-_]?2/i, family: 'gemma2' },
+    { pattern: /qwen[-_]?3/i, family: 'qwen3' },
     { pattern: /qwen[-_]?2\.5/i, family: 'qwen2.5' },
     { pattern: /qwen[-_]?2/i, family: 'qwen2' },
     { pattern: /yi[-_]?1\.5/i, family: 'yi-1.5' },

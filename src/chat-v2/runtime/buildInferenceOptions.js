@@ -120,6 +120,8 @@ function applyAdaptive(options, adaptive) {
   return next;
 }
 
+const PRESET_ADVANCED_NUMERIC_KEYS = ['repeat_penalty', 'frequency_penalty', 'presence_penalty', 'min_p'];
+
 function applyPresetOverrides(options, activePreset) {
   if (!activePreset) return options;
   let next = { ...options };
@@ -128,6 +130,13 @@ function applyPresetOverrides(options, activePreset) {
   if (Number.isFinite(Number(activePreset.top_k))) next.top_k = Number(activePreset.top_k);
   if (Number.isFinite(Number(activePreset.context_length)) && activePreset.context_length > 0) {
     next.num_ctx = Number(activePreset.context_length);
+  }
+  const advanced = activePreset.advanced_options;
+  if (advanced && typeof advanced === 'object') {
+    for (const key of PRESET_ADVANCED_NUMERIC_KEYS) {
+      const num = Number(advanced[key]);
+      if (Number.isFinite(num)) next[key] = num;
+    }
   }
   next = mergePresetSystemPrompt(next, activePreset);
   const presetDevicePin = String(activePreset?.device_pin ?? '').trim();

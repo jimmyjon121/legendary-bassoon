@@ -96,6 +96,18 @@ function main() {
     'Model optimizer must set num_predict=2048 for casual workspace',
     failures
   );
+  assertContains(
+    modelOptimizer,
+    "'qwen3':",
+    'Model optimizer must include a dedicated Qwen3 family profile',
+    failures
+  );
+  assertContains(
+    modelOptimizer,
+    "family: 'qwen3'",
+    'Model optimizer family detection must route Qwen3 names to the Qwen3 profile',
+    failures
+  );
 
   // IPC ingress must sanitize/clamp input before routing.
   assertContains(

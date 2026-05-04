@@ -62,7 +62,7 @@ function inferContextLengthFromName(modelName = '', family = '') {
   if (lower.includes('llama3.2')) return 8192;
   if (lower.includes('mistral')) return 8192;
   if (lower.includes('mixtral')) return 32768;
-  if (lower.includes('qwen2.5') || lower.includes('qwen3')) return 32768;
+  if (lower.includes('qwen2.5') || lower.includes('qwen3')) return 131072;
   if (lower.includes('gemma')) return 8192;
   return 8192;
 }
@@ -647,8 +647,7 @@ async function buildExecutionPlan({ endpoint, makeRequest, payload, stream = fal
   if (allowCasualFallback) {
     const shouldFallback =
       explicitFallback ||
-      metadata?.baselineStatus === 'unstable' ||
-      metadata?.templateMode === 'raw_prompt';
+      metadata?.baselineStatus === 'unstable';
 
     if (shouldFallback) {
       const fallbackModel = await resolveCasualFallbackModel(endpoint, makeRequest, requestedModel);
