@@ -43,6 +43,7 @@ const checks = [
   { id: 'model-load-confidence', command: 'node scripts/model-load-confidence-smoke.js' },
   { id: 'backend-decision-timeline', command: 'node scripts/backend-decision-timeline-smoke.js' },
   { id: 'model-selector-catalogue', command: 'node scripts/model-selector-catalogue-smoke.js' },
+  { id: 'agent-harness', command: 'node scripts/agent-harness-smoke.js' },
 ];
 
 function runCheck(check) {
