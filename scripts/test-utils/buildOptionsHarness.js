@@ -7,6 +7,26 @@ const vm = require('vm');
 const ROOT = path.resolve(__dirname, '../..');
 const { mergePresetSystemPrompt } = require(path.join(ROOT, 'src/chat-v2/runtime/mergePresetSystemPrompt.cjs'));
 
+const WORKSPACE_IDS = Object.freeze({
+  CASUAL: 'casual',
+  WORK: 'work',
+  CODE: 'code',
+  RESEARCH: 'research',
+  CREATIVE: 'creative',
+  VAULT: 'nsfw',
+});
+
+function normalizeWorkspaceId(value, fallback = WORKSPACE_IDS.CASUAL) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) return fallback;
+  if (normalized === 'vault') return WORKSPACE_IDS.VAULT;
+  return normalized;
+}
+
+function isVaultWorkspace(value) {
+  return normalizeWorkspaceId(value) === WORKSPACE_IDS.VAULT;
+}
+
 function transformBuildOptionsSource() {
   const filePath = path.join(ROOT, 'src/chat-v2/runtime/buildInferenceOptions.js');
   return fs.readFileSync(filePath, 'utf8')
@@ -100,6 +120,9 @@ async function buildOptionsWithState({
     Object,
     Boolean,
     Set,
+    WORKSPACE_IDS,
+    normalizeWorkspaceId,
+    isVaultWorkspace,
     buildOptimizedOllamaOptionsWithInfo: () => ({
       temperature: 0.7,
       num_ctx: 4096,

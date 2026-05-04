@@ -1,0 +1,37 @@
+
+> devforge@0.4.8 eval:release-gate
+> node scripts/release-gate.js
+
+Running research gate... PASS
+Running casual gate... PASS
+Running coding gate... PASS
+Running chat-v2 gate... PASS
+Running perf gate... PASS
+Running model-hub gate... PASS
+Running ipc-security gate... PASS
+Running normal-mode gate... PASS
+Running long-context gate... PASS
+Running mode-switch gate... PASS
+Running llamanode gate... PASS
+Running tiered-utilization gate... PASS
+Running draft-selector gate... PASS
+Running npu-draft gate... PASS
+Running spec-verifier gate... PASS
+Running spec-bus gate... PASS
+Running spec-dashboard gate... PASS
+Running spec-decoding gate... PASS
+Running preset-system-prompt gate... PASS
+Running spec-decode-residency gate... PASS
+Running cuda-verifier-guard gate... PASS
+Running autonomy-routing gate... PASS
+Running autonomy-build-options gate... PASS
+Running autonomy-orchestrator-route gate... PASS
+Running mosaic-gate1 gate... PASS
+Running mosaic-gate2 gate... PASS
+Running model-experience-autopilot gate... PASS
+Running model-experience-workbench gate... PASS
+Running model-load-confidence gate... PASS
+Running backend-decision-timeline gate... PASS
+Running model-selector-catalogue gate... PASS
+
+Release Gate PASS

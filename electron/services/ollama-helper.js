@@ -75,8 +75,9 @@ class OllamaHelper {
       env.CUDA_VISIBLE_DEVICES = '0';
     }
     env.OLLAMA_FLASH_ATTENTION = env.OLLAMA_FLASH_ATTENTION || '1';
-    // Spark unified memory should not keep huge MoE models resident forever.
-    env.OLLAMA_KEEP_ALIVE = env.OLLAMA_KEEP_ALIVE || '30m';
+    // Default to workstation-style residency; per-request policies still
+    // shorten this for constrained Spark/MoE routes.
+    env.OLLAMA_KEEP_ALIVE = env.OLLAMA_KEEP_ALIVE || '24h';
     env.OLLAMA_NUM_PARALLEL = '1';
     env.OLLAMA_MAX_LOADED_MODELS = '1';
     env.OLLAMA_KV_CACHE_TYPE = env.OLLAMA_KV_CACHE_TYPE || 'q4_0';
@@ -258,4 +259,3 @@ function getOllamaHelper({ store, shell, makeRequest }) {
 module.exports = {
   getOllamaHelper,
 };
-

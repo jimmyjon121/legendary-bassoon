@@ -45,6 +45,7 @@ const TitleBar = memo(function TitleBar({
   onRestartApp,
   isRestartingApp,
   isEjectingModel,
+  onRefreshRenderer,
   onWindowMinimize,
   onWindowMaximize,
   onWindowClose,
@@ -130,6 +131,17 @@ const TitleBar = memo(function TitleBar({
       {/* Right: Restart is prominent because it relaunches the full Electron
           app and picks up renderer, main-process, IPC, and native changes. */}
       <div className="flex items-center gap-1" style={{ WebkitAppRegion: 'no-drag' }}>
+        {showDevRefresh && (
+          <button
+            type="button"
+            onClick={onRefreshRenderer}
+            className="flex items-center gap-1.5 h-7 px-2.5 rounded-md text-zinc-300/80 hover:text-zinc-100 hover:bg-white/[0.06] border border-white/[0.08] hover:border-white/[0.16] transition-colors"
+            title="Refresh renderer"
+          >
+            <RotateCcw size={13} />
+            <span className="text-[11px] font-medium">Refresh</span>
+          </button>
+        )}
         {showDevRefresh && (
           <button
             type="button"
@@ -313,6 +325,24 @@ export function Layout({ children }) {
     }
   };
 
+  const handleRefreshRenderer = async () => {
+    if (typeof window === 'undefined') return;
+    try {
+      window.sessionStorage?.setItem('devforge:startup-complete', '1');
+    } catch { /* non-blocking */ }
+
+    try {
+      if (window.electronAPI?.reloadWindow) {
+        await window.electronAPI.reloadWindow({ ignoreCache: false });
+        return;
+      }
+      window.location.reload();
+    } catch (error) {
+      console.warn('[Layout] Refresh failed:', error?.message || error);
+      window.location.reload();
+    }
+  };
+
   // Full-app restart: relaunches Electron, so main-process changes
   // (new IPC handlers, orchestrator updates, native modules like
   // node-llama-cpp) actually take effect. Slower than a refresh
@@ -384,6 +414,7 @@ export function Layout({ children }) {
         showWindowControls={showWindowControls}
         isWindowMaximized={isWindowMaximized}
         onRestartApp={handleRestartApp}
+        onRefreshRenderer={handleRefreshRenderer}
         isRestartingApp={isRestartingApp}
         isEjectingModel={isEjectingModel}
         onWindowMinimize={handleWindowMinimize}

@@ -92,9 +92,9 @@ class AutoSetup {
         ollamaEnv.CUDA_VISIBLE_DEVICES = '0';
       }
       ollamaEnv.OLLAMA_FLASH_ATTENTION = ollamaEnv.OLLAMA_FLASH_ATTENTION || '1';
-      // Spark unified memory is safer with one resident model and short
-      // keep-alive; per-request policies can still extend this intentionally.
-      ollamaEnv.OLLAMA_KEEP_ALIVE = ollamaEnv.OLLAMA_KEEP_ALIVE || '30m';
+      // Default to workstation-style residency; per-request policies still
+      // shorten this for constrained Spark/MoE routes.
+      ollamaEnv.OLLAMA_KEEP_ALIVE = ollamaEnv.OLLAMA_KEEP_ALIVE || '24h';
       ollamaEnv.OLLAMA_NUM_PARALLEL = '1';
       ollamaEnv.OLLAMA_MAX_LOADED_MODELS = '1';
       ollamaEnv.OLLAMA_KV_CACHE_TYPE = ollamaEnv.OLLAMA_KV_CACHE_TYPE || 'q4_0';
