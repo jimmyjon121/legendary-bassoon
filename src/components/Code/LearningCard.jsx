@@ -6,7 +6,7 @@
  */
 
 import React, { useState, useEffect, useCallback } from 'react';
-import { getContextualLearning, SKILL_CATEGORIES } from '../../services/contextualLearning';
+import { getContextualLearning } from '../../services/contextualLearning';
 
 const LearningCard = ({ code, filePath, onApplyLesson }) => {
   const [opportunities, setOpportunities] = useState([]);

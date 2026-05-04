@@ -3,7 +3,7 @@
  * Shows all downloads with progress, controls, and status
  */
 
-import React, { useEffect, useState, useCallback, memo } from 'react';
+import React, { useEffect, useState, memo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Download,
@@ -19,10 +19,8 @@ import {
   ChevronUp,
   HardDrive,
   Zap,
-  Filter,
   Search,
   MoreVertical,
-  Calendar,
   ArrowUpCircle,
   ArrowDownCircle,
 } from 'lucide-react';
@@ -526,6 +524,5 @@ export const DownloadCenter = memo(({ isOpen, onClose }) => {
 });
 
 export default DownloadCenter;
-
 
 

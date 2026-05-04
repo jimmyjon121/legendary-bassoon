@@ -14,11 +14,8 @@ import {
   History,
   Play,
   RotateCcw,
-  FileText,
   Check,
   X,
-  ChevronRight,
-  Clock,
   GitBranch,
   FileCode,
   Loader2,
@@ -257,7 +254,7 @@ export function DraftPRPanel({ isOpen, onClose }) {
 // Checkpoint Timeline
 // ============================================================================
 
-export function CheckpointTimeline({ onRewind, onCompare }) {
+export function CheckpointTimeline({ onRewind, onCompare: _onCompare }) {
   const [selectedCheckpoint, setSelectedCheckpoint] = useState(null);
   
   const { aiSession, createCheckpoint, rewindToCheckpoint } = useEditorStore((state) => ({
@@ -308,7 +305,7 @@ export function CheckpointTimeline({ onRewind, onCompare }) {
           </div>
         ) : (
           <div className="divide-y divide-forge-border/30">
-            {checkpoints.slice().reverse().map((checkpoint, idx) => (
+            {checkpoints.slice().reverse().map((checkpoint) => (
               <div
                 key={checkpoint.id}
                 className={`px-3 py-2 hover:bg-forge-hover/50 cursor-pointer transition-colors ${

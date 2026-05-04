@@ -1,10 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { 
-  Sparkles, 
+import {
   Play, 
   Plus, 
   Trash2, 
-  GripVertical,
   FileCode,
   CheckCircle2,
   Circle,
@@ -12,12 +10,10 @@ import {
   ChevronRight,
   Wand2,
   Copy,
-  Send,
   RefreshCw,
   AlertCircle,
   Layers,
   Target,
-  Zap,
   Edit3,
   Save,
   X
@@ -123,7 +119,7 @@ export function PlanBuilder({ onExecutePlan, currentFile, initialPlan, onPlanCon
   
   const currentModel = useAppStore((s) => s.currentModel);
   const currentModelName = resolveModelName(currentModel);
-  const { openFiles, activeFilePath } = useEditorStore();
+  const { openFiles } = useEditorStore();
 
   useEffect(() => {
     return () => {
@@ -1003,4 +999,3 @@ ${step.description}
 }
 
 export default PlanBuilder;
-

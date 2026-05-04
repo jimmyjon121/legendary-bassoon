@@ -19,7 +19,6 @@ import {
   Settings,
   Database,
   FilePlus,
-  FolderPlus,
   Sparkles,
 } from 'lucide-react';
 import { useEditorStore } from '../../stores/editorStore';
@@ -29,7 +28,7 @@ import { shallow } from 'zustand/shallow';
 function EmptyFolderPrompt({ error }) {
   const [showNewFile, setShowNewFile] = useState(false);
   const [fileName, setFileName] = useState('');
-  const { createFile, rootPath } = useEditorStore();
+  const { createFile } = useEditorStore();
 
   const handleCreateFile = async () => {
     if (!fileName.trim()) return;

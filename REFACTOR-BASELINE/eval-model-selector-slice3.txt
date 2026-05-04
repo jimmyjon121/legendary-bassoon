@@ -1,0 +1,5 @@
+
+> devforge@0.4.8 eval:model-selector
+> node scripts/model-selector-catalogue-smoke.js
+
+Model selector catalogue smoke passed.

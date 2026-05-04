@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useCallback, memo, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, memo, useRef } from 'react';
 import {
-  Cpu, HardDrive, Monitor, Thermometer, Activity,
+  Cpu, Monitor, Thermometer, Activity,
   ChevronDown, Zap, Brain, Layers, MemoryStick, Server
 } from 'lucide-react';
 import { api } from '../../utils/electronAPI';

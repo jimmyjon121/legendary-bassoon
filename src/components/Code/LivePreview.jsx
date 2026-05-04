@@ -1,13 +1,11 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef } from 'react';
 import { X, RefreshCw, ExternalLink, Maximize2, Minimize2 } from 'lucide-react';
-import { useEditorStore } from '../../stores/editorStore';
 
 export function LivePreview({ onClose }) {
   const [previewUrl, setPreviewUrl] = useState('http://localhost:3000');
   const [isLoading, setIsLoading] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const iframeRef = useRef(null);
-  const rootPath = useEditorStore((state) => state.rootPath);
 
   // Refresh preview
   const handleRefresh = () => {
