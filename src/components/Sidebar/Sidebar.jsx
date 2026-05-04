@@ -4,7 +4,7 @@ import {
   Plus, ChevronLeft, ChevronRight, ChevronDown, Cpu,
   Bot, Download,
   Calendar, CalendarDays, Star, Pin, Archive, Folder, FolderPlus,
-  Activity, Command, FolderKanban, Lock,
+  Activity, Command, FolderKanban,
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useAppStore, WORKSPACES } from '../../stores/appStore';
@@ -12,14 +12,13 @@ import { isVaultWorkspace, WORKSPACE_IDS } from '../../core/types';
 import { HardwareMonitorCompact } from '../HardwareMonitor/HardwareMonitor';
 import { PowerModeToggle } from '../PowerMode/PowerModeToggle';
 
-const ICONS = { MessageCircle, Briefcase, Code2, Beaker, Lock };
+const ICONS = { MessageCircle, Briefcase, Code2, Beaker };
 const FALLBACK_ICON = MessageCircle;
 const ENABLED_WORKSPACES = [
   WORKSPACE_IDS.CASUAL,
   WORKSPACE_IDS.WORK,
   WORKSPACE_IDS.RESEARCH,
   WORKSPACE_IDS.CODE,
-  WORKSPACE_IDS.VAULT,
 ];
 
 // Static workspace colors - no recomputation
@@ -61,12 +60,12 @@ const WorkspaceTab = memo(function WorkspaceTab({ ws, isActive, isCollapsed, onC
       onClick={onClick}
       className={[
         isCollapsed
-          ? 'w-10 h-10 rounded-xl'
-          : 'h-8 rounded-lg border px-2 text-left',
-        'group relative overflow-hidden transition-all duration-150',
+          ? 'h-11 w-11 rounded-xl'
+          : 'h-9 rounded-lg border px-2.5 text-left',
+        'group relative overflow-hidden transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20',
         isActive
           ? 'text-text-primary'
-          : 'border-white/[0.06] bg-white/[0.015] text-text-muted hover:border-white/12 hover:bg-white/[0.04]',
+          : 'border-white/[0.06] bg-white/[0.018] text-text-muted hover:border-white/[0.14] hover:bg-white/[0.055]',
       ].join(' ')}
       style={activeStyle}
       title={ws.name}
@@ -76,13 +75,13 @@ const WorkspaceTab = memo(function WorkspaceTab({ ws, isActive, isCollapsed, onC
           <Icon size={17} />
         </span>
       ) : (
-        <div className="flex h-full items-center gap-1.5">
+        <div className="flex h-full items-center gap-2">
           <span className="shrink-0" style={iconStyle}>
-            <Icon size={13} />
+            <Icon size={14} />
           </span>
           <div className="min-w-0 flex-1">
             <span
-              className="block truncate text-[11px] font-semibold"
+              className="block truncate text-[12px] font-semibold"
               style={isActive ? { color } : undefined}
             >
               {ws.name}
@@ -99,8 +98,8 @@ const WorkspaceTab = memo(function WorkspaceTab({ ws, isActive, isCollapsed, onC
 
 const SectionTitle = memo(function SectionTitle({ children, action }) {
   return (
-    <div className="mb-1.5 flex h-5 items-center justify-between px-1">
-      <span className="text-[10px] font-semibold uppercase tracking-[0.16em] text-text-muted/55">
+    <div className="mb-2 flex h-5 items-center justify-between px-1">
+      <span className="text-[11px] font-semibold tracking-normal text-text-muted/65">
         {children}
       </span>
       {action}
@@ -123,17 +122,17 @@ const NavRow = memo(function NavRow({
       onClick={onClick}
       title={title || label}
       className={[
-        'group flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-[12px] transition-colors',
+        'group flex h-9 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[12px] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20',
         active
-          ? 'bg-white/[0.055] text-text-primary'
-          : 'text-text-muted hover:bg-white/[0.035] hover:text-text-secondary',
+          ? 'bg-white/[0.075] text-text-primary'
+          : 'text-text-muted hover:bg-white/[0.045] hover:text-text-secondary',
       ].join(' ')}
       style={active ? { boxShadow: `inset 2px 0 0 ${accentColor}` } : undefined}
     >
-      <Icon size={14} className="shrink-0" style={active ? { color: accentColor } : undefined} />
+      <Icon size={15} className="shrink-0" style={active ? { color: accentColor } : undefined} />
       <span className="min-w-0 flex-1 truncate font-medium">{label}</span>
       {Number.isFinite(count) && count > 0 && (
-        <span className="rounded-md bg-white/[0.055] px-1.5 py-0.5 text-[10px] text-text-muted">
+        <span className="rounded-md bg-white/[0.07] px-1.5 py-0.5 text-[10px] text-text-muted">
           {count > 99 ? '99+' : count}
         </span>
       )}
@@ -160,10 +159,10 @@ const RecentConversationRow = memo(function RecentConversationRow({
       type="button"
       onClick={() => onSelect(conv.id)}
       className={[
-        'group flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors',
+        'group flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20',
         isActive
-          ? 'bg-white/[0.055] text-text-primary'
-          : 'text-text-secondary hover:bg-white/[0.035] hover:text-text-primary',
+          ? 'bg-white/[0.075] text-text-primary'
+          : 'text-text-secondary hover:bg-white/[0.045] hover:text-text-primary',
       ].join(' ')}
       style={isActive ? { boxShadow: `inset 2px 0 0 ${accentColor}` } : undefined}
       title={title}
@@ -185,13 +184,13 @@ const SystemFooter = memo(function SystemFooter() {
   const [expanded, setExpanded] = useState(false);
 
   return (
-    <div className="border-t border-white/[0.06] p-2">
+    <div className="border-t border-white/[0.08] p-2.5">
       <button
         type="button"
         onClick={() => setExpanded((prev) => !prev)}
-        className="flex h-9 w-full items-center gap-2 rounded-lg px-2 text-left text-[12px] text-text-secondary transition-colors hover:bg-white/[0.035] hover:text-text-primary"
+        className="flex h-10 w-full items-center gap-2 rounded-lg px-2 text-left text-[12px] text-text-secondary transition-colors hover:bg-white/[0.045] hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
       >
-        <span className="flex h-5 w-5 items-center justify-center rounded-md bg-emerald-500/10 text-emerald-300">
+        <span className="flex h-6 w-6 items-center justify-center rounded-md bg-emerald-500/10 text-emerald-300 ring-1 ring-emerald-300/15">
           <Activity size={12} />
         </span>
         <span className="min-w-0 flex-1">
@@ -201,7 +200,7 @@ const SystemFooter = memo(function SystemFooter() {
         <ChevronDown size={13} className={`text-text-muted transition-transform ${expanded ? 'rotate-180' : ''}`} />
       </button>
       {expanded && (
-        <div className="mt-2 rounded-lg border border-white/[0.06] bg-black/10 py-1">
+        <div className="mt-2 rounded-lg border border-white/[0.08] bg-black/20 py-1 shadow-inner">
           <HardwareMonitorCompact />
         </div>
       )}
@@ -417,21 +416,20 @@ export function Sidebar() {
   return (
     <aside
       ref={asideRef}
-      className="relative flex h-full flex-col border-r border-border-subtle bg-surface-0 transition-[width] duration-200"
+      className="relative flex h-full flex-col border-r border-white/[0.08] bg-[#09090b]/95 shadow-[18px_0_48px_rgba(0,0,0,0.28)] transition-[width] duration-200"
       style={{ width: sidebarCollapsed ? `${COLLAPSED_SIDEBAR_WIDTH}px` : `${sidebarWidth}px` }}
     >
       {!sidebarCollapsed && (
-        <div className="shrink-0 px-3 pb-2 pt-3">
+        <div className="shrink-0 border-b border-white/[0.08] px-4 py-3">
           <div className="flex items-center gap-2">
             <div
-              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-[11px] font-bold text-white"
-              style={{ background: accentColor }}
+              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-violet-500 text-[12px] font-bold text-white shadow-lg shadow-violet-950/30"
             >
               DF
             </div>
             <div className="min-w-0 flex-1">
-              <div className="truncate text-sm font-semibold text-text-primary">DevForge</div>
-              <div className="mt-0.5 flex items-center gap-1.5 text-[10px] font-medium text-emerald-300">
+              <div className="truncate text-[18px] font-semibold leading-5 tracking-tight text-text-primary">DevForge</div>
+              <div className="mt-1 flex items-center gap-1.5 text-[10px] font-medium text-emerald-300">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
                 Local Ready
               </div>
@@ -442,7 +440,10 @@ export function Sidebar() {
 
       {sidebarCollapsed ? (
         <>
-          <div className="flex flex-col items-center gap-1.5 p-2">
+          <div className="flex flex-col items-center gap-2 border-b border-white/[0.08] p-2.5">
+            <div className="mb-1 flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-violet-500 text-[12px] font-bold text-white shadow-lg shadow-violet-950/30">
+              DF
+            </div>
             {workspaceTabs.map((ws) => (
               <WorkspaceTab
                 key={ws.id}
@@ -454,11 +455,11 @@ export function Sidebar() {
             ))}
           </div>
 
-          <div className="flex flex-col items-center gap-2 p-2">
+          <div className="flex flex-col items-center gap-2 p-2.5">
             <button
               onClick={handleNewChat}
-              className="flex h-11 w-11 items-center justify-center rounded-lg transition-colors"
-              style={{ background: `${accentColor}20`, color: accentColor }}
+              className="flex h-11 w-11 items-center justify-center rounded-xl text-white shadow-lg transition-opacity hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
+              style={{ background: accentColor }}
               title="New Chat"
             >
               <Plus size={18} />
@@ -469,10 +470,10 @@ export function Sidebar() {
                 <button
                   key={view.id}
                   onClick={() => handleSmartView(view.id)}
-                  className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors ${
+                  className={`flex h-9 w-9 items-center justify-center rounded-lg transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20 ${
                     activeFilter === view.id
                       ? 'bg-white/[0.08]'
-                      : 'text-text-muted hover:bg-white/[0.05] hover:text-text-primary'
+                      : 'text-text-muted hover:bg-white/[0.055] hover:text-text-primary'
                   }`}
                   style={activeFilter === view.id ? { color: accentColor } : undefined}
                   title={view.label}
@@ -485,13 +486,13 @@ export function Sidebar() {
 
           <div className="flex-1" />
 
-          <div className="flex flex-col items-center gap-1 border-t border-border-subtle p-2">
+          <div className="flex flex-col items-center gap-1 border-t border-white/[0.08] p-2">
             <PowerModeToggle compact />
             {footerTools.map(({ action, icon: Icon, label, title }) => (
               <button
                 key={label}
                 onClick={() => action()}
-                className="flex h-10 w-10 items-center justify-center rounded-lg text-text-muted/80 transition-colors hover:bg-white/[0.05] hover:text-text-primary"
+                className="flex h-10 w-10 items-center justify-center rounded-lg text-text-muted/80 transition-colors hover:bg-white/[0.055] hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
                 title={title}
               >
                 <Icon size={14} />
@@ -501,14 +502,14 @@ export function Sidebar() {
         </>
       ) : (
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
-          <div className="min-h-0 flex-1 overflow-y-auto scrollbar-premium px-3 pb-3">
-            <section className="pb-3">
+          <div className="min-h-0 flex-1 overflow-y-auto scrollbar-premium px-4 pb-4 pt-3">
+            <section className="pb-4">
               <SectionTitle
                 action={(
                   <button
                     type="button"
                     onClick={handleCreateProject}
-                    className="flex h-6 w-6 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-white/[0.05] hover:text-text-primary"
+                    className="flex h-6 w-6 items-center justify-center rounded-md text-text-muted transition-colors hover:bg-white/[0.055] hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
                     title="Create project or scope"
                   >
                     <Plus size={13} />
@@ -517,7 +518,7 @@ export function Sidebar() {
               >
                 Working In
               </SectionTitle>
-              <label className="flex h-9 w-full items-center gap-2 rounded-lg bg-white/[0.025] px-2 text-[12px] text-text-muted ring-1 ring-white/[0.06] transition-colors focus-within:ring-white/15">
+              <label className="flex h-11 w-full items-center gap-2 rounded-lg bg-white/[0.035] px-3 text-[12px] text-text-muted ring-1 ring-white/[0.08] transition-colors focus-within:bg-white/[0.05] focus-within:ring-white/20">
                 <FolderKanban size={13} className="shrink-0" />
                 <select
                   value={activeProjectId || ''}
@@ -532,18 +533,18 @@ export function Sidebar() {
               </label>
             </section>
 
-            <section className="pb-3">
+            <section className="pb-4">
               <SectionTitle>Primary Actions</SectionTitle>
               <button
                 type="button"
                 onClick={handleNewChat}
-                className="mb-1.5 flex h-9 w-full items-center justify-center gap-2 rounded-lg text-[12px] font-semibold text-white transition-opacity hover:opacity-95"
+                className="mb-2 flex h-11 w-full items-center justify-center gap-2 rounded-lg text-[13px] font-semibold text-white shadow-lg transition-opacity hover:opacity-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
                 style={{ background: accentColor }}
               >
                 <Plus size={14} />
                 New Chat
               </button>
-              <label className="flex h-9 w-full items-center gap-2 rounded-lg bg-white/[0.025] px-2.5 text-[12px] text-text-muted ring-1 ring-white/[0.06] transition-colors focus-within:ring-white/15">
+              <label className="flex h-10 w-full items-center gap-2 rounded-lg bg-white/[0.035] px-3 text-[12px] text-text-muted ring-1 ring-white/[0.08] transition-colors focus-within:bg-white/[0.05] focus-within:ring-white/20">
                 <Command size={13} className="shrink-0" />
                 <input
                   value={searchQuery}
@@ -554,7 +555,7 @@ export function Sidebar() {
               </label>
             </section>
 
-            <section className="pb-3">
+            <section className="pb-4">
               <SectionTitle>Spaces</SectionTitle>
               <div className="space-y-0.5">
                 {workspaceTabs.map((ws) => {
@@ -573,7 +574,7 @@ export function Sidebar() {
               </div>
             </section>
 
-            <section className="pb-3">
+            <section className="pb-4">
               <SectionTitle>Smart Views</SectionTitle>
               <div className="space-y-0.5">
                 {smartViews.map((view) => (
@@ -590,7 +591,7 @@ export function Sidebar() {
               </div>
             </section>
 
-            <section className="pb-3">
+            <section className="pb-4">
               <SectionTitle>Recent Chats</SectionTitle>
               <div className="space-y-0.5">
                 {recentConversations.length > 0 ? (
@@ -605,7 +606,7 @@ export function Sidebar() {
                     />
                   ))
                 ) : (
-                  <div className="rounded-lg px-2 py-3 text-[11px] text-text-muted">
+                  <div className="rounded-lg px-2.5 py-3 text-[11px] text-text-muted">
                     No recent chats yet.
                   </div>
                 )}
@@ -618,7 +619,7 @@ export function Sidebar() {
                   <button
                     type="button"
                     onClick={handleCreateFolder}
-                    className="flex h-6 items-center gap-1 rounded-md px-1.5 text-[10px] text-text-muted transition-colors hover:bg-white/[0.05] hover:text-text-primary"
+                    className="flex h-6 items-center gap-1 rounded-md px-1.5 text-[10px] text-text-muted transition-colors hover:bg-white/[0.055] hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
                     title="Create folder"
                   >
                     <FolderPlus size={12} />
@@ -645,7 +646,7 @@ export function Sidebar() {
                   <button
                     type="button"
                     onClick={handleCreateFolder}
-                    className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-[12px] text-text-muted transition-colors hover:bg-white/[0.035] hover:text-text-secondary"
+                    className="flex h-9 w-full items-center gap-2 rounded-lg px-2.5 text-left text-[12px] text-text-muted transition-colors hover:bg-white/[0.045] hover:text-text-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
                   >
                     <FolderPlus size={13} />
                     Create folder
@@ -655,15 +656,15 @@ export function Sidebar() {
             </section>
           </div>
 
-          <div className="shrink-0 border-t border-white/[0.06] p-2">
-            <div className="mb-1 grid grid-cols-5 gap-1">
+          <div className="shrink-0 border-t border-white/[0.08] p-2.5">
+            <div className="mb-1 grid grid-cols-6 gap-1.5">
               <PowerModeToggle compact />
               {footerTools.map(({ action, icon: Icon, label, title }) => (
                 <button
                   key={label}
                   type="button"
                   onClick={() => action()}
-                  className="flex h-7 items-center justify-center rounded-md text-text-muted/80 transition-colors hover:bg-white/[0.05] hover:text-text-primary"
+                  className="flex h-8 items-center justify-center rounded-md text-text-muted/80 transition-colors hover:bg-white/[0.055] hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
                   title={title}
                 >
                   <Icon size={13} />
@@ -679,7 +680,7 @@ export function Sidebar() {
       {!sidebarCollapsed && (
         <div
           onMouseDown={handleResizeStart}
-          className={`absolute right-0 top-0 z-20 h-full w-1.5 cursor-col-resize transition-colors ${isResizingSidebar ? 'bg-white/12' : 'bg-transparent hover:bg-white/8'}`}
+          className={`absolute right-0 top-0 z-20 h-full w-1.5 cursor-col-resize transition-colors ${isResizingSidebar ? 'bg-white/15' : 'bg-transparent hover:bg-white/10'}`}
           aria-hidden="true"
           title="Drag to resize sidebar"
         />
@@ -687,7 +688,7 @@ export function Sidebar() {
 
       <button
         onClick={toggleSidebar}
-        className="absolute -right-3 top-1/2 z-30 flex h-14 w-6 -translate-y-1/2 items-center justify-center rounded-r-lg border border-border-muted border-l-0 bg-surface-2 text-text-muted transition-colors hover:bg-surface-3 hover:text-text-primary"
+        className="absolute -right-3 top-1/2 z-30 flex h-14 w-6 -translate-y-1/2 items-center justify-center rounded-r-lg border border-white/[0.1] border-l-0 bg-[#111113] text-text-muted shadow-lg transition-colors hover:bg-[#18181b] hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
       >
         {sidebarCollapsed ? <ChevronRight size={14} /> : <ChevronLeft size={14} />}
       </button>
