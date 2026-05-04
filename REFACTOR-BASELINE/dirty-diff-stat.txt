@@ -1,0 +1,8 @@
+ electron/services/llm-execution-resolver.js    |  5 ++---
+ electron/services/model-experience-resolver.js | 24 +++++++++++++++++++-----
+ src/chat-v2/engine/chatEngine.js               |  9 ++++++---
+ src/chat-v2/runtime/buildInferenceOptions.js   |  9 +++++++++
+ src/chat-v2/runtime/inferenceOptionsUtil.js    |  2 +-
+ src/components/ModelSelector/ModelSelector.jsx |  6 +++---
+ src/services/modelOptimizer.js                 |  4 ++++
+ 7 files changed, 44 insertions(+), 15 deletions(-)

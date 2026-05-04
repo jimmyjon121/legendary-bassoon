@@ -1,0 +1,12 @@
+src/utils/electronAPI.js:10:         typeof window.electronAPI !== 'undefined' &&
+src/utils/electronAPI.js:11:         window.electronAPI !== null;
+src/utils/electronAPI.js:15: * Resolve a method name to its actual property on window.electronAPI.
+src/utils/electronAPI.js:22:  const api = window.electronAPI;
+src/utils/electronAPI.js:59:    const result = await window.electronAPI[resolved](...args);
+src/utils/electronAPI.js:72:  let current = window.electronAPI;
+src/utils/electronAPI.js:113:  return await window.electronAPI[resolved](...args);
+src/utils/electronAPI.js:127:  return isElectron() ? window.electronAPI : null;
+electron/preload.js:1:const { contextBridge, ipcRenderer } = require('electron');
+electron/preload.js:8:  console.warn(`[electronAPI][Deprecated] ${apiName} called.${suffix}`);
+electron/preload.js:28:contextBridge.exposeInMainWorld('electronAPI', {
+electron/preload.js:1852:Object.freeze(window.electronAPI);

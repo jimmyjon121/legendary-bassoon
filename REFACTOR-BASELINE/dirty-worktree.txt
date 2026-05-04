@@ -1,0 +1,7 @@
+ M electron/services/llm-execution-resolver.js
+ M electron/services/model-experience-resolver.js
+ M src/chat-v2/engine/chatEngine.js
+ M src/chat-v2/runtime/buildInferenceOptions.js
+ M src/chat-v2/runtime/inferenceOptionsUtil.js
+ M src/components/ModelSelector/ModelSelector.jsx
+ M src/services/modelOptimizer.js

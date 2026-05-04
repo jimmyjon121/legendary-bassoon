@@ -1,0 +1,721 @@
+src/stores/toastStore.js:5:export const useToastStore = create((set, get) => ({
+src/stores/toastStore.js:43:  success: (title, message, options = {}) => 
+src/stores/toastStore.js:46:  error: (title, message, options = {}) => 
+src/stores/toastStore.js:49:  warning: (title, message, options = {}) => 
+src/stores/toastStore.js:52:  info: (title, message, options = {}) => 
+src/stores/toastStore.js:55:  loading: (title, message, options = {}) => 
+src/stores/toastStore.js:59:  updateToast: (id, updates) => {
+src/stores/toastStore.js:61:      toasts: state.toasts.map(t => 
+src/stores/toastStore.js:76:  removeToast: (id) => {
+src/stores/toastStore.js:78:      toasts: state.toasts.filter(t => t.id !== id)
+src/stores/toastStore.js:83:  clearAll: () => set({ toasts: [] }),
+src/stores/toastStore.js:87:export const useToast = () => {
+src/stores/analyticsStore.js:47:export const useAnalyticsStore = create(
+src/stores/analyticsStore.js:73:      trackMessage: (data) => {
+src/stores/analyticsStore.js:124:      trackConversation: (conversationId, action) => {
+src/stores/analyticsStore.js:156:      trackWorkspace: (workspace) => {
+src/stores/analyticsStore.js:168:      trackFeature: (feature) => {
+src/stores/analyticsStore.js:180:      getTodayMetrics: () => {
+src/stores/analyticsStore.js:195:      getWeekMetrics: () => {
+src/stores/analyticsStore.js:236:      getResponseTimeStats: () => {
+src/stores/analyticsStore.js:244:      getModelBreakdown: () => {
+src/stores/analyticsStore.js:260:      getWorkspaceBreakdown: () => {
+src/stores/analyticsStore.js:276:      getSessionDuration: () => {
+src/stores/analyticsStore.js:293:      getAllStats: () => {
+src/stores/analyticsStore.js:319:      resetSession: () => {
+src/stores/analyticsStore.js:331:      cleanupOldData: () => {
+src/stores/analyticsStore.js:349:      partialize: (state) => ({
+src/stores/agentStore.js:38:export const useAgentStore = create((set, get) => ({
+src/stores/agentStore.js:81:        steps: state.plan.steps.map((s) =>
+src/stores/agentStore.js:194:      proposedChanges: state.proposedChanges.filter((c) => c.id !== id),
+src/stores/agentStore.js:314:      proposedChanges: state.proposedChanges.filter((c) => c.id !== id),
+src/stores/agentStore.js:335:      proposedChanges: state.proposedChanges.filter((c) => c.id !== id),
+src/stores/slices/scannerSlice.js:6:export const createScannerSlice = (set, get) => ({
+src/stores/slices/scannerSlice.js:16:  initializeScanner: async () => {
+src/stores/slices/scannerSlice.js:38:  setupScannerListeners: () => {
+src/stores/slices/scannerSlice.js:80:        discoveredModels: state.discoveredModels.map(m =>
+src/stores/slices/scannerSlice.js:91:        discoveredModels: state.discoveredModels.map(m =>
+src/stores/slices/scannerSlice.js:101:  refreshSources: async () => {
+src/stores/slices/scannerSlice.js:113:  scanAll: async (options = {}) => {
+src/stores/slices/scannerSlice.js:126:  loadDiscoveredModels: async () => {
+src/stores/slices/scannerSlice.js:138:  getModelsBySource: async (sourceId) => {
+src/stores/slices/scannerSlice.js:148:  getModelsByType: async (modelType) => {
+src/stores/slices/scannerSlice.js:158:  addCustomPath: async (scanPath, options = {}) => {
+src/stores/slices/scannerSlice.js:172:  removeCustomPath: async (scanPath) => {
+src/stores/slices/scannerSlice.js:186:  importModel: async (modelPath, targetDir) => {
+src/stores/slices/scannerSlice.js:192:          discoveredModels: state.discoveredModels.map(m =>
+src/stores/slices/scannerSlice.js:207:  linkModel: async (modelPath, targetDir) => {
+src/stores/slices/scannerSlice.js:212:          discoveredModels: state.discoveredModels.map(m =>
+src/stores/slices/scannerSlice.js:227:  moveModel: async (modelPath, targetDir) => {
+src/stores/slices/scannerSlice.js:232:          discoveredModels: state.discoveredModels.map(m =>
+src/stores/slices/scannerSlice.js:247:  startWatching: async (sourceId) => {
+src/stores/slices/scannerSlice.js:257:  stopWatching: async (sourceId) => {
+src/stores/slices/scannerSlice.js:267:  clearScanner: async () => {
+src/stores/slices/scannerSlice.js:279:  getDetectedSources: () => {
+src/stores/slices/scannerSlice.js:284:  getModelsBySourceLocal: (sourceId) => {
+src/stores/slices/scannerSlice.js:289:  getModelsByTypeLocal: (modelType) => {
+src/stores/slices/scannerSlice.js:294:  getScanStats: () => {
+src/stores/slices/scannerSlice.js:6:export const createScannerSlice = (set, get) => ({
+src/stores/slices/scannerSlice.js:16:  initializeScanner: async () => {
+src/stores/slices/scannerSlice.js:38:  setupScannerListeners: () => {
+src/stores/slices/scannerSlice.js:80:        discoveredModels: state.discoveredModels.map(m =>
+src/stores/slices/scannerSlice.js:91:        discoveredModels: state.discoveredModels.map(m =>
+src/stores/slices/scannerSlice.js:101:  refreshSources: async () => {
+src/stores/slices/scannerSlice.js:113:  scanAll: async (options = {}) => {
+src/stores/slices/scannerSlice.js:126:  loadDiscoveredModels: async () => {
+src/stores/slices/scannerSlice.js:138:  getModelsBySource: async (sourceId) => {
+src/stores/slices/scannerSlice.js:148:  getModelsByType: async (modelType) => {
+src/stores/slices/scannerSlice.js:158:  addCustomPath: async (scanPath, options = {}) => {
+src/stores/slices/scannerSlice.js:172:  removeCustomPath: async (scanPath) => {
+src/stores/slices/scannerSlice.js:186:  importModel: async (modelPath, targetDir) => {
+src/stores/slices/scannerSlice.js:192:          discoveredModels: state.discoveredModels.map(m =>
+src/stores/slices/scannerSlice.js:207:  linkModel: async (modelPath, targetDir) => {
+src/stores/slices/scannerSlice.js:212:          discoveredModels: state.discoveredModels.map(m =>
+src/stores/slices/scannerSlice.js:227:  moveModel: async (modelPath, targetDir) => {
+src/stores/slices/scannerSlice.js:232:          discoveredModels: state.discoveredModels.map(m =>
+src/stores/slices/scannerSlice.js:247:  startWatching: async (sourceId) => {
+src/stores/slices/scannerSlice.js:257:  stopWatching: async (sourceId) => {
+src/stores/slices/scannerSlice.js:267:  clearScanner: async () => {
+src/stores/slices/scannerSlice.js:279:  getDetectedSources: () => {
+src/stores/slices/scannerSlice.js:284:  getModelsBySourceLocal: (sourceId) => {
+src/stores/slices/scannerSlice.js:289:  getModelsByTypeLocal: (modelType) => {
+src/stores/slices/scannerSlice.js:294:  getScanStats: () => {
+src/stores/debateStore.js:54:export const useDebateStore = create((set, get) => ({
+src/stores/debateStore.js:79:  getSystemPrompt: () => {
+src/stores/debateStore.js:85:  openDebate: (workspace = 'casual') => set({ 
+src/stores/debateStore.js:91:  closeDebate: () => {
+src/stores/debateStore.js:96:  setWorkspace: (workspace) => set({
+src/stores/debateStore.js:101:  setParticipants: (models) => {
+src/stores/debateStore.js:105:  addParticipant: (model) => {
+src/stores/debateStore.js:112:  removeParticipant: (model) => {
+src/stores/debateStore.js:119:  setTopic: (topic) => set({ topic }),
+src/stores/debateStore.js:120:  setMaxTurns: (max) => set({ maxTurns: Math.min(50, Math.max(2, max)) }),
+src/stores/debateStore.js:121:  setTurnDelay: (delay) => set({ turnDelay: Math.min(5000, Math.max(500, delay)) }),
+src/stores/debateStore.js:124:  startDebate: async () => {
+src/stores/debateStore.js:162:  nextTurn: async () => {
+src/stores/debateStore.js:289:  pauseDebate: () => {
+src/stores/debateStore.js:294:  resumeDebate: async () => {
+src/stores/debateStore.js:312:  userInterject: async (content) => {
+src/stores/debateStore.js:341:  setNextSpeaker: (model) => {
+src/stores/debateStore.js:351:  stopDebate: () => {
+src/stores/debateStore.js:366:  resetDebate: () => {
+src/stores/debateStore.js:378:  exportTranscript: () => {
+src/stores/debateStore.js:405:  getQuickTopics: () => {
+src/stores/slices/organizationSlice.js:7:export const createOrganizationSlice = (set, get) => ({
+src/stores/slices/organizationSlice.js:21:  loadFolders: async () => {
+src/stores/slices/organizationSlice.js:33:  createFolder: async (name, color = '#6366f1', icon = 'Folder') => {
+src/stores/slices/organizationSlice.js:69:  updateFolder: async (folderId, updates) => {
+src/stores/slices/organizationSlice.js:82:  deleteFolder: async (folderId) => {
+src/stores/slices/organizationSlice.js:99:  setActiveFolder: (folderId) => {
+src/stores/slices/organizationSlice.js:107:  moveToFolder: async (conversationId, folderId) => {
+src/stores/slices/organizationSlice.js:113:          conversations: state.conversations.map(c => 
+src/stores/slices/organizationSlice.js:125:  toggleStar: async (conversationId) => {
+src/stores/slices/organizationSlice.js:131:          conversations: state.conversations.map(c => 
+src/stores/slices/organizationSlice.js:143:  togglePin: async (conversationId) => {
+src/stores/slices/organizationSlice.js:149:          conversations: state.conversations.map(c => 
+src/stores/slices/organizationSlice.js:161:  setTags: async (conversationId, tags) => {
+src/stores/slices/organizationSlice.js:180:          conversations: state.conversations.map(c => 
+src/stores/slices/organizationSlice.js:198:  setActiveFilter: (filter) => {
+src/stores/slices/organizationSlice.js:202:  getFilteredConversations: () => {
+src/stores/slices/organizationSlice.js:285:  setSearchQuery: (query) => {
+src/stores/slices/organizationSlice.js:289:  search: async (query) => {
+src/stores/slices/organizationSlice.js:313:  clearSearch: () => {
+src/stores/slices/organizationSlice.js:321:  loadWorkspaceTags: async () => {
+src/stores/slices/organizationSlice.js:357:  updateConversationMeta: async (conversationId, preview, messageCount) => {
+src/stores/slices/organizationSlice.js:374:        conversations: state.conversations.map(c => 
+src/stores/slices/organizationSlice.js:7:export const createOrganizationSlice = (set, get) => ({
+src/stores/slices/organizationSlice.js:21:  loadFolders: async () => {
+src/stores/slices/organizationSlice.js:33:  createFolder: async (name, color = '#6366f1', icon = 'Folder') => {
+src/stores/slices/organizationSlice.js:69:  updateFolder: async (folderId, updates) => {
+src/stores/slices/organizationSlice.js:82:  deleteFolder: async (folderId) => {
+src/stores/slices/organizationSlice.js:99:  setActiveFolder: (folderId) => {
+src/stores/slices/organizationSlice.js:107:  moveToFolder: async (conversationId, folderId) => {
+src/stores/slices/organizationSlice.js:113:          conversations: state.conversations.map(c => 
+src/stores/slices/organizationSlice.js:125:  toggleStar: async (conversationId) => {
+src/stores/slices/organizationSlice.js:131:          conversations: state.conversations.map(c => 
+src/stores/slices/organizationSlice.js:143:  togglePin: async (conversationId) => {
+src/stores/slices/organizationSlice.js:149:          conversations: state.conversations.map(c => 
+src/stores/slices/organizationSlice.js:161:  setTags: async (conversationId, tags) => {
+src/stores/slices/organizationSlice.js:180:          conversations: state.conversations.map(c => 
+src/stores/slices/organizationSlice.js:198:  setActiveFilter: (filter) => {
+src/stores/slices/organizationSlice.js:202:  getFilteredConversations: () => {
+src/stores/slices/organizationSlice.js:285:  setSearchQuery: (query) => {
+src/stores/slices/organizationSlice.js:289:  search: async (query) => {
+src/stores/slices/organizationSlice.js:313:  clearSearch: () => {
+src/stores/slices/organizationSlice.js:321:  loadWorkspaceTags: async () => {
+src/stores/slices/organizationSlice.js:357:  updateConversationMeta: async (conversationId, preview, messageCount) => {
+src/stores/slices/organizationSlice.js:374:        conversations: state.conversations.map(c => 
+src/stores/slices/generationSlice.js:4:export const createGenerationSlice = (set, get) => ({
+src/stores/slices/generationSlice.js:26:  setRagInfluence: async (value) => {
+src/stores/slices/generationSlice.js:36:  setStreamingRenderMode: async (mode) => {
+src/stores/slices/generationSlice.js:46:  setFastChatMode: async (enabled) => {
+src/stores/slices/generationSlice.js:56:  stopGeneration: async () => {
+src/stores/slices/generationSlice.js:69:  updateStreamingContent: (content, metadata = null) => {
+src/stores/slices/generationSlice.js:77:  resetGeneration: () => {
+src/stores/soulStore.js:29:export const useSoulStore = create(
+src/stores/soulStore.js:66:      setState: (state, confidence, signals) => set({
+src/stores/soulStore.js:72:      updateCircadian: () => {
+src/stores/soulStore.js:80:      addSuggestion: (suggestion) => {
+src/stores/soulStore.js:101:      dismissSuggestion: (id) => {
+src/stores/soulStore.js:104:          suggestions: suggestions.filter(s => s.id !== id),
+src/stores/soulStore.js:109:      clearSuggestions: () => set({ suggestions: [] }),
+src/stores/soulStore.js:111:      addInsight: (insight) => {
+src/stores/soulStore.js:119:      acknowledgeInsights: () => set({ unacknowledgedInsights: 0 }),
+src/stores/soulStore.js:121:      setLedgerStats: (stats) => set({ ledgerStats: stats }),
+src/stores/soulStore.js:122:      setSessionId: (id) => set({ sessionId: id }),
+src/stores/soulStore.js:124:      toggleSoulDashboard: () => set(s => ({ showSoulDashboard: !s.showSoulDashboard })),
+src/stores/soulStore.js:125:      toggleForgeConsole: () => set(s => ({ showForgeConsole: !s.showForgeConsole })),
+src/stores/soulStore.js:126:      setForgeConsoleTab: (tab) => set({ forgeConsoleTab: tab }),
+src/stores/soulStore.js:128:      setEnabled: (enabled) => set({ enabled }),
+src/stores/soulStore.js:129:      setReceiptsRequired: (required) => set({ receiptsRequired: required }),
+src/stores/soulStore.js:130:      setAdaptToState: (adapt) => set({ adaptToState: adapt }),
+src/stores/soulStore.js:131:      setAdaptToCircadian: (adapt) => set({ adaptToCircadian: adapt }),
+src/stores/soulStore.js:134:      getStateAdaptation: () => {
+src/stores/soulStore.js:178:          instruction: adaptations.map(a => a.instruction || `Tone: ${a.tone}`).filter(Boolean).join(' '),
+src/stores/soulStore.js:183:      initialize: async () => {
+src/stores/soulStore.js:214:      recordMessage: async (params) => {
+src/stores/soulStore.js:219:      recordWorkspaceSwitch: async (from, to) => {
+src/stores/soulStore.js:224:      recordModelSwitch: async (from, to, workspace) => {
+src/stores/soulStore.js:229:      recordUserAction: async (action, params) => {
+src/stores/soulStore.js:236:      partialize: (state) => ({
+src/stores/soulStore.js:248:export { CIRCADIAN_PERIODS, getCircadianPeriod };
+src/stores/slices/generationSlice.js:4:export const createGenerationSlice = (set, get) => ({
+src/stores/slices/generationSlice.js:26:  setRagInfluence: async (value) => {
+src/stores/slices/generationSlice.js:36:  setStreamingRenderMode: async (mode) => {
+src/stores/slices/generationSlice.js:46:  setFastChatMode: async (enabled) => {
+src/stores/slices/generationSlice.js:56:  stopGeneration: async () => {
+src/stores/slices/generationSlice.js:69:  updateStreamingContent: (content, metadata = null) => {
+src/stores/slices/generationSlice.js:77:  resetGeneration: () => {
+src/stores/slices/modelSlice.js:332:export const createModelSlice = (set, get) => {
+src/stores/slices/modelSlice.js:488:    resolveModelSelection: async (requestedModel, options = {}) => {
+src/stores/slices/modelSlice.js:511:    hydrateModelState: async (model, options = {}) => {
+src/stores/slices/modelSlice.js:658:    initializeLlm: async (options = {}) => {
+src/stores/slices/modelSlice.js:671:    refreshLlmRuntime: async (options = {}) => {
+src/stores/slices/modelSlice.js:698:    setModel: async (requestedModel) => {
+src/stores/slices/modelSlice.js:731:    warmupCurrentModel: async () => {
+src/stores/slices/modelSlice.js:766:    setPreferredBackend: async (backendId) => {
+src/stores/slices/modelSlice.js:790:    setPerformanceProfile: async (profile) => {
+src/stores/slices/modelSlice.js:811:    refreshModels: async () => {
+src/stores/slices/modelCatalogSlice.js:39:export const createModelCatalogSlice = (set, get) => ({
+src/stores/slices/modelCatalogSlice.js:50:  hydrateModelCatalog: async ({ force = false, ttlMs = MODEL_CATALOG_TTL_MS, sources = null } = {}) => {
+src/stores/slices/modelCatalogSlice.js:136:  invalidateModelCatalog: (source = null) => {
+src/stores/slices/modelCatalogSlice.js:150:  watchModelCatalog: () => () => {},
+src/stores/slices/modelCatalogSlice.js:39:export const createModelCatalogSlice = (set, get) => ({
+src/stores/slices/modelCatalogSlice.js:50:  hydrateModelCatalog: async ({ force = false, ttlMs = MODEL_CATALOG_TTL_MS, sources = null } = {}) => {
+src/stores/slices/modelCatalogSlice.js:136:  invalidateModelCatalog: (source = null) => {
+src/stores/slices/modelCatalogSlice.js:150:  watchModelCatalog: () => () => {},
+src/stores/slices/workspaceSlice.js:12:export const WORKSPACES = {
+src/stores/slices/workspaceSlice.js:77:export const createWorkspaceSlice = (set, get) => ({
+src/stores/slices/workspaceSlice.js:89:  setWorkspace: async (workspaceId) => {
+src/stores/slices/workspaceSlice.js:116:  unlockNsfw: async (password) => {
+src/stores/slices/workspaceSlice.js:136:  setNsfwPassword: async (password) => {
+src/stores/slices/workspaceSlice.js:153:  checkNsfwPasswordExists: async () => {
+src/stores/slices/workspaceSlice.js:162:  lockNsfw: () => {
+src/stores/slices/workspaceSlice.js:169:  triggerPanic: () => {
+src/stores/slices/workspaceSlice.js:182:  promoteResearchContext: (payload = {}) => {
+src/stores/slices/workspaceSlice.js:206:  clearPromotedResearchContext: (target = null) => {
+src/stores/slices/workspaceSlice.js:220:  listPromotedResearchContext: (target = 'casual') => {
+src/stores/slices/index.js:3:export { createWorkspaceSlice, WORKSPACES } from './workspaceSlice';
+src/stores/slices/index.js:4:export { createModelSlice } from './modelSlice';
+src/stores/slices/index.js:5:export {
+src/stores/slices/index.js:14:export { createGenerationSlice } from './generationSlice';
+src/stores/slices/index.js:15:export { createConversationSlice } from './conversationSlice';
+src/stores/slices/index.js:16:export { createMessageSlice } from './messageSlice';
+src/stores/slices/index.js:17:export { createOrganizationSlice } from './organizationSlice';
+src/stores/slices/index.js:18:export { createProjectSlice, normalizeActiveProjectByWorkspace } from './projectSlice';
+src/stores/slices/index.js:19:export { createDownloadSlice, JobStatus } from './downloadSlice';
+src/stores/slices/index.js:20:export { createInstallerSlice, Engine, ModelType } from './installerSlice';
+src/stores/slices/index.js:21:export { createScannerSlice } from './scannerSlice';
+src/stores/slices/index.js:22:export { createConverterSlice } from './converterSlice';
+src/stores/slices/index.js:23:export { createCollectionsSlice } from './collectionsSlice';
+src/stores/slices/index.js:24:export { createModelCatalogSlice } from './modelCatalogSlice';
+src/stores/slices/index.js:3:export { createWorkspaceSlice, WORKSPACES } from './workspaceSlice';
+src/stores/slices/index.js:4:export { createModelSlice } from './modelSlice';
+src/stores/slices/index.js:5:export {
+src/stores/slices/index.js:14:export { createGenerationSlice } from './generationSlice';
+src/stores/slices/index.js:15:export { createConversationSlice } from './conversationSlice';
+src/stores/slices/index.js:16:export { createMessageSlice } from './messageSlice';
+src/stores/slices/index.js:17:export { createOrganizationSlice } from './organizationSlice';
+src/stores/slices/index.js:18:export { createProjectSlice, normalizeActiveProjectByWorkspace } from './projectSlice';
+src/stores/slices/index.js:19:export { createDownloadSlice, JobStatus } from './downloadSlice';
+src/stores/slices/index.js:20:export { createInstallerSlice, Engine, ModelType } from './installerSlice';
+src/stores/slices/index.js:21:export { createScannerSlice } from './scannerSlice';
+src/stores/slices/index.js:22:export { createConverterSlice } from './converterSlice';
+src/stores/slices/index.js:23:export { createCollectionsSlice } from './collectionsSlice';
+src/stores/slices/index.js:24:export { createModelCatalogSlice } from './modelCatalogSlice';
+src/stores/appStore.js:37:export { WORKSPACES, JobStatus, Engine, ModelType };
+src/stores/appStore.js:39:export const useAppStore = create((set, get) => ({
+src/stores/appStore.js:46:  initializeApp: async () => {
+src/stores/appStore.js:169:  clearError: () => set({ error: null }),
+src/stores/appStore.js:192:export const useCurrentWorkspace = () => useAppStore(s => s.currentWorkspace);
+src/stores/appStore.js:193:export const useIsLocked = () => useAppStore(s => s.isLocked);
+src/stores/appStore.js:196:export const useCurrentModel = () => useAppStore(s => s.currentModel);
+src/stores/appStore.js:197:export const useAvailableModels = () => useAppStore(s => s.availableModels);
+src/stores/appStore.js:198:export const useModelStatus = () => useAppStore(s => s.modelStatus);
+src/stores/appStore.js:201:export const getModelOptimizationInfo = async (modelName) => {
+src/stores/appStore.js:206:export const useConversations = () => useAppStore(s => s.conversations);
+src/stores/appStore.js:207:export const useCurrentConversationId = () => useAppStore(s => s.currentConversationId);
+src/stores/appStore.js:208:export const useMessages = () => useAppStore(s => s.messages);
+src/stores/appStore.js:209:export const useBranches = () => useAppStore(s => s.branches);
+src/stores/appStore.js:212:export const useIsGenerating = () => useAppStore(s => s.isGenerating);
+src/stores/appStore.js:213:export const useStreamingContent = () => useAppStore(s => s.streamingContent);
+src/stores/appStore.js:214:export const useGenerationMetadata = () => useAppStore(s => s.generationMetadata);
+src/stores/appStore.js:215:export const useRagContext = () => useAppStore(s => s.ragContext);
+src/stores/appStore.js:218:export const useShowSettings = () => useAppStore(s => s.showSettings);
+src/stores/appStore.js:219:export const useShowImageGen = () => useAppStore(s => s.showImageGen);
+src/stores/appStore.js:220:export const useShowModelHub = () => useAppStore(s => s.showModelHub);
+src/stores/appStore.js:221:export const useShowExportModal = () => useAppStore(s => s.showExportModal);
+src/stores/appStore.js:222:export const useSidebarCollapsed = () => useAppStore(s => s.sidebarCollapsed);
+src/stores/appStore.js:225:export const useFolders = () => useAppStore(s => s.folders);
+src/stores/appStore.js:226:export const useActiveFolderId = () => useAppStore(s => s.activeFolderId);
+src/stores/appStore.js:227:export const useActiveFilter = () => useAppStore(s => s.activeFilter);
+src/stores/appStore.js:228:export const useSearchQuery = () => useAppStore(s => s.searchQuery);
+src/stores/appStore.js:229:export const useSearchResults = () => useAppStore(s => s.searchResults);
+src/stores/appStore.js:230:export const useIsSearching = () => useAppStore(s => s.isSearching);
+src/stores/appStore.js:231:export const useWorkspaceTags = () => useAppStore(s => s.workspaceTags);
+src/stores/appStore.js:232:export const useFilteredConversations = () => useAppStore(s => s.getFilteredConversations());
+src/stores/appStore.js:235:export const useChatState = () => useAppStore(s => ({
+src/stores/appStore.js:242:export const useWorkspaceState = () => useAppStore(s => ({
+src/stores/appStore.js:249:export const useAppActions = () => useAppStore(s => ({
+src/stores/appStore.js:263:export const useOrganizationActions = () => useAppStore(s => ({
+src/stores/appStore.js:282:export const useDownloads = () => useAppStore(s => s.downloads);
+src/stores/appStore.js:283:export const useDownloadsLoading = () => useAppStore(s => s.downloadsLoading);
+src/stores/appStore.js:284:export const useDownloadStats = () => useAppStore(s => s.getDownloadStats?.() || { total: 0, active: 0, paused: 0, completed: 0, failed: 0, queued: 0, totalSpeed: 0 });
+src/stores/appStore.js:287:export const useDownloadActions = () => useAppStore(s => ({
+src/stores/appStore.js:306:export const useAvailableEngines = () => useAppStore(s => s.availableEngines);
+src/stores/appStore.js:307:export const useActiveInstallations = () => useAppStore(s => s.activeInstallations);
+src/stores/appStore.js:308:export const usePendingDependencies = () => useAppStore(s => s.pendingDependencies);
+src/stores/appStore.js:309:export const useEnginesLoading = () => useAppStore(s => s.enginesLoading);
+src/stores/appStore.js:312:export const useInstallerActions = () => useAppStore(s => ({
+src/stores/appStore.js:329:export const useScannerSources = () => useAppStore(s => s.scannerSources);
+src/stores/appStore.js:330:export const useDiscoveredModels = () => useAppStore(s => s.discoveredModels);
+src/stores/appStore.js:331:export const useScannerLoading = () => useAppStore(s => s.scannerLoading);
+src/stores/appStore.js:332:export const useScanResults = () => useAppStore(s => s.scanResults);
+src/stores/appStore.js:333:export const useCurrentScanSource = () => useAppStore(s => s.currentScanSource);
+src/stores/appStore.js:336:export const useScannerActions = () => useAppStore(s => ({
+src/stores/appStore.js:358:export const useConversionJobs = () => useAppStore(s => s.conversionJobs);
+src/stores/appStore.js:359:export const useQuantTypes = () => useAppStore(s => s.quantTypes);
+src/stores/appStore.js:360:export const useSupportedConversions = () => useAppStore(s => s.supportedConversions);
+src/stores/appStore.js:361:export const useIsLoadingConversions = () => useAppStore(s => s.isLoadingConversions);
+src/stores/appStore.js:364:export const useConverterActions = () => useAppStore(s => ({
+src/stores/appStore.js:376:export const useStarterPacks = () => useAppStore(s => s.starterPacks);
+src/stores/appStore.js:377:export const useUserCollections = () => useAppStore(s => s.userCollections);
+src/stores/appStore.js:378:export const useSelectedCollection = () => useAppStore(s => s.selectedCollection);
+src/stores/appStore.js:379:export const useCollectionsLoading = () => useAppStore(s => s.collectionsLoading);
+src/stores/appStore.js:380:export const useCollectionInstallProgress = () => useAppStore(s => s.installProgress);
+src/stores/appStore.js:381:export const useCollectionCategories = () => useAppStore(s => s.categories);
+src/stores/appStore.js:384:export const useCollectionsActions = () => useAppStore(s => ({
+src/stores/slices/conversationSlice.js:8:export const createConversationSlice = (set, get) => ({
+src/stores/slices/conversationSlice.js:17:  loadConversations: async () => {
+src/stores/slices/conversationSlice.js:61:  createConversation: async (title = 'New Chat') => {
+src/stores/slices/conversationSlice.js:104:  selectConversation: async (conversationId, branchId = null) => {
+src/stores/slices/conversationSlice.js:193:  createBranchFromMessage: async (conversationId, messageId, name) => {
+src/stores/slices/conversationSlice.js:212:  switchBranch: async (branchId) => {
+src/stores/slices/conversationSlice.js:218:  deleteConversation: async (conversationId) => {
+src/stores/slices/conversationSlice.js:238:  appendFromCompare: async (content, model) => {
+src/stores/templatesStore.js:4:export const useTemplatesStore = create((set) => ({
+src/stores/templatesStore.js:62:        templates: state.templates.filter((t) => t.id !== id),
+src/stores/slices/conversationSlice.js:8:export const createConversationSlice = (set, get) => ({
+src/stores/slices/conversationSlice.js:17:  loadConversations: async () => {
+src/stores/slices/conversationSlice.js:61:  createConversation: async (title = 'New Chat') => {
+src/stores/slices/conversationSlice.js:104:  selectConversation: async (conversationId, branchId = null) => {
+src/stores/slices/conversationSlice.js:193:  createBranchFromMessage: async (conversationId, messageId, name) => {
+src/stores/slices/conversationSlice.js:212:  switchBranch: async (branchId) => {
+src/stores/slices/conversationSlice.js:218:  deleteConversation: async (conversationId) => {
+src/stores/slices/conversationSlice.js:238:  appendFromCompare: async (content, model) => {
+src/stores/slices/collectionsSlice.js:11:export const createCollectionsSlice = (set, get) => ({
+src/stores/slices/collectionsSlice.js:25:  fetchStarterPacks: async () => {
+src/stores/slices/collectionsSlice.js:44:  fetchUserCollections: async () => {
+src/stores/slices/collectionsSlice.js:63:  fetchAllCollections: async () => {
+src/stores/slices/collectionsSlice.js:74:  getCollection: async (collectionId) => {
+src/stores/slices/collectionsSlice.js:90:  createCollection: async (data) => {
+src/stores/slices/collectionsSlice.js:108:  updateCollection: async (collectionId, updates) => {
+src/stores/slices/collectionsSlice.js:113:          userCollections: state.userCollections.map((c) =>
+src/stores/slices/collectionsSlice.js:131:  deleteCollection: async (collectionId) => {
+src/stores/slices/collectionsSlice.js:136:          userCollections: state.userCollections.filter((c) => c.id !== collectionId),
+src/stores/slices/collectionsSlice.js:152:  addModelToCollection: async (collectionId, modelData) => {
+src/stores/slices/collectionsSlice.js:169:  removeModelFromCollection: async (collectionId, provider, modelId) => {
+src/stores/slices/collectionsSlice.js:186:  exportCollectionManifest: async (collectionId) => {
+src/stores/slices/collectionsSlice.js:198:  importCollectionManifest: async (manifest) => {
+src/stores/slices/collectionsSlice.js:216:  generateShareCode: async (collectionId) => {
+src/stores/slices/collectionsSlice.js:228:  getCollectionByShareCode: async (shareCode) => {
+src/stores/slices/collectionsSlice.js:240:  getInstallationStatus: async (collectionId) => {
+src/stores/slices/collectionsSlice.js:261:  fetchCategories: async () => {
+src/stores/slices/collectionsSlice.js:277:  selectCollection: (collection) => {
+src/stores/slices/collectionsSlice.js:284:  clearSelectedCollection: () => {
+src/stores/slices/collectionsSlice.js:291:  handleCollectionCreated: (collection) => {
+src/stores/slices/collectionsSlice.js:300:  handleCollectionUpdated: (data) => {
+src/stores/slices/collectionsSlice.js:302:      userCollections: state.userCollections.map((c) =>
+src/stores/slices/collectionsSlice.js:311:  handleCollectionDeleted: (data) => {
+src/stores/slices/collectionsSlice.js:313:      userCollections: state.userCollections.filter((c) => c.id !== data.id),
+src/stores/slices/collectionsSlice.js:320:  handleInstallProgress: (data) => {
+src/stores/slices/collectionsSlice.js:336:  setupCollectionListeners: () => {
+src/stores/slices/collectionsSlice.js:360:export const selectStarterPacks = (state) => state.starterPacks;
+src/stores/slices/collectionsSlice.js:361:export const selectUserCollections = (state) => state.userCollections;
+src/stores/slices/collectionsSlice.js:362:export const selectAllCollections = (state) => [...state.starterPacks, ...state.userCollections];
+src/stores/slices/collectionsSlice.js:363:export const selectSelectedCollection = (state) => state.selectedCollection;
+src/stores/slices/collectionsSlice.js:364:export const selectCollectionsLoading = (state) => state.collectionsLoading;
+src/stores/slices/collectionsSlice.js:365:export const selectInstallProgress = (state) => state.installProgress;
+src/stores/slices/collectionsSlice.js:366:export const selectCategories = (state) => state.categories;
+src/stores/characterStore.js:5:export const useCharacterStore = create((set, get) => ({
+src/stores/characterStore.js:64:          characters: (state.characters || []).filter((c) => c.id !== id),
+src/stores/slices/downloadSlice.js:6:export const JobStatus = {
+src/stores/slices/downloadSlice.js:19:export const createDownloadSlice = (set, get) => ({
+src/stores/slices/downloadSlice.js:28:  initializeDownloads: async () => {
+src/stores/slices/downloadSlice.js:50:  setupDownloadListeners: () => {
+src/stores/slices/downloadSlice.js:67:        downloads: state.downloads.map(d => d.id === job.id ? job : d),
+src/stores/slices/downloadSlice.js:74:        downloads: state.downloads.map(d => d.id === job.id ? job : d),
+src/stores/slices/downloadSlice.js:81:        downloads: state.downloads.map(d => d.id === job.id ? job : d),
+src/stores/slices/downloadSlice.js:88:        downloads: state.downloads.map(d => d.id === job.id ? job : d),
+src/stores/slices/downloadSlice.js:95:        downloads: state.downloads.map(d => d.id === job.id ? job : d),
+src/stores/slices/downloadSlice.js:102:        downloads: state.downloads.map(d => d.id === job.id ? job : d),
+src/stores/slices/downloadSlice.js:113:  teardownDownloadListeners: () => {
+src/stores/slices/downloadSlice.js:125:  createDownload: async (options) => {
+src/stores/slices/downloadSlice.js:139:  pauseDownload: async (id) => {
+src/stores/slices/downloadSlice.js:150:  resumeDownload: async (id) => {
+src/stores/slices/downloadSlice.js:161:  retryDownload: async (id) => {
+src/stores/slices/downloadSlice.js:172:  cancelDownload: async (id) => {
+src/stores/slices/downloadSlice.js:183:  deleteDownload: async (id, deleteFiles = false) => {
+src/stores/slices/downloadSlice.js:188:          downloads: state.downloads.filter(d => d.id !== id),
+src/stores/slices/downloadSlice.js:199:  setDownloadPriority: async (id, priority) => {
+src/stores/slices/downloadSlice.js:210:  scheduleDownload: async (id, scheduleTime) => {
+src/stores/slices/downloadSlice.js:221:  clearCompletedDownloads: async () => {
+src/stores/slices/downloadSlice.js:226:          downloads: state.downloads.filter(d => d.status !== JobStatus.COMPLETED),
+src/stores/slices/downloadSlice.js:237:  getActiveDownloads: () => {
+src/stores/slices/downloadSlice.js:244:  getPausedDownloads: () => {
+src/stores/slices/downloadSlice.js:249:  getCompletedDownloads: () => {
+src/stores/slices/downloadSlice.js:254:  getFailedDownloads: () => {
+src/stores/slices/downloadSlice.js:259:  getDownloadById: (id) => {
+src/stores/slices/downloadSlice.js:264:  getDownloadStats: () => {
+src/stores/slices/downloadSlice.js:272:      paused: downloads.filter(d => d.status === JobStatus.PAUSED).length,
+src/stores/slices/downloadSlice.js:273:      completed: downloads.filter(d => d.status === JobStatus.COMPLETED).length,
+src/stores/slices/downloadSlice.js:274:      failed: downloads.filter(d => d.status === JobStatus.ERROR).length,
+src/stores/slices/downloadSlice.js:275:      queued: downloads.filter(d => d.status === JobStatus.QUEUED).length,
+src/stores/editorStore.js:9:export const useEditorStore = create((set, get) => ({
+src/stores/editorStore.js:96:        toolCalls: state.aiSession.toolCalls.map(tc =>
+src/stores/editorStore.js:112:            filesRead: state.aiSession.filesRead.map(f =>
+src/stores/editorStore.js:153:          proposedPatches: state.aiSession.proposedPatches.filter(p => p.id !== patchId),
+src/stores/editorStore.js:172:          proposedPatches: state.aiSession.proposedPatches.filter(p => p.id !== patchId),
+src/stores/editorStore.js:193:      appliedPatches: state.aiSession.appliedPatches.map(p => p.id),
+src/stores/editorStore.js:508:      pendingAgentActions: state.pendingAgentActions.filter((action) => action.id !== id),
+src/stores/slices/converterSlice.js:11:export const createConverterSlice = (set, get) => ({
+src/stores/slices/converterSlice.js:23:  fetchConversionJobs: async () => {
+src/stores/slices/converterSlice.js:39:  getSupportedConversions: async (filePath) => {
+src/stores/slices/converterSlice.js:63:  createConversionJob: async (type, sourcePath, options = {}) => {
+src/stores/slices/converterSlice.js:80:  cancelConversionJob: async (jobId) => {
+src/stores/slices/converterSlice.js:93:  clearCompletedJobs: async () => {
+src/stores/slices/converterSlice.js:108:  fetchQuantTypes: async () => {
+src/stores/slices/converterSlice.js:124:  estimateConversionTime: async (sourcePath, type, options = {}) => {
+src/stores/slices/converterSlice.js:137:  handleJobCreated: (job) => {
+src/stores/slices/converterSlice.js:146:  handleJobStarted: (job) => {
+src/stores/slices/converterSlice.js:148:      conversionJobs: state.conversionJobs.map((j) =>
+src/stores/slices/converterSlice.js:157:  handleJobProgress: (job) => {
+src/stores/slices/converterSlice.js:159:      conversionJobs: state.conversionJobs.map((j) =>
+src/stores/slices/converterSlice.js:168:  handleJobCompleted: (job) => {
+src/stores/slices/converterSlice.js:170:      conversionJobs: state.conversionJobs.map((j) =>
+src/stores/slices/converterSlice.js:179:  handleJobError: (job) => {
+src/stores/slices/converterSlice.js:181:      conversionJobs: state.conversionJobs.map((j) =>
+src/stores/slices/converterSlice.js:190:  handleJobCancelled: (job) => {
+src/stores/slices/converterSlice.js:192:      conversionJobs: state.conversionJobs.map((j) =>
+src/stores/slices/converterSlice.js:201:  setupConverterListeners: () => {
+src/stores/slices/converterSlice.js:232:export const selectConversionJobs = (state) => state.conversionJobs;
+src/stores/slices/converterSlice.js:233:export const selectActiveConversions = (state) => 
+src/stores/slices/converterSlice.js:235:export const selectCompletedConversions = (state) => 
+src/stores/slices/converterSlice.js:237:export const selectFailedConversions = (state) => 
+src/stores/slices/converterSlice.js:239:export const selectQuantTypes = (state) => state.quantTypes;
+src/stores/slices/converterSlice.js:240:export const selectSupportedConversions = (state) => state.supportedConversions;
+src/stores/animationStore.js:9:export const useAnimationStore = create(
+src/stores/animationStore.js:27:      initialize: () => {
+src/stores/animationStore.js:59:      toggleAnimations: () => {
+src/stores/animationStore.js:72:      setPerformanceLevel: (level) => {
+src/stores/animationStore.js:117:      toggleParticles: () => set(s => ({ particlesEnabled: !s.particlesEnabled })),
+src/stores/animationStore.js:118:      toggleMatrixRain: () => set(s => ({ matrixRainEnabled: !s.matrixRainEnabled })),
+src/stores/animationStore.js:119:      toggleMagnetic: () => set(s => ({ magneticEnabled: !s.magneticEnabled })),
+src/stores/animationStore.js:120:      toggleGlowEffects: () => set(s => ({ glowEffectsEnabled: !s.glowEffectsEnabled })),
+src/stores/animationStore.js:121:      toggleReducedMotion: () => set(s => ({ reducedMotion: !s.reducedMotion })),
+src/stores/animationStore.js:125:      partialize: (state) => ({
+src/stores/animationStore.js:138:export const useCanAnimate = () => {
+src/stores/animationStore.js:144:export const useAnimationFeatures = () => {
+src/stores/slices/messageSlice.js:664:export const createMessageSlice = (set, get) => ({
+src/stores/slices/messageSlice.js:731:  dismissRuntimeNotice: () => set({ runtimeNotice: null }),
+src/stores/slices/messageSlice.js:733:  recordGuardrailEvent: (event = {}) => {
+src/stores/slices/messageSlice.js:784:  resetGuardrailMetrics: (scope = 'all') => {
+src/stores/slices/messageSlice.js:813:  setImageGenSettings: (settings) => set(state => ({
+src/stores/slices/messageSlice.js:817:  recalibrateCurrentModel: async () => {
+src/stores/slices/messageSlice.js:962:  regenerateLastResponse: async () => {
+src/stores/slices/messageSlice.js:999:      messages: state.messages.filter(m => m.id !== lastAssistant.id),
+src/stores/slices/messageSlice.js:1010:  editMessageAndRegenerate: async (messageId, newContent) => {
+src/stores/slices/messageSlice.js:1055:  deleteMessage: async (messageId) => {
+src/stores/slices/messageSlice.js:1066:      messages: state.messages.filter(m => m.id !== messageId),
+src/stores/slices/messageSlice.js:1073:  sendMessage: async (content, extra = {}) => {
+src/stores/slices/messageSlice.js:1297:  _generateResponse: async (userContent, conversationId, genOptions = {}) => {
+src/stores/slices/installerSlice.js:7:export const Engine = {
+src/stores/slices/installerSlice.js:20:export const ModelType = {
+src/stores/slices/installerSlice.js:32:export const createInstallerSlice = (set, get) => ({
+src/stores/slices/installerSlice.js:41:  initializeInstaller: async () => {
+src/stores/slices/installerSlice.js:63:  setupInstallerListeners: () => {
+src/stores/slices/installerSlice.js:80:        activeInstallations: state.activeInstallations.map(inst =>
+src/stores/slices/installerSlice.js:91:        activeInstallations: state.activeInstallations.map(inst =>
+src/stores/slices/installerSlice.js:112:  refreshEngines: async () => {
+src/stores/slices/installerSlice.js:126:  getEnginesForType: async (modelType) => {
+src/stores/slices/installerSlice.js:136:  getRecommendedEngine: async (modelInfo) => {
+src/stores/slices/installerSlice.js:146:  installModel: async (filePath, modelInfo, options = {}) => {
+src/stores/slices/installerSlice.js:161:          activeInstallations: state.activeInstallations.map(inst =>
+src/stores/slices/installerSlice.js:173:        activeInstallations: state.activeInstallations.map(inst =>
+src/stores/slices/installerSlice.js:184:  validateModel: async (modelInfo, engineId) => {
+src/stores/slices/installerSlice.js:194:  checkModelReadiness: async (modelInfo, engineId) => {
+src/stores/slices/installerSlice.js:204:  uninstallModel: async (modelInfo, engineId) => {
+src/stores/slices/installerSlice.js:215:  setEnginePath: async (engineId, enginePath) => {
+src/stores/slices/installerSlice.js:230:  clearPendingDependencies: () => {
+src/stores/slices/installerSlice.js:235:  clearCompletedInstallations: () => {
+src/stores/slices/installerSlice.js:244:  getEngineById: (engineId) => {
+src/stores/slices/installerSlice.js:249:  getActiveInstallationsCount: () => {
+src/stores/slices/uiSlice.js:4:export const DEFAULT_SIDEBAR_WIDTH = 320;
+src/stores/slices/uiSlice.js:5:export const MIN_SIDEBAR_WIDTH = 280;
+src/stores/slices/uiSlice.js:6:export const MAX_SIDEBAR_WIDTH = 460;
+src/stores/slices/uiSlice.js:7:export const SIDEBAR_SECTION_IDS = [
+src/stores/slices/uiSlice.js:17:export const DEFAULT_SIDEBAR_SECTION_ORDER = [...SIDEBAR_SECTION_IDS];
+src/stores/slices/uiSlice.js:18:export const DEFAULT_SIDEBAR_SECTION_VISIBILITY = SIDEBAR_SECTION_IDS.reduce((acc, id) => {
+src/stores/slices/uiSlice.js:23:export function clampSidebarWidth(width) {
+src/stores/slices/uiSlice.js:29:export function normalizeSidebarSectionOrder(value) {
+src/stores/slices/uiSlice.js:42:export function normalizeSidebarSectionVisibility(value) {
+src/stores/slices/uiSlice.js:82:export const createUiSlice = (set, get) => ({
+src/stores/slices/uiSlice.js:97:  toggleSettings: () => set((state) => ({ showSettings: !state.showSettings })),
+src/stores/slices/uiSlice.js:98:  toggleImageGen: () => set((state) => ({ showImageGen: !state.showImageGen })),
+src/stores/slices/uiSlice.js:99:  toggleModelSelector: () => set((state) => ({ showModelSelector: !state.showModelSelector })),
+src/stores/slices/uiSlice.js:100:  toggleModelHub: () => {
+src/stores/slices/uiSlice.js:107:  toggleDownloadCenter: () => set((state) => ({ showDownloadCenter: !state.showDownloadCenter })),
+src/stores/slices/uiSlice.js:108:  openExportModal: () => set({ showExportModal: true }),
+src/stores/slices/uiSlice.js:109:  closeExportModal: () => set({ showExportModal: false }),
+src/stores/slices/uiSlice.js:111:  setSidebarCollapsed: (collapsed, options = {}) => {
+src/stores/slices/uiSlice.js:118:  toggleSidebar: () => {
+src/stores/slices/uiSlice.js:123:  setSidebarWidth: (width, options = {}) => {
+src/stores/slices/uiSlice.js:133:  setSidebarCustomizing: (value) => set({ sidebarCustomizing: Boolean(value) }),
+src/stores/slices/uiSlice.js:134:  toggleSidebarCustomizing: () => set((state) => ({ sidebarCustomizing: !state.sidebarCustomizing })),
+src/stores/slices/uiSlice.js:136:  setSidebarSectionVisibility: (sectionId, visible, options = {}) => {
+src/stores/slices/uiSlice.js:147:  toggleSidebarSectionVisibility: (sectionId) => {
+src/stores/slices/uiSlice.js:152:  reorderSidebarSection: (draggedId, targetId, options = {}) => {
+src/stores/slices/uiSlice.js:159:  resetSidebarCustomization: () => {
+src/stores/slices/uiSlice.js:4:export const DEFAULT_SIDEBAR_WIDTH = 320;
+src/stores/slices/uiSlice.js:5:export const MIN_SIDEBAR_WIDTH = 280;
+src/stores/slices/uiSlice.js:6:export const MAX_SIDEBAR_WIDTH = 460;
+src/stores/slices/uiSlice.js:7:export const SIDEBAR_SECTION_IDS = [
+src/stores/slices/uiSlice.js:17:export const DEFAULT_SIDEBAR_SECTION_ORDER = [...SIDEBAR_SECTION_IDS];
+src/stores/slices/uiSlice.js:18:export const DEFAULT_SIDEBAR_SECTION_VISIBILITY = SIDEBAR_SECTION_IDS.reduce((acc, id) => {
+src/stores/slices/uiSlice.js:23:export function clampSidebarWidth(width) {
+src/stores/slices/uiSlice.js:29:export function normalizeSidebarSectionOrder(value) {
+src/stores/slices/uiSlice.js:42:export function normalizeSidebarSectionVisibility(value) {
+src/stores/slices/uiSlice.js:82:export const createUiSlice = (set, get) => ({
+src/stores/slices/uiSlice.js:97:  toggleSettings: () => set((state) => ({ showSettings: !state.showSettings })),
+src/stores/slices/uiSlice.js:98:  toggleImageGen: () => set((state) => ({ showImageGen: !state.showImageGen })),
+src/stores/slices/uiSlice.js:99:  toggleModelSelector: () => set((state) => ({ showModelSelector: !state.showModelSelector })),
+src/stores/slices/uiSlice.js:100:  toggleModelHub: () => {
+src/stores/slices/uiSlice.js:107:  toggleDownloadCenter: () => set((state) => ({ showDownloadCenter: !state.showDownloadCenter })),
+src/stores/slices/uiSlice.js:108:  openExportModal: () => set({ showExportModal: true }),
+src/stores/slices/uiSlice.js:109:  closeExportModal: () => set({ showExportModal: false }),
+src/stores/slices/uiSlice.js:111:  setSidebarCollapsed: (collapsed, options = {}) => {
+src/stores/slices/uiSlice.js:118:  toggleSidebar: () => {
+src/stores/slices/uiSlice.js:123:  setSidebarWidth: (width, options = {}) => {
+src/stores/slices/uiSlice.js:133:  setSidebarCustomizing: (value) => set({ sidebarCustomizing: Boolean(value) }),
+src/stores/slices/uiSlice.js:134:  toggleSidebarCustomizing: () => set((state) => ({ sidebarCustomizing: !state.sidebarCustomizing })),
+src/stores/slices/uiSlice.js:136:  setSidebarSectionVisibility: (sectionId, visible, options = {}) => {
+src/stores/slices/uiSlice.js:147:  toggleSidebarSectionVisibility: (sectionId) => {
+src/stores/slices/uiSlice.js:152:  reorderSidebarSection: (draggedId, targetId, options = {}) => {
+src/stores/slices/uiSlice.js:159:  resetSidebarCustomization: () => {
+src/stores/slices/projectSlice.js:12:export function normalizeActiveProjectByWorkspace(value) {
+src/stores/slices/projectSlice.js:43:export const createProjectSlice = (set, get) => ({
+src/stores/slices/projectSlice.js:52:  hydrateActiveProjectByWorkspace: (value) => {
+src/stores/slices/projectSlice.js:61:  loadProjects: async (workspaceOverride = null) => {
+src/stores/slices/projectSlice.js:110:  syncActiveProjectForWorkspace: async (workspaceOverride = null) => {
+src/stores/slices/projectSlice.js:145:  setActiveProject: async (projectId, options = {}) => {
+src/stores/slices/projectSlice.js:182:  createProject: async ({ name, description = '', instructions = '' } = {}) => {
+src/stores/slices/projectSlice.js:213:  refreshActiveProjectLinks: async (projectIdOverride = null, workspaceOverride = null) => {
+src/stores/slices/projectSlice.js:253:  linkConversationToActiveProject: async (conversationId, options = {}) => {
+src/stores/progressStore.js:7:export const useProgressStore = create((set, get) => ({
+src/stores/progressStore.js:12:  startOperation: (id, { type = 'generic', label = 'Processing...', message = '' }) => {
+src/stores/progressStore.js:30:  updateOperation: (id, { progress, message, status }) => {
+src/stores/progressStore.js:50:  completeOperation: (id, { message = 'Complete!', success = true } = {}) => {
+src/stores/progressStore.js:76:  removeOperation: (id) => {
+src/stores/progressStore.js:84:  clearAll: () => {
+src/stores/progressStore.js:89:  getActiveCount: () => {
+src/stores/progressStore.js:95:  hasActiveOperations: () => {
+src/stores/themeStore.js:13:export const useThemeStore = create((set, get) => ({
+src/stores/modelWarmupStore.js:34:export const useModelWarmupStore = create((set, get) => ({
+src/stores/modelWarmupStore.js:38:  reset: () => set({ ...INITIAL_STATE }),
+src/stores/modelWarmupStore.js:40:  acceptEvent: (chunk = {}) => {
+src/stores/modelWarmupStore.js:79:  runWithProgress: async (model) => {
+src/stores/modelWarmupStore.js:134:  dismiss: () => {
+src/stores/modelWarmupStore.js:143:export function triggerWarmupWithProgress(model) {
+src/stores/slices/modelSlice.js:332:export const createModelSlice = (set, get) => {
+src/stores/slices/modelSlice.js:488:    resolveModelSelection: async (requestedModel, options = {}) => {
+src/stores/slices/modelSlice.js:511:    hydrateModelState: async (model, options = {}) => {
+src/stores/slices/modelSlice.js:658:    initializeLlm: async (options = {}) => {
+src/stores/slices/modelSlice.js:671:    refreshLlmRuntime: async (options = {}) => {
+src/stores/slices/modelSlice.js:698:    setModel: async (requestedModel) => {
+src/stores/slices/modelSlice.js:731:    warmupCurrentModel: async () => {
+src/stores/slices/modelSlice.js:766:    setPreferredBackend: async (backendId) => {
+src/stores/slices/modelSlice.js:790:    setPerformanceProfile: async (profile) => {
+src/stores/slices/modelSlice.js:811:    refreshModels: async () => {
+src/stores/slices/messageSlice.js:664:export const createMessageSlice = (set, get) => ({
+src/stores/slices/messageSlice.js:731:  dismissRuntimeNotice: () => set({ runtimeNotice: null }),
+src/stores/slices/messageSlice.js:733:  recordGuardrailEvent: (event = {}) => {
+src/stores/slices/messageSlice.js:784:  resetGuardrailMetrics: (scope = 'all') => {
+src/stores/slices/messageSlice.js:813:  setImageGenSettings: (settings) => set(state => ({
+src/stores/slices/messageSlice.js:817:  recalibrateCurrentModel: async () => {
+src/stores/slices/messageSlice.js:962:  regenerateLastResponse: async () => {
+src/stores/slices/messageSlice.js:999:      messages: state.messages.filter(m => m.id !== lastAssistant.id),
+src/stores/slices/messageSlice.js:1010:  editMessageAndRegenerate: async (messageId, newContent) => {
+src/stores/slices/messageSlice.js:1055:  deleteMessage: async (messageId) => {
+src/stores/slices/messageSlice.js:1066:      messages: state.messages.filter(m => m.id !== messageId),
+src/stores/slices/messageSlice.js:1073:  sendMessage: async (content, extra = {}) => {
+src/stores/slices/messageSlice.js:1297:  _generateResponse: async (userContent, conversationId, genOptions = {}) => {
+src/stores/shortcutsStore.js:92:export const useShortcutsStore = create((set, get) => ({
+src/stores/shortcutsStore.js:199:export function getNormalizedShortcuts() {
+src/stores/huggingfaceStore.js:9:export const useHuggingfaceStore = create((set, get) => ({
+src/stores/huggingfaceStore.js:31:  setCollection: (collection) => set({ selectedCollection: collection }),
+src/stores/huggingfaceStore.js:32:  setSearchQuery: (query) => set({ searchQuery: query }),
+src/stores/huggingfaceStore.js:114:  clearError: () => set({ error: null }),
+src/stores/slices/workspaceSlice.js:12:export const WORKSPACES = {
+src/stores/slices/workspaceSlice.js:77:export const createWorkspaceSlice = (set, get) => ({
+src/stores/slices/workspaceSlice.js:89:  setWorkspace: async (workspaceId) => {
+src/stores/slices/workspaceSlice.js:116:  unlockNsfw: async (password) => {
+src/stores/slices/workspaceSlice.js:136:  setNsfwPassword: async (password) => {
+src/stores/slices/workspaceSlice.js:153:  checkNsfwPasswordExists: async () => {
+src/stores/slices/workspaceSlice.js:162:  lockNsfw: () => {
+src/stores/slices/workspaceSlice.js:169:  triggerPanic: () => {
+src/stores/slices/workspaceSlice.js:182:  promoteResearchContext: (payload = {}) => {
+src/stores/slices/workspaceSlice.js:206:  clearPromotedResearchContext: (target = null) => {
+src/stores/slices/workspaceSlice.js:220:  listPromotedResearchContext: (target = 'casual') => {
+src/stores/slices/converterSlice.js:11:export const createConverterSlice = (set, get) => ({
+src/stores/slices/converterSlice.js:23:  fetchConversionJobs: async () => {
+src/stores/slices/converterSlice.js:39:  getSupportedConversions: async (filePath) => {
+src/stores/slices/converterSlice.js:63:  createConversionJob: async (type, sourcePath, options = {}) => {
+src/stores/slices/converterSlice.js:80:  cancelConversionJob: async (jobId) => {
+src/stores/slices/converterSlice.js:93:  clearCompletedJobs: async () => {
+src/stores/slices/converterSlice.js:108:  fetchQuantTypes: async () => {
+src/stores/slices/converterSlice.js:124:  estimateConversionTime: async (sourcePath, type, options = {}) => {
+src/stores/slices/converterSlice.js:137:  handleJobCreated: (job) => {
+src/stores/slices/converterSlice.js:146:  handleJobStarted: (job) => {
+src/stores/slices/converterSlice.js:148:      conversionJobs: state.conversionJobs.map((j) =>
+src/stores/slices/converterSlice.js:157:  handleJobProgress: (job) => {
+src/stores/slices/converterSlice.js:159:      conversionJobs: state.conversionJobs.map((j) =>
+src/stores/slices/converterSlice.js:168:  handleJobCompleted: (job) => {
+src/stores/slices/converterSlice.js:170:      conversionJobs: state.conversionJobs.map((j) =>
+src/stores/slices/converterSlice.js:179:  handleJobError: (job) => {
+src/stores/slices/converterSlice.js:181:      conversionJobs: state.conversionJobs.map((j) =>
+src/stores/slices/converterSlice.js:190:  handleJobCancelled: (job) => {
+src/stores/slices/converterSlice.js:192:      conversionJobs: state.conversionJobs.map((j) =>
+src/stores/slices/converterSlice.js:201:  setupConverterListeners: () => {
+src/stores/slices/converterSlice.js:232:export const selectConversionJobs = (state) => state.conversionJobs;
+src/stores/slices/converterSlice.js:233:export const selectActiveConversions = (state) => 
+src/stores/slices/converterSlice.js:235:export const selectCompletedConversions = (state) => 
+src/stores/slices/converterSlice.js:237:export const selectFailedConversions = (state) => 
+src/stores/slices/converterSlice.js:239:export const selectQuantTypes = (state) => state.quantTypes;
+src/stores/slices/converterSlice.js:240:export const selectSupportedConversions = (state) => state.supportedConversions;
+src/stores/chatV2SessionStore.js:66:export const useChatV2SessionStore = create(
+src/stores/chatV2SessionStore.js:71:      setContextLengthTokens: (tokens) => {
+src/stores/chatV2SessionStore.js:81:      setBackendOverride: (id) => {
+src/stores/chatV2SessionStore.js:87:      setTuningMode: (mode) => {
+src/stores/chatV2SessionStore.js:91:      setTaskIntent: (intent) => {
+src/stores/chatV2SessionStore.js:96:      setAdvancedOverride: (key, value) => {
+src/stores/chatV2SessionStore.js:105:      setAdvancedOverrides: (overrides) => set({ advancedOverrides: sanitizeAdvancedOverrides(overrides) }),
+src/stores/chatV2SessionStore.js:106:      resetAdvancedOverrides: () => set({ tuningMode: 'auto', taskIntent: 'auto', advancedOverrides: {} }),
+src/stores/chatV2SessionStore.js:112:export const CHAT_V2_BACKEND_OVERRIDES = ALLOWED_BACKEND_OVERRIDES;
+src/stores/chatV2SessionStore.js:113:export const CHAT_V2_TASK_INTENTS = ALLOWED_TASK_INTENTS;
+src/stores/chatV2SessionStore.js:114:export const CHAT_V2_ADVANCED_KEYS = ALLOWED_ADVANCED_KEYS;
+src/stores/slices/collectionsSlice.js:11:export const createCollectionsSlice = (set, get) => ({
+src/stores/slices/collectionsSlice.js:25:  fetchStarterPacks: async () => {
+src/stores/slices/collectionsSlice.js:44:  fetchUserCollections: async () => {
+src/stores/slices/collectionsSlice.js:63:  fetchAllCollections: async () => {
+src/stores/slices/collectionsSlice.js:74:  getCollection: async (collectionId) => {
+src/stores/slices/collectionsSlice.js:90:  createCollection: async (data) => {
+src/stores/slices/collectionsSlice.js:108:  updateCollection: async (collectionId, updates) => {
+src/stores/slices/collectionsSlice.js:113:          userCollections: state.userCollections.map((c) =>
+src/stores/slices/collectionsSlice.js:131:  deleteCollection: async (collectionId) => {
+src/stores/slices/collectionsSlice.js:136:          userCollections: state.userCollections.filter((c) => c.id !== collectionId),
+src/stores/slices/collectionsSlice.js:152:  addModelToCollection: async (collectionId, modelData) => {
+src/stores/slices/collectionsSlice.js:169:  removeModelFromCollection: async (collectionId, provider, modelId) => {
+src/stores/slices/collectionsSlice.js:186:  exportCollectionManifest: async (collectionId) => {
+src/stores/slices/collectionsSlice.js:198:  importCollectionManifest: async (manifest) => {
+src/stores/slices/collectionsSlice.js:216:  generateShareCode: async (collectionId) => {
+src/stores/slices/collectionsSlice.js:228:  getCollectionByShareCode: async (shareCode) => {
+src/stores/slices/collectionsSlice.js:240:  getInstallationStatus: async (collectionId) => {
+src/stores/slices/collectionsSlice.js:261:  fetchCategories: async () => {
+src/stores/slices/collectionsSlice.js:277:  selectCollection: (collection) => {
+src/stores/slices/collectionsSlice.js:284:  clearSelectedCollection: () => {
+src/stores/slices/collectionsSlice.js:291:  handleCollectionCreated: (collection) => {
+src/stores/slices/collectionsSlice.js:300:  handleCollectionUpdated: (data) => {
+src/stores/slices/collectionsSlice.js:302:      userCollections: state.userCollections.map((c) =>
+src/stores/slices/collectionsSlice.js:311:  handleCollectionDeleted: (data) => {
+src/stores/slices/collectionsSlice.js:313:      userCollections: state.userCollections.filter((c) => c.id !== data.id),
+src/stores/slices/collectionsSlice.js:320:  handleInstallProgress: (data) => {
+src/stores/slices/collectionsSlice.js:336:  setupCollectionListeners: () => {
+src/stores/slices/collectionsSlice.js:360:export const selectStarterPacks = (state) => state.starterPacks;
+src/stores/slices/collectionsSlice.js:361:export const selectUserCollections = (state) => state.userCollections;
+src/stores/slices/collectionsSlice.js:362:export const selectAllCollections = (state) => [...state.starterPacks, ...state.userCollections];
+src/stores/slices/collectionsSlice.js:363:export const selectSelectedCollection = (state) => state.selectedCollection;
+src/stores/slices/collectionsSlice.js:364:export const selectCollectionsLoading = (state) => state.collectionsLoading;
+src/stores/slices/collectionsSlice.js:365:export const selectInstallProgress = (state) => state.installProgress;
+src/stores/slices/collectionsSlice.js:366:export const selectCategories = (state) => state.categories;
+src/stores/slices/downloadSlice.js:6:export const JobStatus = {
+src/stores/slices/downloadSlice.js:19:export const createDownloadSlice = (set, get) => ({
+src/stores/slices/downloadSlice.js:28:  initializeDownloads: async () => {
+src/stores/slices/downloadSlice.js:50:  setupDownloadListeners: () => {
+src/stores/slices/downloadSlice.js:67:        downloads: state.downloads.map(d => d.id === job.id ? job : d),
+src/stores/slices/downloadSlice.js:74:        downloads: state.downloads.map(d => d.id === job.id ? job : d),
+src/stores/slices/downloadSlice.js:81:        downloads: state.downloads.map(d => d.id === job.id ? job : d),
+src/stores/slices/downloadSlice.js:88:        downloads: state.downloads.map(d => d.id === job.id ? job : d),
+src/stores/slices/downloadSlice.js:95:        downloads: state.downloads.map(d => d.id === job.id ? job : d),
+src/stores/slices/downloadSlice.js:102:        downloads: state.downloads.map(d => d.id === job.id ? job : d),
+src/stores/slices/downloadSlice.js:113:  teardownDownloadListeners: () => {
+src/stores/slices/downloadSlice.js:125:  createDownload: async (options) => {
+src/stores/slices/downloadSlice.js:139:  pauseDownload: async (id) => {
+src/stores/slices/downloadSlice.js:150:  resumeDownload: async (id) => {
+src/stores/slices/downloadSlice.js:161:  retryDownload: async (id) => {
+src/stores/slices/downloadSlice.js:172:  cancelDownload: async (id) => {
+src/stores/slices/downloadSlice.js:183:  deleteDownload: async (id, deleteFiles = false) => {
+src/stores/slices/downloadSlice.js:188:          downloads: state.downloads.filter(d => d.id !== id),
+src/stores/slices/downloadSlice.js:199:  setDownloadPriority: async (id, priority) => {
+src/stores/slices/downloadSlice.js:210:  scheduleDownload: async (id, scheduleTime) => {
+src/stores/slices/downloadSlice.js:221:  clearCompletedDownloads: async () => {
+src/stores/slices/downloadSlice.js:226:          downloads: state.downloads.filter(d => d.status !== JobStatus.COMPLETED),
+src/stores/slices/downloadSlice.js:237:  getActiveDownloads: () => {
+src/stores/slices/downloadSlice.js:244:  getPausedDownloads: () => {
+src/stores/slices/downloadSlice.js:249:  getCompletedDownloads: () => {
+src/stores/slices/downloadSlice.js:254:  getFailedDownloads: () => {
+src/stores/slices/downloadSlice.js:259:  getDownloadById: (id) => {
+src/stores/slices/downloadSlice.js:264:  getDownloadStats: () => {
+src/stores/slices/downloadSlice.js:272:      paused: downloads.filter(d => d.status === JobStatus.PAUSED).length,
+src/stores/slices/downloadSlice.js:273:      completed: downloads.filter(d => d.status === JobStatus.COMPLETED).length,
+src/stores/slices/downloadSlice.js:274:      failed: downloads.filter(d => d.status === JobStatus.ERROR).length,
+src/stores/slices/downloadSlice.js:275:      queued: downloads.filter(d => d.status === JobStatus.QUEUED).length,
+src/stores/slices/projectSlice.js:12:export function normalizeActiveProjectByWorkspace(value) {
+src/stores/slices/projectSlice.js:43:export const createProjectSlice = (set, get) => ({
+src/stores/slices/projectSlice.js:52:  hydrateActiveProjectByWorkspace: (value) => {
+src/stores/slices/projectSlice.js:61:  loadProjects: async (workspaceOverride = null) => {
+src/stores/slices/projectSlice.js:110:  syncActiveProjectForWorkspace: async (workspaceOverride = null) => {
+src/stores/slices/projectSlice.js:145:  setActiveProject: async (projectId, options = {}) => {
+src/stores/slices/projectSlice.js:182:  createProject: async ({ name, description = '', instructions = '' } = {}) => {
+src/stores/slices/projectSlice.js:213:  refreshActiveProjectLinks: async (projectIdOverride = null, workspaceOverride = null) => {
+src/stores/slices/projectSlice.js:253:  linkConversationToActiveProject: async (conversationId, options = {}) => {
+src/stores/slices/installerSlice.js:7:export const Engine = {
+src/stores/slices/installerSlice.js:20:export const ModelType = {
+src/stores/slices/installerSlice.js:32:export const createInstallerSlice = (set, get) => ({
+src/stores/slices/installerSlice.js:41:  initializeInstaller: async () => {
+src/stores/slices/installerSlice.js:63:  setupInstallerListeners: () => {
+src/stores/slices/installerSlice.js:80:        activeInstallations: state.activeInstallations.map(inst =>
+src/stores/slices/installerSlice.js:91:        activeInstallations: state.activeInstallations.map(inst =>
+src/stores/slices/installerSlice.js:112:  refreshEngines: async () => {
+src/stores/slices/installerSlice.js:126:  getEnginesForType: async (modelType) => {
+src/stores/slices/installerSlice.js:136:  getRecommendedEngine: async (modelInfo) => {
+src/stores/slices/installerSlice.js:146:  installModel: async (filePath, modelInfo, options = {}) => {
+src/stores/slices/installerSlice.js:161:          activeInstallations: state.activeInstallations.map(inst =>
+src/stores/slices/installerSlice.js:173:        activeInstallations: state.activeInstallations.map(inst =>
+src/stores/slices/installerSlice.js:184:  validateModel: async (modelInfo, engineId) => {
+src/stores/slices/installerSlice.js:194:  checkModelReadiness: async (modelInfo, engineId) => {
+src/stores/slices/installerSlice.js:204:  uninstallModel: async (modelInfo, engineId) => {
+src/stores/slices/installerSlice.js:215:  setEnginePath: async (engineId, enginePath) => {
+src/stores/slices/installerSlice.js:230:  clearPendingDependencies: () => {
+src/stores/slices/installerSlice.js:235:  clearCompletedInstallations: () => {
+src/stores/slices/installerSlice.js:244:  getEngineById: (engineId) => {
+src/stores/slices/installerSlice.js:249:  getActiveInstallationsCount: () => {

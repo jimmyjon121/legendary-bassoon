@@ -1,0 +1,186 @@
+scripts/backend-decision-timeline-smoke.js:30:      if (/INSERT INTO model_backend_decisions/i.test(sql)) {
+scripts/backend-decision-timeline-smoke.js:43:      if (/INSERT INTO model_load_outcomes/i.test(sql)) {
+scripts/autonomy-routing-smoke.js:68:    ipc.includes('ALTER TABLE model_presets ADD COLUMN device_pin TEXT'),
+scripts/autonomy-routing-smoke.js:85:    ipc.includes('INSERT INTO model_presets (id, model_name, temperature, top_p, top_k, context_length, system_prompt, workspace, is_default, device_pin')
+electron/services/soul-engine.js:44:      CREATE TABLE IF NOT EXISTS soul_state (
+electron/services/soul-engine.js:53:      CREATE TABLE IF NOT EXISTS soul_patterns (
+electron/services/soul-engine.js:66:      CREATE TABLE IF NOT EXISTS soul_feedback (
+electron/services/soul-engine.js:78:      CREATE TABLE IF NOT EXISTS soul_rhythms (
+electron/services/soul-engine.js:91:      CREATE TABLE IF NOT EXISTS soul_expertise (
+electron/services/soul-engine.js:101:    this.db.run('CREATE INDEX IF NOT EXISTS idx_soul_patterns_cat ON soul_patterns(category)');
+electron/services/soul-engine.js:102:    this.db.run('CREATE INDEX IF NOT EXISTS idx_soul_feedback_signal ON soul_feedback(signal)');
+electron/services/soul-engine.js:384:          INSERT INTO soul_patterns (id, category, pattern, occurrences)
+electron/services/soul-engine.js:406:        INSERT INTO soul_rhythms (id, hour, day_of_week, activity_type, count)
+electron/services/soul-engine.js:461:        INSERT INTO soul_feedback (id, message_id, signal, value, context)
+electron/services/ipc/data-service.js:84:    db.run('CREATE INDEX IF NOT EXISTS idx_messages_conversation_created_at ON messages(conversation_id, created_at)');
+electron/services/ipc/data-service.js:85:    db.run('CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at)');
+electron/services/ipc/data-service.js:86:    db.run('CREATE INDEX IF NOT EXISTS idx_conversations_workspace_updated_at ON conversations(workspace, updated_at)');
+electron/services/ipc/data-service.js:122:      CREATE TABLE IF NOT EXISTS message_attachments (
+electron/services/ipc/data-service.js:135:    db.run('CREATE INDEX IF NOT EXISTS idx_message_attachments_message ON message_attachments(message_id)');
+electron/services/ipc/data-service.js:185:      `INSERT INTO conversations
+electron/services/ipc/data-service.js:328:      `INSERT INTO messages
+electron/services/ipc/data-service.js:506:      'INSERT INTO conversation_branches (id, conversation_id, parent_branch_id, name) VALUES (?, ?, ?, ?)',
+electron/services/ipc/data-service.js:551:          `INSERT INTO message_attachments
+electron/services/memory-engine.js:49:      CREATE TABLE IF NOT EXISTS memories (
+electron/services/memory-engine.js:65:      CREATE TABLE IF NOT EXISTS conversation_summaries (
+electron/services/memory-engine.js:79:      CREATE TABLE IF NOT EXISTS pinned_messages (
+electron/services/memory-engine.js:90:    this.db.run('CREATE INDEX IF NOT EXISTS idx_memories_workspace ON memories(workspace)');
+electron/services/memory-engine.js:91:    this.db.run('CREATE INDEX IF NOT EXISTS idx_memories_type ON memories(type)');
+electron/services/memory-engine.js:92:    this.db.run('CREATE INDEX IF NOT EXISTS idx_memories_importance ON memories(importance DESC)');
+electron/services/memory-engine.js:93:    this.db.run('CREATE INDEX IF NOT EXISTS idx_summaries_conv ON conversation_summaries(conversation_id)');
+electron/services/memory-engine.js:328:      INSERT INTO memories (id, workspace, conversation_id, type, content, importance, metadata)
+electron/services/model-experience-workbench.js:288:      CREATE TABLE IF NOT EXISTS model_workbench_runs (
+electron/services/model-experience-workbench.js:302:      CREATE TABLE IF NOT EXISTS model_workbench_results (
+electron/services/model-experience-workbench.js:325:    database.run('CREATE INDEX IF NOT EXISTS idx_workbench_runs_model ON model_workbench_runs(model, created_at)');
+electron/services/model-experience-workbench.js:326:    database.run('CREATE INDEX IF NOT EXISTS idx_workbench_results_run ON model_workbench_results(run_id)');
+electron/services/model-experience-workbench.js:440:      `INSERT INTO model_workbench_runs (id, model, workspace, status, profile_ids, summary, recommendation, warnings, created_at, completed_at)
+electron/services/model-experience-workbench.js:479:      `INSERT INTO model_workbench_results
+electron/services/character-engine.js:50:    `INSERT INTO character_states (id, character_id, current_mood, mood_intensity, energy_level, relationship_stage)
+electron/services/ledger/ledger-db.js:78:    CREATE TABLE IF NOT EXISTS ledger_events (
+electron/services/ledger/ledger-db.js:92:    CREATE TABLE IF NOT EXISTS evidence_items (
+electron/services/ledger/ledger-db.js:105:    CREATE TABLE IF NOT EXISTS action_runs (
+electron/services/ledger/ledger-db.js:118:    CREATE TABLE IF NOT EXISTS action_steps (
+electron/services/ledger/ledger-db.js:134:    CREATE TABLE IF NOT EXISTS decision_forks (
+electron/services/ledger/ledger-db.js:151:    CREATE TABLE IF NOT EXISTS friction_signals (
+electron/services/ledger/ledger-db.js:164:    CREATE TABLE IF NOT EXISTS sessions (
+electron/services/ledger/ledger-db.js:174:  db.run(`CREATE INDEX IF NOT EXISTS idx_events_session ON ledger_events(session_id)`);
+electron/services/ledger/ledger-db.js:175:  db.run(`CREATE INDEX IF NOT EXISTS idx_events_type ON ledger_events(type)`);
+electron/services/ledger/ledger-db.js:176:  db.run(`CREATE INDEX IF NOT EXISTS idx_events_ts ON ledger_events(ts)`);
+electron/services/ledger/ledger-db.js:177:  db.run(`CREATE INDEX IF NOT EXISTS idx_evidence_event ON evidence_items(event_id)`);
+electron/services/ledger/ledger-db.js:178:  db.run(`CREATE INDEX IF NOT EXISTS idx_steps_run ON action_steps(run_id)`);
+electron/services/ledger/ledger-db.js:179:  db.run(`CREATE INDEX IF NOT EXISTS idx_friction_event ON friction_signals(related_event_id)`);
+electron/services/ledger/ledger-db.js:228:    INSERT INTO ledger_events (id, type, workspace, session_id, ts, payload_json, prev_hash, hash)
+electron/services/ledger/ledger-db.js:298:    INSERT INTO evidence_items (id, event_id, kind, ref_json, content_hash, ts)
+electron/services/ledger/ledger-db.js:339:    INSERT INTO action_runs (id, intent, plan_ir_json, status)
+electron/services/ledger/ledger-db.js:390:    INSERT INTO action_steps (id, run_id, idx, step_type, input_json, output_json, evidence_id)
+electron/services/ledger/ledger-db.js:434:    INSERT INTO decision_forks (id, run_id, event_id, fork_point, alternatives_json, chosen_id, predicted_json)
+electron/services/ledger/ledger-db.js:457:    INSERT INTO friction_signals (id, related_event_id, kind, severity, payload_json)
+electron/services/ledger/ledger-db.js:559:  db.run('INSERT INTO sessions (id) VALUES (?)', [sessionId]);
+electron/services/collections-service.js:192:      CREATE TABLE IF NOT EXISTS model_collections (
+electron/services/collections-service.js:214:      CREATE TABLE IF NOT EXISTS collection_models (
+electron/services/collections-service.js:229:      CREATE TABLE IF NOT EXISTS collection_installs (
+electron/services/collections-service.js:241:    this.db.run(`CREATE INDEX IF NOT EXISTS idx_collections_type ON model_collections(type)`);
+electron/services/collections-service.js:242:    this.db.run(`CREATE INDEX IF NOT EXISTS idx_collections_category ON model_collections(category)`);
+electron/services/collections-service.js:243:    this.db.run(`CREATE INDEX IF NOT EXISTS idx_collection_models_collection ON collection_models(collectionId)`);
+electron/services/collections-service.js:257:        INSERT INTO model_collections (id, name, description, type, category, icon, estimatedSize, difficulty, version, tags, createdAt, updatedAt)
+electron/services/collections-service.js:278:          INSERT INTO collection_models (collectionId, provider, modelId, role, orderIndex)
+electron/services/collections-service.js:376:      INSERT INTO model_collections (id, name, description, type, category, icon, tags, createdAt, updatedAt)
+electron/services/collections-service.js:630:        INSERT INTO collection_installs (collectionId, modelsInstalled, modelsTotal, status)
+electron/services/model-testing-service.js:120:      CREATE TABLE IF NOT EXISTS model_test_results (
+electron/services/model-testing-service.js:139:      CREATE TABLE IF NOT EXISTS model_benchmarks (
+electron/services/model-testing-service.js:154:    this.db.run(`CREATE INDEX IF NOT EXISTS idx_test_results_model ON model_test_results(modelId)`);
+electron/services/model-testing-service.js:155:    this.db.run(`CREATE INDEX IF NOT EXISTS idx_benchmarks_model ON model_benchmarks(modelId)`);
+electron/services/model-testing-service.js:589:      INSERT INTO model_test_results 
+electron/services/model-testing-service.js:616:      INSERT INTO model_benchmarks 
+electron/ipc-handlers.js:698:    CREATE TABLE IF NOT EXISTS conversations (
+electron/ipc-handlers.js:710:    CREATE TABLE IF NOT EXISTS messages (
+electron/ipc-handlers.js:723:    CREATE TABLE IF NOT EXISTS generated_images (
+electron/ipc-handlers.js:738:    CREATE TABLE IF NOT EXISTS characters (
+electron/ipc-handlers.js:752:    CREATE TABLE IF NOT EXISTS nsfw_auth (
+electron/ipc-handlers.js:762:    CREATE TABLE IF NOT EXISTS templates (
+electron/ipc-handlers.js:774:    CREATE TABLE IF NOT EXISTS model_presets (
+electron/ipc-handlers.js:795:    const presetInfo = db.exec('PRAGMA table_info(model_presets)');
+electron/ipc-handlers.js:807:        db.run(`ALTER TABLE model_presets ADD COLUMN created_at DATETIME`);
+electron/ipc-handlers.js:814:        db.run(`ALTER TABLE model_presets ADD COLUMN device_pin TEXT`);
+electron/ipc-handlers.js:821:        db.run(`ALTER TABLE model_presets ADD COLUMN task_intent TEXT`);
+electron/ipc-handlers.js:828:        db.run(`ALTER TABLE model_presets ADD COLUMN advanced_options TEXT`);
+electron/ipc-handlers.js:835:        db.run(`ALTER TABLE model_presets ADD COLUMN vault_allowed INTEGER DEFAULT 0`);
+electron/ipc-handlers.js:851:    CREATE TABLE IF NOT EXISTS conversation_branches (
+electron/ipc-handlers.js:861:    CREATE TABLE IF NOT EXISTS message_attachments (
+electron/ipc-handlers.js:876:    CREATE TABLE IF NOT EXISTS documents (
+electron/ipc-handlers.js:888:    CREATE TABLE IF NOT EXISTS document_chunks (
+electron/ipc-handlers.js:900:    CREATE TABLE IF NOT EXISTS research_projects (
+electron/ipc-handlers.js:914:    CREATE TABLE IF NOT EXISTS research_project_conversations (
+electron/ipc-handlers.js:925:    CREATE TABLE IF NOT EXISTS research_project_documents (
+electron/ipc-handlers.js:936:    CREATE TABLE IF NOT EXISTS research_runs (
+electron/ipc-handlers.js:955:    db.run(`ALTER TABLE research_runs ADD COLUMN prompt_snapshot_json TEXT`);
+electron/ipc-handlers.js:961:    CREATE TABLE IF NOT EXISTS research_tasks (
+electron/ipc-handlers.js:977:    CREATE TABLE IF NOT EXISTS research_records (
+electron/ipc-handlers.js:993:    CREATE TABLE IF NOT EXISTS research_evidence (
+electron/ipc-handlers.js:1009:    CREATE TABLE IF NOT EXISTS research_checkpoints (
+electron/ipc-handlers.js:1021:    db.run(`ALTER TABLE messages ADD COLUMN branch_id TEXT`);
+electron/ipc-handlers.js:1026:    db.run(`ALTER TABLE messages ADD COLUMN parent_message_id TEXT`);
+electron/ipc-handlers.js:1033:    db.run(`ALTER TABLE conversations ADD COLUMN pinned INTEGER DEFAULT 0`);
+electron/ipc-handlers.js:1038:    db.run(`ALTER TABLE conversations ADD COLUMN starred INTEGER DEFAULT 0`);
+electron/ipc-handlers.js:1043:    db.run(`ALTER TABLE conversations ADD COLUMN tags TEXT DEFAULT '[]'`);
+electron/ipc-handlers.js:1048:    db.run(`ALTER TABLE conversations ADD COLUMN folder_id TEXT`);
+electron/ipc-handlers.js:1053:    db.run(`ALTER TABLE conversations ADD COLUMN message_count INTEGER DEFAULT 0`);
+electron/ipc-handlers.js:1058:    db.run(`ALTER TABLE conversations ADD COLUMN preview TEXT`);
+electron/ipc-handlers.js:1065:    CREATE TABLE IF NOT EXISTS folders (
+electron/ipc-handlers.js:1078:  db.run(`CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id)`);
+electron/ipc-handlers.js:1079:  db.run(`CREATE INDEX IF NOT EXISTS idx_messages_conversation_created_at ON messages(conversation_id, created_at)`);
+electron/ipc-handlers.js:1080:  db.run(`CREATE INDEX IF NOT EXISTS idx_messages_created_at ON messages(created_at)`);
+electron/ipc-handlers.js:1081:  db.run(`CREATE INDEX IF NOT EXISTS idx_message_attachments_message ON message_attachments(message_id)`);
+electron/ipc-handlers.js:1082:  db.run(`CREATE INDEX IF NOT EXISTS idx_conversations_workspace ON conversations(workspace)`);
+electron/ipc-handlers.js:1083:  db.run(`CREATE INDEX IF NOT EXISTS idx_conversations_workspace_updated_at ON conversations(workspace, updated_at)`);
+electron/ipc-handlers.js:1084:  db.run(`CREATE INDEX IF NOT EXISTS idx_images_workspace ON generated_images(workspace)`);
+electron/ipc-handlers.js:1085:  db.run(`CREATE INDEX IF NOT EXISTS idx_conv_folder ON conversations(folder_id)`);
+electron/ipc-handlers.js:1086:  db.run(`CREATE INDEX IF NOT EXISTS idx_conv_starred ON conversations(starred)`);
+electron/ipc-handlers.js:1087:  db.run(`CREATE INDEX IF NOT EXISTS idx_conv_pinned ON conversations(pinned)`);
+electron/ipc-handlers.js:1088:  db.run(`CREATE INDEX IF NOT EXISTS idx_folders_workspace ON folders(workspace)`);
+electron/ipc-handlers.js:1090:  db.run(`CREATE INDEX IF NOT EXISTS idx_research_runs_project ON research_runs(project_id)`);
+electron/ipc-handlers.js:1091:  db.run(`CREATE INDEX IF NOT EXISTS idx_research_runs_status ON research_runs(status)`);
+electron/ipc-handlers.js:1092:  db.run(`CREATE INDEX IF NOT EXISTS idx_research_tasks_run ON research_tasks(run_id)`);
+electron/ipc-handlers.js:1093:  db.run(`CREATE INDEX IF NOT EXISTS idx_research_evidence_record ON research_evidence(record_id)`);
+electron/ipc-handlers.js:1094:  db.run(`CREATE INDEX IF NOT EXISTS idx_research_project_conv_project ON research_project_conversations(project_id)`);
+electron/ipc-handlers.js:1095:  db.run(`CREATE INDEX IF NOT EXISTS idx_research_project_doc_project ON research_project_documents(project_id)`);
+electron/ipc-handlers.js:4690:        `INSERT INTO folders (id, name, color, icon, workspace, parent_id, sort_order) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+electron/ipc-handlers.js:4859:        db.run("INSERT INTO nsfw_auth (id, password_hash, salt) VALUES ('nsfw', ?, ?)", [hash, salt]);
+electron/ipc-handlers.js:6317:        INSERT INTO templates (id, name, content, variables, workspace, category, created_at)
+electron/ipc-handlers.js:6354:    const presetInfo = db?.exec?.('PRAGMA table_info(model_presets)');
+electron/ipc-handlers.js:6525:        INSERT INTO model_presets (id, model_name, temperature, top_p, top_k, context_length, system_prompt, workspace, is_default, device_pin, task_intent, advanced_options, vault_allowed)
+electron/services/download-manager-v2.js:90:        CREATE TABLE IF NOT EXISTS jobs (
+electron/services/download-manager-v2.js:130:      this.db.run(`CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status)`);
+electron/services/download-manager-v2.js:131:      this.db.run(`CREATE INDEX IF NOT EXISTS idx_jobs_priority ON jobs(priority DESC)`);
+electron/services/download-manager-v2.js:132:      this.db.run(`CREATE INDEX IF NOT EXISTS idx_jobs_scheduled ON jobs(scheduledAt)`);
+electron/services/download-manager-v2.js:267:      INSERT INTO jobs (
+electron/ipc/research-handlers.js:615:      `INSERT INTO research_projects
+electron/services/model-load-confidence.js:170:      CREATE TABLE IF NOT EXISTS model_load_outcomes (
+electron/services/model-load-confidence.js:188:    database.run('CREATE INDEX IF NOT EXISTS idx_model_load_outcomes_model ON model_load_outcomes(model, workspace, outcome, created_at)');
+electron/services/model-load-confidence.js:190:      CREATE TABLE IF NOT EXISTS model_backend_decisions (
+electron/services/model-load-confidence.js:202:    database.run('CREATE INDEX IF NOT EXISTS idx_model_backend_decisions_model ON model_backend_decisions(model, workspace, created_at)');
+electron/services/model-load-confidence.js:215:      `INSERT INTO model_load_outcomes
+electron/services/model-load-confidence.js:252:      `INSERT INTO model_backend_decisions
+electron/services/library-service.js:167:      CREATE TABLE IF NOT EXISTS models (
+electron/services/library-service.js:195:      CREATE TABLE IF NOT EXISTS collections (
+electron/services/library-service.js:210:      CREATE TABLE IF NOT EXISTS tags (
+electron/services/library-service.js:219:    this.db.run(`CREATE INDEX IF NOT EXISTS idx_models_name ON models(name)`);
+electron/services/library-service.js:220:    this.db.run(`CREATE INDEX IF NOT EXISTS idx_models_type ON models(modelType)`);
+electron/services/library-service.js:221:    this.db.run(`CREATE INDEX IF NOT EXISTS idx_models_favorite ON models(favorite)`);
+electron/services/library-service.js:222:    this.db.run(`CREATE INDEX IF NOT EXISTS idx_models_rating ON models(rating)`);
+electron/services/library-service.js:223:    this.db.run(`CREATE INDEX IF NOT EXISTS idx_models_lastUsed ON models(lastUsed)`);
+electron/services/library-service.js:482:        INSERT INTO tags (name, count) VALUES (?, 1)
+electron/services/library-service.js:522:      INSERT INTO collections (id, name, description, icon, color, modelIds, isDefault, createdAt, updatedAt)
+electron/services/licensing-service.js:82:      CREATE TABLE IF NOT EXISTS license_acceptances (
+electron/services/licensing-service.js:95:      CREATE TABLE IF NOT EXISTS tos_acceptances (
+electron/services/licensing-service.js:105:    this.db.run(`CREATE INDEX IF NOT EXISTS idx_license_model ON license_acceptances(modelId)`);
+electron/services/licensing-service.js:106:    this.db.run(`CREATE INDEX IF NOT EXISTS idx_tos_provider ON tos_acceptances(provider)`);
+electron/services/agent-service.js:157:          INSERT INTO agents (id, type, status, input, output, error, created_at, updated_at)
+electron/services/character-evolution.js:45:  CREATE TABLE IF NOT EXISTS character_evolution (
+electron/services/character-evolution.js:56:  CREATE INDEX IF NOT EXISTS idx_char_evo_character ON character_evolution(character_id, version);
+electron/services/character-evolution.js:58:  CREATE TABLE IF NOT EXISTS character_evolution_state (
+electron/services/character-evolution.js:121:      'INSERT INTO character_evolution_state (character_id, enabled, current_version, updated_at) VALUES (?, ?, ?, ?)',
+electron/services/character-evolution.js:179:    `INSERT INTO character_evolution
+electron/services/character-evolution.js:196:    `INSERT INTO character_evolution_state (character_id, enabled, current_version, updated_at)
+electron/services/character-evolution.js:220:    `INSERT INTO character_evolution_state (character_id, enabled, current_version, updated_at)
+electron/services/rag-service.js:147:    INSERT INTO documents (id, filename, filepath, content_hash, chunk_count, workspace, created_at)
+electron/services/rag-service.js:176:      INSERT INTO document_chunks (id, document_id, content, embedding, chunk_index)
+electron/services/rag-service.js:373:      INSERT INTO documents (id, filename, filepath, content_hash, chunk_count, workspace, created_at)
+electron/services/rag-service.js:392:        INSERT INTO document_chunks (id, document_id, content, embedding, chunk_index)
+electron/services/receipts-service.js:49:      CREATE TABLE IF NOT EXISTS download_receipts (
+electron/services/receipts-service.js:79:    this.db.run(`CREATE INDEX IF NOT EXISTS idx_receipts_download ON download_receipts(downloadId)`);
+electron/services/receipts-service.js:80:    this.db.run(`CREATE INDEX IF NOT EXISTS idx_receipts_model ON download_receipts(modelId)`);
+electron/services/receipts-service.js:81:    this.db.run(`CREATE INDEX IF NOT EXISTS idx_receipts_checksum ON download_receipts(checksumSha256)`);
+electron/services/research/research-orchestrator.js:1250:      `INSERT INTO research_records (id, project_id, run_id, canonical_key, record_json, verified_official_url, verified_at, created_at, updated_at)
+electron/services/research/research-orchestrator.js:1267:        `INSERT INTO research_evidence (id, record_id, field_key, claim_text, source_url, source_domain, source_title, excerpt_text, is_official, fetched_at)
+electron/services/research/research-orchestrator.js:1541:      `INSERT INTO research_checkpoints (id, run_id, queue_json, state_json, created_at) VALUES (?, ?, ?, ?, ?)`,
+electron/services/research/research-orchestrator.js:1551:        `INSERT INTO research_tasks (id, run_id, worker_id, phase, status, input_json, output_json, error, started_at, ended_at)
+electron/services/research/research-orchestrator.js:2513:        `INSERT INTO research_runs (id, project_id, objective, worker_count, status, stats_json, prompt_snapshot_json, started_at, created_at, updated_at)
+electron/services/vault-lore.js:17:  CREATE TABLE IF NOT EXISTS vault_lore (
+electron/services/vault-lore.js:26:  CREATE INDEX IF NOT EXISTS idx_vault_lore_kind ON vault_lore(kind);
+electron/services/vault-lore.js:27:  CREATE INDEX IF NOT EXISTS idx_vault_lore_updated_at ON vault_lore(updated_at DESC);
+electron/services/vault-lore.js:29:  CREATE TABLE IF NOT EXISTS vault_lore_links (
+electron/services/vault-lore.js:38:  CREATE INDEX IF NOT EXISTS idx_vault_lore_links_source ON vault_lore_links(source_id);
+electron/services/vault-lore.js:39:  CREATE INDEX IF NOT EXISTS idx_vault_lore_links_target ON vault_lore_links(target_id);
+electron/services/vault-lore.js:93:      'INSERT INTO vault_lore (id, kind, title, content, tags, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)',
+electron/services/vault-lore.js:131:      'INSERT INTO vault_lore_links (id, source_id, target_id, relation) VALUES (?, ?, ?, ?)',
