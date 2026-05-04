@@ -1,0 +1,201 @@
+diff --git a/electron/services/llm-execution-resolver.js b/electron/services/llm-execution-resolver.js
+index 13b495b..49a91c3 100644
+--- a/electron/services/llm-execution-resolver.js
++++ b/electron/services/llm-execution-resolver.js
+@@ -62,7 +62,7 @@ function inferContextLengthFromName(modelName = '', family = '') {
+   if (lower.includes('llama3.2')) return 8192;
+   if (lower.includes('mistral')) return 8192;
+   if (lower.includes('mixtral')) return 32768;
+-  if (lower.includes('qwen2.5') || lower.includes('qwen3')) return 32768;
++  if (lower.includes('qwen2.5') || lower.includes('qwen3')) return 131072;
+   if (lower.includes('gemma')) return 8192;
+   return 8192;
+ }
+@@ -647,8 +647,7 @@ async function buildExecutionPlan({ endpoint, makeRequest, payload, stream = fal
+   if (allowCasualFallback) {
+     const shouldFallback =
+       explicitFallback ||
+-      metadata?.baselineStatus === 'unstable' ||
+-      metadata?.templateMode === 'raw_prompt';
++      metadata?.baselineStatus === 'unstable';
+ 
+     if (shouldFallback) {
+       const fallbackModel = await resolveCasualFallbackModel(endpoint, makeRequest, requestedModel);
+diff --git a/electron/services/model-experience-resolver.js b/electron/services/model-experience-resolver.js
+index 5c5671b..ee58353 100644
+--- a/electron/services/model-experience-resolver.js
++++ b/electron/services/model-experience-resolver.js
+@@ -203,6 +203,10 @@ function inferFamily(modelName = '', modelInfo = null, profile = null) {
+   if (lower.includes('deepseek-coder')) return 'deepseek-coder';
+   if (lower.includes('deepseek-r1')) return 'deepseek-r1';
+   if (lower.includes('deepseek')) return 'deepseek';
++  if (lower.includes('qwq')) return 'qwq';
++  if (lower.includes('qwen3')) return 'qwen3';
++  if (lower.includes('qwen2.5')) return 'qwen2.5';
++  if (lower.includes('qwen2')) return 'qwen2';
+   if (lower.includes('qwen')) return 'qwen';
+   if (lower.includes('llama')) return 'llama';
+   if (lower.includes('mistral') || lower.includes('mixtral')) return 'mistral';
+@@ -265,7 +269,7 @@ function resolveModelContextLimit(modelName = '', modelInfo = null, profile = nu
+   }
+ 
+   const lower = String(modelName || '').toLowerCase();
+-  if (lower.includes('llama3.1') || lower.includes('llama3.2') || lower.includes('qwen2.5')) return 131072;
++  if (lower.includes('llama3.1') || lower.includes('llama3.2') || lower.includes('qwen2.5') || lower.includes('qwen3')) return 131072;
+   if (lower.includes('deepseek-r1') || lower.includes('qwq')) return 131072;
+   if (lower.includes('mistral') || lower.includes('mixtral')) return 32768;
+   if (lower.includes('deepseek-coder') || lower.includes('starcoder')) return 16384;
+@@ -321,11 +325,17 @@ function applyProfileHints(options, profile, trace) {
+   return next;
+ }
+ 
+-function applyModelScale(options, paramBillions, quantization, trace) {
++function applyModelScale(options, paramBillions, quantization, trace, { taskIntent = 'chat', hasAutoTune = false } = {}) {
+   const next = { ...options };
+   const size = Number(paramBillions);
+   if (Number.isFinite(size) && size >= 30) {
+-    next.num_ctx = Math.min(Number(next.num_ctx) || 4096, 4096);
++    const isReasoningTask = taskIntent === 'reasoning';
++    if (!hasAutoTune) {
++      // Reasoning/thinking models need room for the think block — 8192 minimum.
++      // AutoTune skips this cap entirely since it measured the actual hardware ceiling.
++      const ctxFloor = isReasoningTask ? 8192 : 4096;
++      next.num_ctx = Math.min(Number(next.num_ctx) || ctxFloor, ctxFloor);
++    }
+     next.num_batch = Math.min(Number(next.num_batch) || 64, 64);
+     next.num_predict = Math.min(Number(next.num_predict) || 1024, 1536);
+     trace.push('large-model-guardrail');
+@@ -349,7 +359,8 @@ function applyHardwareGuardrails(options, { runtimeState = null, performanceProf
+ 
+   if (autoTuneResult && typeof autoTuneResult === 'object') {
+     if (Number.isFinite(Number(autoTuneResult.contextLength)) && autoTuneResult.contextLength > 0) {
+-      next.num_ctx = Math.min(Number(next.num_ctx) || autoTuneResult.contextLength, Number(autoTuneResult.contextLength));
++      // AutoTune measured the actual hardware ceiling — let it win over static guardrails.
++      next.num_ctx = Math.floor(Number(autoTuneResult.contextLength));
+     }
+     if (Number.isFinite(Number(autoTuneResult.batchSize)) && autoTuneResult.batchSize > 0) {
+       next.num_batch = Math.min(Number(next.num_batch) || autoTuneResult.batchSize, Number(autoTuneResult.batchSize));
+@@ -656,7 +667,10 @@ function resolveModelExperiencePlan(payload = {}) {
+   overrideTrace.push('base-defaults');
+ 
+   effectiveOptions = applyProfileHints(effectiveOptions, profileInput, overrideTrace);
+-  effectiveOptions = applyModelScale(effectiveOptions, paramBillions, quantization, overrideTrace);
++  effectiveOptions = applyModelScale(effectiveOptions, paramBillions, quantization, overrideTrace, {
++    taskIntent,
++    hasAutoTune: Boolean(autoTuneResult),
++  });
+   effectiveOptions = applyHardwareGuardrails(effectiveOptions, {
+     runtimeState,
+     performanceProfile,
+diff --git a/src/chat-v2/engine/chatEngine.js b/src/chat-v2/engine/chatEngine.js
+index 28c1d5f..990c118 100644
+--- a/src/chat-v2/engine/chatEngine.js
++++ b/src/chat-v2/engine/chatEngine.js
+@@ -1781,9 +1781,12 @@ export class ChatV2Engine {
+       );
+     }
+     if (!nextContent) {
+-      nextContent = buildConservativeFallback(userMessage?.content, this.state.workspace, {
+-        webEnabled: request?.canUseWebSearch,
+-      });
++      const hadThinking = thinkTelemetry && (thinkTelemetry.tokens > 0 || thinkTelemetry.closedContent);
++      nextContent = hadThinking
++        ? "I finished thinking but didn't produce a final answer — the context window may have filled up during reasoning. Try again, or enable Think Longer for more room."
++        : buildConservativeFallback(userMessage?.content, this.state.workspace, {
++          webEnabled: request?.canUseWebSearch,
++        });
+     }
+ 
+     const validation = validateAssistantResponse(userMessage?.content, nextContent, {
+diff --git a/src/chat-v2/runtime/buildInferenceOptions.js b/src/chat-v2/runtime/buildInferenceOptions.js
+index 4d4216e..2187f75 100644
+--- a/src/chat-v2/runtime/buildInferenceOptions.js
++++ b/src/chat-v2/runtime/buildInferenceOptions.js
+@@ -120,6 +120,8 @@ function applyAdaptive(options, adaptive) {
+   return next;
+ }
+ 
++const PRESET_ADVANCED_NUMERIC_KEYS = ['repeat_penalty', 'frequency_penalty', 'presence_penalty', 'min_p'];
++
+ function applyPresetOverrides(options, activePreset) {
+   if (!activePreset) return options;
+   let next = { ...options };
+@@ -129,6 +131,13 @@ function applyPresetOverrides(options, activePreset) {
+   if (Number.isFinite(Number(activePreset.context_length)) && activePreset.context_length > 0) {
+     next.num_ctx = Number(activePreset.context_length);
+   }
++  const advanced = activePreset.advanced_options;
++  if (advanced && typeof advanced === 'object') {
++    for (const key of PRESET_ADVANCED_NUMERIC_KEYS) {
++      const num = Number(advanced[key]);
++      if (Number.isFinite(num)) next[key] = num;
++    }
++  }
+   next = mergePresetSystemPrompt(next, activePreset);
+   const presetDevicePin = String(activePreset?.device_pin ?? '').trim();
+   if (presetDevicePin) {
+diff --git a/src/chat-v2/runtime/inferenceOptionsUtil.js b/src/chat-v2/runtime/inferenceOptionsUtil.js
+index 68f725c..f8b818a 100644
+--- a/src/chat-v2/runtime/inferenceOptionsUtil.js
++++ b/src/chat-v2/runtime/inferenceOptionsUtil.js
+@@ -1,6 +1,6 @@
+ const NUMERIC_KEYS = new Set([
+   'num_ctx', 'num_predict', 'num_batch', 'num_gpu', 'num_thread',
+-  'temperature', 'top_p', 'top_k',
++  'temperature', 'top_p', 'top_k', 'min_p',
+   'repeat_penalty', 'frequency_penalty', 'presence_penalty',
+ ]);
+ 
+diff --git a/src/components/ModelSelector/ModelSelector.jsx b/src/components/ModelSelector/ModelSelector.jsx
+index 693ba5b..00c3bd6 100644
+--- a/src/components/ModelSelector/ModelSelector.jsx
++++ b/src/components/ModelSelector/ModelSelector.jsx
+@@ -31,6 +31,7 @@ import { useAppStore } from '../../stores/appStore';
+ import { api as electronAPI } from '../../utils/electronAPI';
+ import { triggerWarmupWithProgress } from '../../stores/modelWarmupStore';
+ import { ModelExperienceWorkbench } from '../../chat-v2/ui/ModelExperienceWorkbench';
++import { isVaultWorkspace } from '../../core/types';
+ import {
+   DEVICE_PIN_OPTIONS,
+   buildLibraryIndex,
+@@ -602,7 +603,6 @@ export function ModelSelector({ onClose }) {
+   const searchRef = useRef(null);
+   const listParentRef = useRef(null);
+ 
+-  const isVaultWorkspace = currentWorkspace === 'nsfw';
+   const selectorError = localError || modelCatalogLastError || (String(error || '').trim() || null);
+ 
+   const loadLocalModels = React.useCallback(async () => {
+@@ -851,7 +851,7 @@ export function ModelSelector({ onClose }) {
+       const matchesSource = sourceFilter === 'all' || model.source === sourceFilter;
+       const matchesAdded = matchesAddedFilter(model, addedFilter);
+       const matchesTab = modelTab !== 'agentic' || model.capabilities.some((cap) => ['Code', 'Reasoning'].includes(cap)) || model.score >= 60;
+-      const vaultOpen = !isVaultWorkspace || model.insight?.catalogEnrichment?.vaultModelGating !== 'allowlist' || model.insight?.activePreset?.vault_allowed === true;
++      const vaultOpen = !isVaultWorkspace(currentWorkspace) || model.insight?.catalogEnrichment?.vaultModelGating !== 'allowlist' || model.insight?.activePreset?.vault_allowed === true;
+       return matchesQuery && matchesQuant && matchesSource && matchesAdded && matchesTab && vaultOpen;
+     });
+     if (effectiveSortKey === 'name') list = list.sort((a, b) => a.displayName.localeCompare(b.displayName));
+@@ -876,7 +876,7 @@ export function ModelSelector({ onClose }) {
+       list = list.sort((a, b) => b.score - a.score);
+     }
+     return list;
+-  }, [addedFilter, effectiveSortKey, isVaultWorkspace, modelTab, normalizedModels, quantFilter, searchQuery, sourceFilter]);
++  }, [addedFilter, currentWorkspace, effectiveSortKey, modelTab, normalizedModels, quantFilter, searchQuery, sourceFilter]);
+ 
+   const familyGroups = useMemo(() => groupModels(filteredModels), [filteredModels]);
+   const focusedModel = filteredModels[Math.min(focusedIndex, Math.max(0, filteredModels.length - 1))] || null;
+diff --git a/src/services/modelOptimizer.js b/src/services/modelOptimizer.js
+index 12dc4bb..6c7855b 100644
+--- a/src/services/modelOptimizer.js
++++ b/src/services/modelOptimizer.js
+@@ -115,6 +115,10 @@ export const MODEL_FAMILIES = {
+     type: 'chat', temperature: 0.7, top_p: 0.8, top_k: 20, repeat_penalty: 1.05,
+     maxContext: 131072,
+   },
++  'qwen3': {
++    type: 'chat', temperature: 0.6, top_p: 0.8, top_k: 20, repeat_penalty: 1.05,
++    maxContext: 131072,
++  },
+   'qwq': {
+     type: 'reasoning', temperature: 0.6, top_p: 0.95, top_k: 40, repeat_penalty: 1.0,
+     maxContext: 131072,
