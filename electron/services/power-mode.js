@@ -462,10 +462,12 @@ class PowerModeService {
         CUDA_CACHE_MAXSIZE: process.env.CUDA_CACHE_MAXSIZE
       };
 
-      // Optimize CUDA settings
-      // Allow all GPUs
+      // Optimize CUDA settings — default to the first GPU only. A list like
+      // "0,1" breaks on single-GPU systems (e.g. NVIDIA Spark) when some CUDA
+      // clients enumerate devices. Multi-GPU users can set CUDA_VISIBLE_DEVICES
+      // before launch or toggle Power Mode after exporting their own list.
       if (!process.env.CUDA_VISIBLE_DEVICES) {
-        process.env.CUDA_VISIBLE_DEVICES = '0,1'; // Use both GPUs if available
+        process.env.CUDA_VISIBLE_DEVICES = '0';
       }
       
       // Increase CUDA cache for faster kernel compilation
@@ -482,9 +484,13 @@ class PowerModeService {
       // Restore original values
       if (this.originalEnv.CUDA_VISIBLE_DEVICES !== undefined) {
         process.env.CUDA_VISIBLE_DEVICES = this.originalEnv.CUDA_VISIBLE_DEVICES;
+      } else {
+        delete process.env.CUDA_VISIBLE_DEVICES;
       }
       if (this.originalEnv.CUDA_CACHE_MAXSIZE !== undefined) {
         process.env.CUDA_CACHE_MAXSIZE = this.originalEnv.CUDA_CACHE_MAXSIZE;
+      } else {
+        delete process.env.CUDA_CACHE_MAXSIZE;
       }
     }
   }

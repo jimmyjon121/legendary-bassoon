@@ -710,6 +710,18 @@ contextBridge.exposeInMainWorld('electronAPI', {
   toolHealth: () =>
     ipcRenderer.invoke('tool:health'),
 
+  // Write a full file (create or overwrite) — used by agent harness editFile adapter
+  toolWriteFile: (projectRoot, filePath, content) =>
+    ipcRenderer.invoke('tool:writeFile', { projectRoot, path: filePath, content }),
+
+  // Agent harness profile persistence
+  agentHarnessGetProfile: (modelName) =>
+    ipcRenderer.invoke('agent:harness:getProfile', { modelName }),
+  agentHarnessSaveProfile: (profile) =>
+    ipcRenderer.invoke('agent:harness:saveProfile', { profile }),
+  agentHarnessSaveOverride: (modelName, overrides) =>
+    ipcRenderer.invoke('agent:harness:saveOverride', { modelName, overrides }),
+
   // ============================================
   // Model Inspection & Auto-tuning
   // ============================================

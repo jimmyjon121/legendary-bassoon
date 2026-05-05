@@ -32,6 +32,8 @@ export interface ModelOptimalOptions {
   stop: string[];
 }
 
+export type ThinkingStyle = 'none' | 'adaptive' | 'strip-between-turns';
+
 export interface ModelProfile {
   id: string;
   digest: string;
@@ -44,6 +46,7 @@ export interface ModelProfile {
   supports_json_schema: boolean;
   tool_format: ToolFormat;
   parallel_tool_calls: ParallelToolCalls;
+  thinking_style: ThinkingStyle;
   optimal_options: ModelOptimalOptions;
   context_window: number;
   context_window_max: number;
@@ -82,6 +85,7 @@ export const GPT_OSS_PROFILE: ModelProfile = {
   supports_json_schema: true,
   tool_format: 'native-json',
   parallel_tool_calls: 'serial-only',
+  thinking_style: 'adaptive',
   optimal_options: {
     temperature: 1.0,
     top_p: 1.0,
@@ -140,6 +144,7 @@ export const QWEN3_CODER_PROFILE: ModelProfile = {
   supports_json_schema: true,
   tool_format: 'qwen3-xml',
   parallel_tool_calls: 'serial-only',
+  thinking_style: 'adaptive',
   optimal_options: {
     temperature: 0.6,
     top_p: 0.95,
@@ -187,6 +192,7 @@ export const GEMMA_PROFILE: ModelProfile = {
   supports_json_schema: true,
   tool_format: 'json-schema-fallback',
   parallel_tool_calls: 'serial-only',
+  thinking_style: 'strip-between-turns',
   optimal_options: {
     temperature: 0.2,
     top_p: 0.95,
@@ -234,6 +240,7 @@ export const DOLPHIN_MISTRAL_24B_PROFILE: ModelProfile = {
   supports_json_schema: false,
   tool_format: 'react-text',
   parallel_tool_calls: 'serial-only',
+  thinking_style: 'none',
   optimal_options: {
     temperature: 0.08,
     top_p: 0.9,
@@ -282,6 +289,7 @@ export function cloneProfile(profile: ModelProfile): ModelProfile {
     capabilities: [...profile.capabilities],
     optimal_options: { ...profile.optimal_options, stop: [...profile.optimal_options.stop] },
     reasoning_levels: profile.reasoning_levels ? { ...profile.reasoning_levels } : undefined,
+    thinking_style: profile.thinking_style,
     known_strengths: [...profile.known_strengths],
     known_weaknesses: [...profile.known_weaknesses],
     detection_trace: profile.detection_trace.map((entry) => ({ ...entry })),

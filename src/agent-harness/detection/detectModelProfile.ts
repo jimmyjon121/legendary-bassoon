@@ -8,6 +8,7 @@ import {
   type ModelProfile,
   type ParallelToolCalls,
   type QualityTier,
+  type ThinkingStyle,
 } from '../modelProfiles';
 
 export interface OllamaShowMetadata {
@@ -117,6 +118,17 @@ function applyMetadata(profile: ModelProfile, metadata: OllamaShowMetadata | nul
       profile.tool_format = profile.id.startsWith('gemma') ? 'native-json' : profile.tool_format;
       trace('supports_native_tools', true, '/api/show capabilities includes tools.');
     }
+  }
+
+  const detectedFamily = String(metadata.details?.family ?? '').toLowerCase();
+  if (detectedFamily.includes('gemma4') || detectedFamily.includes('gemma 4')) {
+    const style: ThinkingStyle = 'strip-between-turns';
+    profile.thinking_style = style;
+    trace('thinking_style', style, 'Gemma 4 strips <think> between turns but preserves within a single tool-call turn.');
+  } else if (Array.isArray(metadata.capabilities) && metadata.capabilities.includes('thinking')) {
+    const style: ThinkingStyle = 'adaptive';
+    profile.thinking_style = style;
+    trace('thinking_style', style, '/api/show capabilities includes thinking; model supports adaptive reasoning mode.');
   }
 
   const contextLength = extractContextLength(metadata.model_info || {});

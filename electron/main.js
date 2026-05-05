@@ -970,6 +970,19 @@ function needsDevServer() {
 }
 
 app.whenReady().then(async () => {
+  // macOS: BrowserWindow `icon` does not affect the Dock; packaged apps use
+  // build `mac.icon`. In dev (`electron .`) the Dock would otherwise show Electron's icon.
+  if (process.platform === 'darwin' && app.dock && !app.isPackaged) {
+    try {
+      const dockIconPath = path.join(__dirname, '../assets/icon.png');
+      if (fs.existsSync(dockIconPath)) {
+        app.dock.setIcon(dockIconPath);
+      }
+    } catch (dockIconErr) {
+      log(`Could not set Dock icon: ${dockIconErr.message}`, 'WARN');
+    }
+  }
+
   // Only start Vite dev server if actually needed
   if (needsDevServer()) {
     log('Dev server needed - ensuring Vite is running...');

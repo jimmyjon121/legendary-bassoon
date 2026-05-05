@@ -158,6 +158,7 @@ export function AgentPanel({ initialPlan = null, onPlanConsumed = null }) {
           ? 'Auto-continuing autonomous run from approved diffs...'
           : `Starting autonomous run: ${selectedTask}`
       );
+
       await agentOrchestrator.startNightShift(selectedTask, getRunOptions(selectedTask));
     } catch (error) {
       const message = `Failed to start agent: ${error?.message || 'Unknown error'}`;
@@ -169,7 +170,9 @@ export function AgentPanel({ initialPlan = null, onPlanConsumed = null }) {
 
   const handlePause = () => agentOrchestrator.pause();
   const handleResume = () => agentOrchestrator.resume();
-  const handleStop = () => agentOrchestrator.stop();
+  const handleStop = () => {
+    agentOrchestrator.stop();
+  };
 
   const hasProposed = (agent.proposedChanges || []).length > 0;
 
@@ -287,6 +290,8 @@ export function AgentPanel({ initialPlan = null, onPlanConsumed = null }) {
     const inFlight = runningStep ? 1 : 0;
     const remote = backendProgress || {};
     const passInfo = agent.runProgress || {};
+    const inference = remote.inference || passInfo.executionPlan || {};
+    const inferenceState = remote.inference?.state || passInfo.inferenceState || null;
     const totalPasses = Number(remote.totalPasses ?? passInfo.totalPasses) || 0;
     const completedPasses = Number(remote.completedPasses ?? passInfo.completedPasses) || 0;
     const currentPass = Number(remote.pass ?? passInfo.pass) || 0;
@@ -329,6 +334,12 @@ export function AgentPanel({ initialPlan = null, onPlanConsumed = null }) {
       passMode: remote.mode || passInfo.mode || 'single',
       remoteStatus: remote.status || 'idle',
       remoteRunId: remote.runId || null,
+      inferenceState,
+      traceId: inference.traceId || passInfo.traceId || remote.traceId || null,
+      resolvedModel: inference.resolvedModel || passInfo.executionPlan?.resolvedModel || null,
+      endpointMode: inference.endpointMode || passInfo.executionPlan?.endpointMode || null,
+      toolMode: inference.toolMode || passInfo.executionPlan?.toolMode || null,
+      fallbackReason: inference.fallbackReason || passInfo.executionPlan?.fallbackReason || null,
     };
   }, [effectiveSteps, agent.log, agent.isRunning, agent.runProgress, backendProgress]);
 
@@ -558,6 +569,16 @@ export function AgentPanel({ initialPlan = null, onPlanConsumed = null }) {
             backend: {runStats.remoteStatus}
             {runStats.remoteRunId ? ` | ${runStats.remoteRunId}` : ''}
           </div>
+          {(runStats.inferenceState || runStats.traceId || runStats.endpointMode) && (
+            <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[10px] text-text-muted">
+              {runStats.inferenceState && <span>state: {String(runStats.inferenceState).replace(/_/g, ' ')}</span>}
+              {runStats.resolvedModel && <span className="truncate" title={runStats.resolvedModel}>model: {runStats.resolvedModel}</span>}
+              {runStats.endpointMode && <span>endpoint: {runStats.endpointMode}</span>}
+              {runStats.toolMode && <span>tools: {runStats.toolMode}</span>}
+              {runStats.fallbackReason && <span className="col-span-2 text-amber-300">fallback: {runStats.fallbackReason}</span>}
+              {runStats.traceId && <span className="col-span-2 truncate" title={runStats.traceId}>trace: {runStats.traceId}</span>}
+            </div>
+          )}
         </div>
 
         <div className="border border-workspace-code/30 rounded-lg bg-workspace-code/5 p-3">
@@ -693,4 +714,3 @@ export function AgentPanel({ initialPlan = null, onPlanConsumed = null }) {
 }
 
 export default AgentPanel;
-

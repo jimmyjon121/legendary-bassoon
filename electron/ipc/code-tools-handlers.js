@@ -840,6 +840,26 @@ function setupCodeToolsHandlers(ipcMain, _mainWindow, _store) {
     }
   });
   
+  // Write a full file (create or overwrite). Path must stay within projectRoot.
+  ipcMain.handle('tool:writeFile', async (_, { projectRoot, path: filePath, content }) => {
+    const MAX_BYTES = 4 * 1024 * 1024;
+    try {
+      if (typeof content !== 'string') {
+        return errorResult(new Error('content must be a string'), 'invalid_content');
+      }
+      const bytes = Buffer.byteLength(content, 'utf-8');
+      if (bytes > MAX_BYTES) {
+        return errorResult(new Error(`File too large: ${bytes} bytes exceeds ${MAX_BYTES} limit`), 'content_too_large');
+      }
+      const { targetPath } = await resolveWithinProject(projectRoot, filePath);
+      await fsPromises.mkdir(path.dirname(targetPath), { recursive: true });
+      await fsPromises.writeFile(targetPath, content, 'utf-8');
+      return okResult({ path: targetPath, bytes });
+    } catch (error) {
+      return errorResult(error, 'write_failed');
+    }
+  });
+
   // List directory contents
   ipcMain.handle('tool:listDirectory', async (_, { projectRoot, path: dirPath, recursive, maxDepth }) => {
     try {

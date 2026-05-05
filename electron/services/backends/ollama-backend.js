@@ -211,6 +211,20 @@ class OllamaBackend extends BaseBackend {
   }
 
   /**
+   * Ollama /api/chat-only fields (never attach to /api/generate).
+   */
+  _chatExtras(payload) {
+    const out = {};
+    if (Array.isArray(payload.tools) && payload.tools.length > 0) {
+      out.tools = payload.tools;
+    }
+    if (payload.think !== undefined && payload.think !== null) {
+      out.think = payload.think;
+    }
+    return out;
+  }
+
+  /**
    * Build optimized options for this backend
    * Ensures GPU offload, flash attention, and performance settings are applied
    */
@@ -262,6 +276,7 @@ class OllamaBackend extends BaseBackend {
             options,
             keep_alive: keepAlive,
             ...(payload.format ? { format: payload.format } : {}),
+            ...this._chatExtras(payload),
           }
         : {
             model: payload.model,
@@ -289,7 +304,19 @@ class OllamaBackend extends BaseBackend {
         response.data.response = response.data.message.content;
       }
 
-      return response.data || {};
+      const data = response.data || {};
+      data.meta = {
+        ...(data.meta && typeof data.meta === 'object' ? data.meta : {}),
+        executionPlan: {
+          ...(payload.executionPlan && typeof payload.executionPlan === 'object' ? payload.executionPlan : {}),
+          endpointMode: apiPath,
+          toolsRequested: Boolean(Array.isArray(payload.tools) && payload.tools.length > 0),
+          toolsAttached: Boolean(apiPath === '/api/chat' && Array.isArray(requestBody.tools) && requestBody.tools.length > 0),
+          compatBlockedTools: Boolean(payload.executionPlan?.compatBlockedTools),
+          backendId: this.id || payload.executionPlan?.backendId || null,
+        },
+      };
+      return data;
     } catch (error) {
       throw new Error(`Ollama generation failed: ${error.message}`);
     }
@@ -320,6 +347,7 @@ class OllamaBackend extends BaseBackend {
             options,
             keep_alive: keepAlive,
             ...(payload.format ? { format: payload.format } : {}),
+            ...this._chatExtras(payload),
           }
         : {
             model: payload.model,
@@ -336,8 +364,16 @@ class OllamaBackend extends BaseBackend {
         apiPath,
         requestBody,
         (parsed) => {
-          if (hasMessages && parsed?.message?.content) {
-            onChunk({ response: parsed.message.content, done: !!parsed.done });
+          if (hasMessages && parsed?.message) {
+            const message = {
+              content: parsed.message.content || '',
+              ...(parsed.message.tool_calls?.length ? { tool_calls: parsed.message.tool_calls } : {}),
+            };
+            onChunk({
+              message,
+              ...(message.content ? { response: message.content } : {}),
+              done: !!parsed.done,
+            });
             return;
           }
           onChunk(parsed);

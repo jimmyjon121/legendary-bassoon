@@ -299,11 +299,63 @@ class AgentOrchestrator {
       stream: false,
       options: {
         num_predict: 80,
-        temperature: 0
+        temperature: 0,
+        timeout: Math.min(Math.max(timeoutMs, 5000), 120000),
       }
     };
 
+    const interpretParsed = (parsed, source) => {
+      if (!parsed || typeof parsed !== 'object') {
+        return { supported: false, reason: `${source}_empty_response` };
+      }
+      const metaPlan = parsed?.meta?.executionPlan;
+      if (metaPlan?.compatBlockedTools) {
+        return {
+          supported: false,
+          reason: `${source}_compat_blocked_tools`,
+        };
+      }
+      const toolCalls = Array.isArray(parsed?.message?.tool_calls)
+        ? parsed.message.tool_calls
+        : [];
+
+      if (toolCalls.length > 0) {
+        return { supported: true, reason: `${source}_ok` };
+      }
+
+      const contentPreview = String(parsed?.message?.content || '')
+        .trim()
+        .replace(/\s+/g, ' ')
+        .slice(0, 120);
+      return {
+        supported: false,
+        reason: contentPreview
+          ? `${source}_no_tool_calls (${contentPreview})`
+          : `${source}_no_tool_calls`
+      };
+    };
+
     try {
+      // Prefer IPC + llm:send so the probe exercises sanitizeInferenceInput,
+      // buildExecutionPlan, orchestrator, and OllamaBackend — same path as the agent.
+      if (typeof window !== 'undefined' && typeof window.electronAPI?.sendToLLM === 'function') {
+        const ipcPayload = {
+          model: probePayload.model,
+          messages: probePayload.messages,
+          tools: probePayload.tools,
+          traceId: `probe_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+          stream: false,
+          options: probePayload.options,
+          workloadType: 'agent',
+          preferNativeChat: true,
+        };
+        const parsed = await safeCall('sendToLLM', [ipcPayload], null);
+        if (parsed === null) {
+          return { supported: false, reason: 'ipc_probe_failed' };
+        }
+        return interpretParsed(parsed, 'ipc');
+      }
+
       const response = await fetch(`${endpoint}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -318,25 +370,7 @@ class AgentOrchestrator {
         } catch {
           parsed = null;
         }
-
-        const toolCalls = Array.isArray(parsed?.message?.tool_calls)
-          ? parsed.message.tool_calls
-          : [];
-
-        if (toolCalls.length > 0) {
-          return { supported: true, reason: 'ok' };
-        }
-
-        const contentPreview = String(parsed?.message?.content || '')
-          .trim()
-          .replace(/\s+/g, ' ')
-          .slice(0, 120);
-        return {
-          supported: false,
-          reason: contentPreview
-            ? `probe_no_tool_calls (${contentPreview})`
-            : 'probe_no_tool_calls'
-        };
+        return interpretParsed(parsed, 'fetch');
       }
 
       let details = '';
@@ -365,6 +399,7 @@ class AgentOrchestrator {
     return (
       text.includes('probe_timeout') ||
       text.includes('probe_failed') ||
+      text.includes('ipc_probe_failed') ||
       text.includes('network') ||
       text.includes('econn') ||
       text.includes('timed out')
@@ -433,9 +468,12 @@ class AgentOrchestrator {
   }
 
   createExecutionLLM(modelName, projectRoot, agentStore, options = {}) {
+    const traceId = options.traceId || `agent_trace_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
     return createToolEnabledLLM({
       model: modelName,
       projectRoot,
+      traceId,
+      runId: this.currentRunId,
       maxIterations: 12,
       maxToolSteps: 32,
       networkPolicy: 'offline',
@@ -450,6 +488,37 @@ class AgentOrchestrator {
       },
       onThinking: (status) => {
         agentStore.addLog(`Thinking: ${status}`);
+      },
+      onStateChange: (event) => {
+        const stateLabel = String(event?.state || '').replace(/_/g, ' ');
+        agentStore.setRunProgress({
+          inferenceState: event?.state || null,
+          traceId: event?.traceId || traceId,
+          runId: event?.runId || this.currentRunId,
+          label: stateLabel ? `Inference: ${stateLabel}` : agentStore.runProgress?.label,
+          executionPlan: {
+            requestedModel: event?.requestedModel || modelName,
+            resolvedModel: event?.resolvedModel || modelName,
+            endpointMode: event?.endpointMode || null,
+            toolMode: event?.toolMode || null,
+            fallbackReason: event?.fallbackReason || null,
+          },
+        });
+        this.pushRunProgress({
+          phase: this.currentPhase,
+          status: this.isActive ? 'running' : 'idle',
+          inference: {
+            traceId: event?.traceId || traceId,
+            runId: event?.runId || this.currentRunId,
+            state: event?.state || null,
+            requestedModel: event?.requestedModel || modelName,
+            resolvedModel: event?.resolvedModel || modelName,
+            endpointMode: event?.endpointMode || null,
+            toolMode: event?.toolMode || null,
+            fallbackReason: event?.fallbackReason || null,
+            failureReasonCode: event?.failureReasonCode || null,
+          },
+        }).catch(() => {});
       },
     });
   }
@@ -1456,7 +1525,10 @@ class AgentOrchestrator {
         currentModel,
         projectRoot,
         agentStore,
-        { forceTextToolMode }
+        {
+          forceTextToolMode,
+          traceId: `${this.currentRunId || 'run'}/pass-bootstrap`,
+        }
       );
 
       const projectSnapshot = await this.captureProjectSnapshot(projectRoot);
@@ -1626,7 +1698,10 @@ class AgentOrchestrator {
               requestedModel,
               projectRoot,
               agentStore,
-              { forceTextToolMode: true }
+              {
+                forceTextToolMode: true,
+                traceId: `${this.currentRunId || 'run'}/text-retry`,
+              }
             );
             // eslint-disable-next-line no-await-in-loop
             implementationResult = await this.activeLLM.chat(implementationPrompt, []);

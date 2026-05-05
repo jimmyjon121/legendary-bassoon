@@ -44,6 +44,7 @@ const checks = [
   { id: 'backend-decision-timeline', command: 'node scripts/backend-decision-timeline-smoke.js' },
   { id: 'model-selector-catalogue', command: 'node scripts/model-selector-catalogue-smoke.js' },
   { id: 'agent-harness', command: 'node scripts/agent-harness-smoke.js' },
+  { id: 'inference-toolchain', command: 'node scripts/inference-toolchain-smoke.js' },
 ];
 
 function runCheck(check) {

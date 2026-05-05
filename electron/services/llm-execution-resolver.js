@@ -1,5 +1,6 @@
 const MODEL_METADATA_CACHE_TTL_MS = 5 * 60 * 1000;
 const MODEL_LIST_CACHE_TTL_MS = 15 * 1000;
+const crypto = require('crypto');
 const { inspectMoE } = require('./moe-detector');
 const { getCachedSparkProfile } = require('./spark-profile');
 
@@ -11,6 +12,13 @@ const CASUAL_BASELINE_FALLBACKS = [
 
 const modelMetadataCache = new Map();
 const modelListCache = new Map();
+
+function createInferenceTraceId(prefix = 'inf') {
+  if (typeof crypto.randomUUID === 'function') {
+    return `${prefix}_${crypto.randomUUID()}`;
+  }
+  return `${prefix}_${Date.now().toString(36)}_${crypto.randomBytes(6).toString('hex')}`;
+}
 
 function normalizeModelLookupKey(value = '') {
   return String(value || '')
@@ -290,6 +298,184 @@ function isLikelyGptOssModel(modelName, family = '') {
   );
 }
 
+function normalizeFamily(value = '', modelName = '') {
+  const family = String(value || '').trim().toLowerCase();
+  const lower = `${modelName || ''} ${family}`.toLowerCase();
+  if (lower.includes('gpt-oss') || lower.includes('gptoss')) return 'gpt-oss';
+  if (lower.includes('qwen')) return 'qwen';
+  if (lower.includes('gemma4') || lower.includes('gemma 4')) return 'gemma4';
+  if (lower.includes('gemma3') || lower.includes('gemma 3')) return 'gemma3';
+  if (lower.includes('gemma')) return 'gemma';
+  if (lower.includes('devstral')) return 'devstral';
+  if (lower.includes('mistral') || lower.includes('mixtral')) return 'mistral';
+  if (lower.includes('dolphin') || lower.includes('venice')) return 'dolphin-mistral';
+  if (family) return family;
+  return 'unknown';
+}
+
+function capabilityList(metadata = {}) {
+  const caps = [
+    ...(Array.isArray(metadata?.capabilities) ? metadata.capabilities : []),
+    ...(Array.isArray(metadata?._raw?.capabilities) ? metadata._raw.capabilities : []),
+  ];
+  return caps.map((cap) => String(cap || '').toLowerCase()).filter(Boolean);
+}
+
+function hasToolCapability(metadata = {}) {
+  const caps = capabilityList(metadata);
+  return caps.some((cap) => (
+    cap === 'tools' ||
+    cap === 'tool' ||
+    cap === 'tool-calling' ||
+    cap === 'function-calling' ||
+    cap === 'function_calling'
+  ));
+}
+
+function resolveModelCapabilityMatrix({
+  model,
+  metadata = {},
+  hasToolsRequested = false,
+  forceCompatMode = false,
+} = {}) {
+  const family = normalizeFamily(metadata?.family, model);
+  const templateMode = metadata?.templateMode || inferTemplateMode(metadata?.template, model, family);
+  const supportsNativeChat = templateMode === 'native_chat';
+  const lower = `${model || ''} ${family}`.toLowerCase();
+  const rawTemplate = templateMode === 'raw_prompt';
+  const isGptOss = isLikelyGptOssModel(model, family);
+  const isGemma3 = lower.includes('gemma3') || lower.includes('gemma 3') || family === 'gemma3';
+  const isGemma4 = lower.includes('gemma4') || lower.includes('gemma 4') || family === 'gemma4';
+  const isQwen = lower.includes('qwen');
+  const isDolphin = lower.includes('dolphin') || lower.includes('venice');
+  const isMistral = lower.includes('mistral') || lower.includes('devstral') || lower.includes('mixtral');
+  const metadataHasTools = hasToolCapability(metadata);
+  const warnings = Array.isArray(metadata?.warnings) ? [...metadata.warnings] : [];
+  const reasons = [];
+
+  let supportsNativeTools = false;
+  let preferredToolMode = 'disabled';
+  let capabilityConfidence = 'metadata';
+  let thinkingPolicy = 'none';
+
+  if (isGptOss) {
+    supportsNativeTools = true;
+    preferredToolMode = 'native';
+    thinkingPolicy = 'preserve';
+    reasons.push('gpt-oss-native-tools');
+  } else if (isGemma3) {
+    supportsNativeTools = metadataHasTools;
+    preferredToolMode = metadataHasTools ? 'native' : 'text-json';
+    thinkingPolicy = 'none';
+    if (!metadataHasTools) {
+      warnings.push('Gemma3 metadata does not advertise tools; native tools disabled.');
+      reasons.push('gemma3-tools-metadata-gate');
+    }
+  } else if (isGemma4) {
+    supportsNativeTools = metadataHasTools;
+    preferredToolMode = metadataHasTools ? 'native' : 'text-json';
+    thinkingPolicy = 'strip-between-turns';
+    reasons.push(metadataHasTools ? 'gemma4-tools-metadata' : 'gemma4-text-tool-fallback');
+  } else if (isQwen) {
+    supportsNativeTools = metadataHasTools;
+    preferredToolMode = metadataHasTools ? 'native' : 'text-json';
+    thinkingPolicy = 'preserve';
+    reasons.push(metadataHasTools ? 'qwen-metadata-tools' : 'qwen-text-json-fallback');
+  } else if (isDolphin) {
+    supportsNativeTools = metadataHasTools && supportsNativeChat;
+    preferredToolMode = supportsNativeTools ? 'native' : 'react-text';
+    thinkingPolicy = 'none';
+    reasons.push(supportsNativeTools ? 'dolphin-metadata-tools' : 'dolphin-react-text-fallback');
+  } else if (isMistral) {
+    supportsNativeTools = supportsNativeChat && metadataHasTools;
+    preferredToolMode = supportsNativeTools ? 'native' : 'react-text';
+    thinkingPolicy = 'none';
+    reasons.push(supportsNativeTools ? 'mistral-metadata-tools' : 'mistral-react-text-fallback');
+  } else {
+    supportsNativeTools = metadataHasTools && supportsNativeChat;
+    preferredToolMode = supportsNativeTools ? 'native' : 'text-json';
+    thinkingPolicy = 'none';
+    reasons.push(supportsNativeTools ? 'metadata-tools' : 'unknown-text-tool-fallback');
+  }
+
+  let preferredEndpoint = supportsNativeChat ? '/api/chat' : '/api/generate';
+  let fallbackReason = null;
+  const compatRequired = forceCompatMode || rawTemplate || (isGptOss && !hasToolsRequested);
+
+  if (hasToolsRequested && supportsNativeTools && !forceCompatMode) {
+    preferredEndpoint = '/api/chat';
+  } else if (compatRequired) {
+    preferredEndpoint = '/api/generate';
+  }
+
+  if (hasToolsRequested && preferredEndpoint !== '/api/chat') {
+    fallbackReason = 'compat_blocked_native_tools';
+    if (preferredToolMode === 'native') preferredToolMode = isDolphin ? 'react-text' : 'text-json';
+  } else if (hasToolsRequested && !supportsNativeTools) {
+    fallbackReason = 'native_tools_unavailable';
+  }
+
+  return {
+    family,
+    templateMode,
+    supportsNativeChat,
+    supportsNativeTools,
+    preferredEndpoint,
+    preferredToolMode,
+    thinkingPolicy,
+    capabilityConfidence,
+    reasons,
+    warnings,
+    fallbackReason,
+  };
+}
+
+function buildExecutionContract({
+  traceId,
+  runId,
+  requestedModel,
+  resolvedModel,
+  endpointMode,
+  executionMode,
+  effectiveContextLength,
+  effectiveOptions,
+  backendId = null,
+  reasons = [],
+  metadata = {},
+  capability = {},
+  toolsRequested = false,
+  toolsAttached = false,
+  compatBlockedTools = false,
+  fallbackReason = null,
+} = {}) {
+  const family = capability.family || normalizeFamily(metadata?.family, resolvedModel || requestedModel);
+  return {
+    traceId: traceId || createInferenceTraceId(),
+    runId: runId || null,
+    requestedModel: requestedModel || null,
+    resolvedModel: resolvedModel || requestedModel || null,
+    effectiveModel: resolvedModel || requestedModel || null,
+    provider: 'ollama',
+    family,
+    templateMode: capability.templateMode || metadata?.templateMode || 'native_chat',
+    endpointMode,
+    executionMode,
+    toolMode: capability.preferredToolMode || (toolsAttached ? 'native' : 'disabled'),
+    toolsRequested: Boolean(toolsRequested),
+    toolsAttached: Boolean(toolsAttached),
+    compatBlockedTools: Boolean(compatBlockedTools),
+    thinkingPolicy: capability.thinkingPolicy || 'none',
+    metadataSource: metadata?._raw?.error ? 'heuristic' : 'metadata',
+    capabilityConfidence: capability.capabilityConfidence || 'heuristic',
+    effectiveContextLength,
+    effectiveOptions,
+    backendId,
+    reasons: [...(Array.isArray(reasons) ? reasons : []), ...(Array.isArray(capability.reasons) ? capability.reasons : [])],
+    warnings: Array.isArray(capability.warnings) ? capability.warnings : [],
+    fallbackReason: fallbackReason || capability.fallbackReason || null,
+  };
+}
+
 function buildGenericCompatRequest(modelName, systemPrompt, messages, baseOptions = {}, stream = true, format = null) {
   const normalizedMessages = normalizeChatMessages(messages);
   const options = {
@@ -496,6 +682,9 @@ async function getNormalizedModelInfo(endpoint, makeRequest, modelName, options 
     const details = data.details || {};
     const template = data.template || null;
     const family = details.family || null;
+    const capabilities = Array.isArray(data.capabilities)
+      ? data.capabilities
+      : (Array.isArray(details.capabilities) ? details.capabilities : []);
     const rawContextLength = extractContextLength(data) || inferContextLengthFromName(normalizedName, family);
     const templateMode = inferTemplateMode(template, normalizedName, family);
     const supportsNativeChat = templateMode === 'native_chat';
@@ -516,13 +705,15 @@ async function getNormalizedModelInfo(endpoint, makeRequest, modelName, options 
       effectiveContextLength,
       format: details.format || null,
       parentModel: details.parent_model || null,
+      capabilities,
       template,
       templateMode,
       supportsNativeChat,
       baselineStatus: baseline.baselineStatus,
       baselineReasons: baseline.baselineReasons,
       warnings: baseline.warnings,
-      _raw: { families: details.families, format: details.format },
+      _raw: { families: details.families, format: details.format, capabilities },
+      _showData: data,
     };
 
     modelMetadataCache.set(cacheKey, { ts: now, value });
@@ -565,9 +756,28 @@ function buildNativeChatRequest(modelName, systemPrompt, messages, baseOptions =
   }
 
   for (const msg of messages || []) {
-    const entry = { role: msg.role, content: msg.content };
+    if (!msg || typeof msg !== 'object') continue;
+    const role = String(msg.role || '').toLowerCase();
+    if (!['system', 'user', 'assistant', 'tool'].includes(role)) continue;
+
+    const entry = { role, content: msg.content != null ? String(msg.content) : '' };
     if (Array.isArray(msg.images) && msg.images.length > 0) {
       entry.images = msg.images;
+    }
+    if (role === 'tool') {
+      if (typeof msg.tool_call_id !== 'string' || !msg.tool_call_id.trim()) continue;
+      entry.tool_call_id = msg.tool_call_id.trim();
+      if (typeof msg.name === 'string' && msg.name.trim()) {
+        entry.name = msg.name.trim();
+      }
+    }
+    if (role === 'assistant') {
+      if (Array.isArray(msg.tool_calls) && msg.tool_calls.length > 0) {
+        entry.tool_calls = msg.tool_calls;
+      }
+      if (typeof msg.name === 'string' && msg.name.trim()) {
+        entry.name = msg.name.trim();
+      }
     }
     requestMessages.push(entry);
   }
@@ -622,6 +832,8 @@ async function buildExecutionPlan({ endpoint, makeRequest, payload, stream = fal
   if (!requestedModel) {
     throw new Error('Model is required');
   }
+  const traceId = String(payload?.traceId || '').trim() || createInferenceTraceId();
+  const runId = String(payload?.runId || '').trim() || null;
 
   const workspace = String(payload?.workspace || '').trim().toLowerCase() || 'casual';
   const workloadType = String(payload?.workloadType || '').trim().toLowerCase() || 'chat';
@@ -634,6 +846,7 @@ async function buildExecutionPlan({ endpoint, makeRequest, payload, stream = fal
   let metadata = requestedInfo;
   const reasons = [];
   const hasMessages = Array.isArray(payload?.messages) && payload.messages.length > 0;
+  const hasToolsRequested = Array.isArray(payload?.tools) && payload.tools.length > 0;
   const privateWorkspace = workspace === 'nsfw' || workspace === 'private';
   const explicitFallback = payload?.forceModelFallback === true;
   const requestedIsGptOss = isLikelyGptOssModel(requestedModel, metadata?.family);
@@ -668,18 +881,30 @@ async function buildExecutionPlan({ endpoint, makeRequest, payload, stream = fal
     ...metadata,
     model: effectiveModel,
   });
-  const effectiveIsGptOss = isLikelyGptOssModel(effectiveModel, metadata?.family);
+  const capability = resolveModelCapabilityMatrix({
+    model: effectiveModel,
+    metadata,
+    hasToolsRequested,
+    forceCompatMode: payload?.forceCompatMode === true,
+  });
+  const effectiveIsGptOss = isLikelyGptOssModel(effectiveModel, capability.family || metadata?.family);
 
   let requestDescriptor = null;
+  let wantsCompatMode = false;
   let executionMode = reasons.some((reason) => reason.includes('fallback'))
     ? 'fallback_model'
     : 'direct';
 
   if (hasMessages) {
-    const wantsCompatMode =
-      payload?.forceCompatMode === true ||
-      metadata?.supportsNativeChat !== true ||
-      effectiveIsGptOss;
+    const forceCompat = payload?.forceCompatMode === true;
+    // GPT-OSS historically needed /api/generate compat for plain chat, but
+    // native tool loops require /api/chat. Do not force compat when tools are present.
+    const gptOssCompatWithoutTools = effectiveIsGptOss && !hasToolsRequested;
+    const noNativeChat = capability.preferredEndpoint !== '/api/chat';
+    wantsCompatMode = forceCompat || noNativeChat || gptOssCompatWithoutTools;
+    if (wantsCompatMode && hasToolsRequested) {
+      reasons.push('tools_incompatible_with_compat_mode');
+    }
     if (wantsCompatMode) {
       requestDescriptor = buildGenerateCompatRequest(
         effectiveModel,
@@ -710,6 +935,12 @@ async function buildExecutionPlan({ endpoint, makeRequest, payload, stream = fal
         stream,
         payload?.format || null
       );
+      if (hasToolsRequested && capability.preferredToolMode === 'native') {
+        requestDescriptor.requestBody.tools = payload.tools;
+        if (payload.think !== undefined) {
+          requestDescriptor.requestBody.think = payload.think;
+        }
+      }
     }
   } else {
     const requestBody = {
@@ -732,10 +963,23 @@ async function buildExecutionPlan({ endpoint, makeRequest, payload, stream = fal
     };
   }
 
-  return {
+  const toolsAttached =
+    Boolean(
+      hasToolsRequested
+      && requestDescriptor
+      && requestDescriptor.apiPath === '/api/chat'
+      && Array.isArray(requestDescriptor.requestBody?.tools)
+      && requestDescriptor.requestBody.tools.length > 0,
+    );
+  const compatBlockedTools = Boolean(hasToolsRequested && wantsCompatMode);
+  const fallbackReason = compatBlockedTools
+    ? 'compat_blocked_native_tools'
+    : (hasToolsRequested && !toolsAttached ? capability.fallbackReason || 'native_tools_unavailable' : capability.fallbackReason);
+  const executionContract = buildExecutionContract({
+    traceId,
+    runId,
     requestedModel,
-    effectiveModel,
-    templateMode: metadata?.templateMode || 'native_chat',
+    resolvedModel: effectiveModel,
     endpointMode: requestDescriptor.apiPath,
     executionMode,
     effectiveContextLength: clamped.effectiveContextLength,
@@ -743,16 +987,53 @@ async function buildExecutionPlan({ endpoint, makeRequest, payload, stream = fal
     backendId: null,
     reasons,
     metadata,
+    capability,
+    toolsRequested: hasToolsRequested,
+    toolsAttached,
+    compatBlockedTools,
+    fallbackReason,
+  });
+
+  return {
+    traceId,
+    runId,
+    requestedModel,
+    resolvedModel: effectiveModel,
+    effectiveModel,
+    provider: executionContract.provider,
+    family: executionContract.family,
+    templateMode: executionContract.templateMode,
+    endpointMode: requestDescriptor.apiPath,
+    executionMode,
+    toolMode: executionContract.toolMode,
+    thinkingPolicy: executionContract.thinkingPolicy,
+    metadataSource: executionContract.metadataSource,
+    capabilityConfidence: executionContract.capabilityConfidence,
+    effectiveContextLength: clamped.effectiveContextLength,
+    effectiveOptions: clamped.options,
+    backendId: null,
+    reasons: executionContract.reasons,
+    warnings: executionContract.warnings,
+    fallbackReason: executionContract.fallbackReason,
+    metadata,
+    capability,
+    executionContract,
     requestBody: requestDescriptor.requestBody,
     responseMode: requestDescriptor.responseMode,
+    toolsRequested: hasToolsRequested,
+    toolsAttached,
+    compatBlockedTools,
   };
 }
 
 module.exports = {
   CASUAL_BASELINE_FALLBACKS,
   buildExecutionPlan,
+  buildExecutionContract,
   clampExecutionOptions,
+  createInferenceTraceId,
   getNormalizedModelInfo,
   inferTemplateMode,
   isRawPromptTemplate,
+  resolveModelCapabilityMatrix,
 };

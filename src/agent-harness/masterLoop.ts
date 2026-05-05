@@ -26,6 +26,7 @@ export interface MasterLoopRequest {
   maxTurns?: number;
   maxRepeatedIdenticalCalls?: number;
   toolReadFreshnessTurns?: number;
+  signal?: AbortSignal;
 }
 
 export interface AssistantTurn {
@@ -110,6 +111,13 @@ export async function runMasterLoop(
   registry: ToolRegistry,
 ): Promise<MasterLoopResult> {
   const abortController = new AbortController();
+  if (request.signal) {
+    if (request.signal.aborted) {
+      abortController.abort();
+    } else {
+      request.signal.addEventListener('abort', () => abortController.abort(), { once: true });
+    }
+  }
   const maxTurns = request.maxTurns ?? 32;
   const repeatedLimit = request.maxRepeatedIdenticalCalls ?? 2;
   const readFreshnessTurns = request.toolReadFreshnessTurns ?? 5;

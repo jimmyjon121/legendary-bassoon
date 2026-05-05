@@ -2579,6 +2579,7 @@ class InferenceOrchestrator {
       this.lastExecutionPlan = {
         ...(payload.executionPlan && typeof payload.executionPlan === 'object' ? payload.executionPlan : {}),
         requestedModel: payload.executionPlan?.requestedModel || payload.model || null,
+        resolvedModel: payload.executionPlan?.resolvedModel || payload.executionPlan?.effectiveModel || payload.model || null,
         effectiveModel: payload.executionPlan?.effectiveModel || payload.model || null,
         effectiveOptions: payload.executionPlan?.effectiveOptions || payload.options || {},
         executionMode: payload.executionPlan?.executionMode || 'direct',
@@ -3065,6 +3066,7 @@ class InferenceOrchestrator {
       lastBackendDecision: this.lastBackendDecision || null,
       lastExecutionMode: this.lastExecutionPlan?.lastExecutionMode || null,
       requestedModel: this.lastExecutionPlan?.requestedModel || null,
+      resolvedModel: this.lastExecutionPlan?.resolvedModel || this.lastExecutionPlan?.effectiveModel || null,
       effectiveModel: this.lastExecutionPlan?.effectiveModel || null,
       effectiveOptions: this.lastExecutionPlan?.effectiveOptions || {},
       modeReasons: Array.isArray(this.lastExecutionPlan?.modeReasons) ? this.lastExecutionPlan.modeReasons : [],

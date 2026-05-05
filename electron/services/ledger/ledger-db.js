@@ -170,6 +170,17 @@ function createTables() {
     )
   `);
   
+  // Harness model profiles: keyed by model name, stores detected profile JSON and user overrides
+  db.run(`
+    CREATE TABLE IF NOT EXISTS model_harness_profiles (
+      id TEXT PRIMARY KEY,
+      digest TEXT,
+      profile_json TEXT NOT NULL,
+      overrides_json TEXT,
+      updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `);
+
   // Indexes for performance
   db.run(`CREATE INDEX IF NOT EXISTS idx_events_session ON ledger_events(session_id)`);
   db.run(`CREATE INDEX IF NOT EXISTS idx_events_type ON ledger_events(type)`);

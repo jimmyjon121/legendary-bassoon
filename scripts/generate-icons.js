@@ -26,9 +26,10 @@ try {
 
   app.disableHardwareAcceleration();
   app.whenReady().then(async () => {
+    // Large canvas so resized PNG stays sharp for macOS Dock / electron-builder icns.
     const win = new BrowserWindow({
-      width: 512,
-      height: 512,
+      width: 1024,
+      height: 1024,
       show: false,
       webPreferences: { offscreen: true },
     });
@@ -40,9 +41,9 @@ try {
     await new Promise((r) => setTimeout(r, 500));
 
     const image = await win.webContents.capturePage();
-    const resized = image.resize({ width: 256, height: 256 });
+    const resized = image.resize({ width: 1024, height: 1024 });
     fs.writeFileSync(pngPath, resized.toPNG());
-    console.log('[icons] Created icon.png (256x256)');
+    console.log('[icons] Created icon.png (1024x1024)');
 
     // Generate ICO
     try {

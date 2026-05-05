@@ -58,6 +58,8 @@
     "eval:baseline-v03": "node scripts/v03-baseline-session.js",
     "eval:baseline-v04": "node scripts/v04-baseline-session.js",
     "eval:release-gate": "node scripts/release-gate.js",
+    "agent-harness-smoke": "node scripts/agent-harness-smoke.js",
+    "inference-toolchain-smoke": "node scripts/inference-toolchain-smoke.js",
     "shortcut": "powershell -NoProfile -ExecutionPolicy Bypass -File ./create-shortcut.ps1",
     "shortcut:dev": "powershell -NoProfile -ExecutionPolicy Bypass -File ./create-shortcut.ps1 -Mode Dev"
   },
@@ -178,7 +180,7 @@
     },
     "mac": {
       "target": "dmg",
-      "icon": "assets/icon.icns",
+      "icon": "assets/icon.png",
       "category": "public.app-category.developer-tools"
     },
     "linux": {

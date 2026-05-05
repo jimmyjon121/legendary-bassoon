@@ -27,6 +27,7 @@ const { setupCodeToolsHandlers } = require('./ipc/code-tools-handlers');
 const { setupResearchHandlers } = require('./ipc/research-handlers');
 const { setupSparkModelHubHandlers } = require('./ipc/spark-model-hub-handlers');
 const { validatePath } = require('./utils/pathValidator');
+const { sanitizeInferenceMessages } = require('./utils/sanitize-inference-messages');
 const { DataService, registerDataHandlers } = require('./services/ipc/data-service');
 const { FsAccessService, registerFsScopedHandlers } = require('./services/ipc/fs-access-service');
 const { DatabaseWriter } = require('./services/database-writer');
@@ -84,6 +85,7 @@ function getModelExperienceManagerFn(...args) {
 
 const {
   buildExecutionPlan,
+  createInferenceTraceId,
   getNormalizedModelInfo,
 } = require('./services/llm-execution-resolver');
 const modelExperienceResolver = require('./services/model-experience-resolver');
@@ -1813,6 +1815,10 @@ const INFERENCE_LIMITS = {
   imagesMax: 8,
   imageStringMaxChars: 8_500_000,
   toolsMax: 64,
+  toolCallsPerMessageMax: 32,
+  toolCallIdMaxChars: 128,
+  toolFunctionNameMaxChars: 128,
+  toolArgumentsMaxChars: 32000,
 };
 
 function clampNumber(value, min, max, fallback = min) {
@@ -1934,25 +1940,7 @@ function sanitizeInferenceInput(rawPayload = {}) {
     throw new Error('Model is required');
   }
 
-  const messages = Array.isArray(rawPayload.messages)
-    ? rawPayload.messages
-        .slice(-INFERENCE_LIMITS.messagesMax)
-        .map((msg) => {
-          if (!msg || typeof msg !== 'object') return null;
-          const role = msg.role === 'assistant' ? 'assistant' : (msg.role === 'system' ? 'system' : 'user');
-          const content = sanitizeText(msg.content, INFERENCE_LIMITS.messageContentMaxChars).trim();
-          if (!content) return null;
-
-          const out = { role, content };
-          if (Array.isArray(msg.images) && msg.images.length > 0) {
-            out.images = msg.images
-              .filter((image) => typeof image === 'string' && image.length <= INFERENCE_LIMITS.imageStringMaxChars)
-              .slice(0, INFERENCE_LIMITS.imagesMax);
-          }
-          return out;
-        })
-        .filter(Boolean)
-    : [];
+  const messages = sanitizeInferenceMessages(rawPayload.messages, INFERENCE_LIMITS);
 
   const images = Array.isArray(rawPayload.images)
     ? rawPayload.images
@@ -1974,6 +1962,12 @@ function sanitizeInferenceInput(rawPayload = {}) {
   const workloadType = typeof rawPayload.workloadType === 'string' ? rawPayload.workloadType : null;
   const priority = Number.isFinite(Number(rawPayload.priority)) ? Number(rawPayload.priority) : undefined;
   const workspace = typeof rawPayload.workspace === 'string' ? rawPayload.workspace.slice(0, 40) : null;
+  const traceId = typeof rawPayload.traceId === 'string' && rawPayload.traceId.trim()
+    ? rawPayload.traceId.trim().slice(0, 128)
+    : createInferenceTraceId();
+  const runId = typeof rawPayload.runId === 'string' && rawPayload.runId.trim()
+    ? rawPayload.runId.trim().slice(0, 128)
+    : null;
 
   const ALLOWED_FORCE_BACKENDS = new Set([
     'ollama-cuda',
@@ -1992,6 +1986,13 @@ function sanitizeInferenceInput(rawPayload = {}) {
   const softBackendPreference = modelExperienceResolver.normalizeBackend(rawPayload.softBackendPreference);
   const experiencePlan = sanitizeExperiencePlan(rawPayload.experiencePlan || null);
 
+  const think =
+    rawPayload.think === true || rawPayload.think === false
+      ? rawPayload.think
+      : rawPayload.think === 'true' || rawPayload.think === 'false'
+        ? rawPayload.think === 'true'
+        : undefined;
+
   return {
     model,
     prompt: sanitizeText(rawPayload.prompt, INFERENCE_LIMITS.promptMaxChars),
@@ -2005,6 +2006,8 @@ function sanitizeInferenceInput(rawPayload = {}) {
     priority,
     workspace,
     allowFallback: rawPayload.allowFallback !== false,
+    traceId,
+    runId,
     preferNativeChat: rawPayload.preferNativeChat !== false,
     forceCompatMode: rawPayload.forceCompatMode === true,
     forceModelFallback: rawPayload.forceModelFallback === true,
@@ -2012,6 +2015,7 @@ function sanitizeInferenceInput(rawPayload = {}) {
     softBackendPreference,
     experiencePlan,
     tools,
+    ...(think !== undefined ? { think } : {}),
   };
 }
 
@@ -2143,6 +2147,29 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       updatedAt: agentRunProgressState.updatedAt || agentRunProgressState.snapshot.updatedAt || Date.now(),
     };
   });
+
+  /** Merge inference-phase fields into the agent run progress snapshot (non-blocking). */
+  const emitAgentInferenceProgress = (partial = {}) => {
+    try {
+      const now = Date.now();
+      const prev = agentRunProgressState.snapshot && typeof agentRunProgressState.snapshot === 'object'
+        ? agentRunProgressState.snapshot
+        : {};
+      const merged = {
+        ...prev,
+        ...partial,
+        lane: partial.lane || prev.lane || 'inference',
+        updatedAt: now,
+      };
+      agentRunProgressState.snapshot = merged;
+      agentRunProgressState.updatedAt = now;
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('agent:runProgress', merged);
+      }
+    } catch (_) {
+      // non-blocking
+    }
+  };
 
   ipcMain.handle('listAgentTasks', async () => {
     try {
@@ -2618,18 +2645,53 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
       });
 
       const executionMeta = {
+        ...(executionPlan.executionContract || {}),
+        traceId: executionPlan.traceId || safePayload.traceId,
+        runId: executionPlan.runId || safePayload.runId || null,
         requestedModel: executionPlan.requestedModel,
+        resolvedModel: executionPlan.resolvedModel || executionPlan.effectiveModel,
         effectiveModel: executionPlan.effectiveModel,
+        provider: executionPlan.provider || 'ollama',
+        family: executionPlan.family || executionPlan.metadata?.family || null,
         templateMode: executionPlan.templateMode,
         endpointMode: executionPlan.endpointMode,
         executionMode: executionPlan.executionMode,
+        toolMode: executionPlan.toolMode || (executionPlan.toolsAttached ? 'native' : 'disabled'),
+        thinkingPolicy: executionPlan.thinkingPolicy || 'none',
+        metadataSource: executionPlan.metadataSource || 'metadata',
+        capabilityConfidence: executionPlan.capabilityConfidence || 'heuristic',
         effectiveContextLength: executionPlan.effectiveContextLength,
         effectiveOptions: executionPlan.effectiveOptions,
         backendId: executionPlan.backendId || null,
         softBackendPreference: safePayload.softBackendPreference || null,
         experiencePlan: safePayload.experiencePlan || null,
         reasons: Array.isArray(executionPlan.reasons) ? executionPlan.reasons : [],
+        warnings: Array.isArray(executionPlan.warnings) ? executionPlan.warnings : [],
+        fallbackReason: executionPlan.fallbackReason || null,
+        toolsRequested: Boolean(executionPlan.toolsRequested),
+        toolsAttached: Boolean(executionPlan.toolsAttached),
+        compatBlockedTools: Boolean(executionPlan.compatBlockedTools),
       };
+
+      emitAgentInferenceProgress({
+        status: 'inference',
+        phase: 'execution_plan_ready',
+        progressPct: 8,
+        inference: {
+          requestedModel: executionPlan.requestedModel,
+          resolvedModel: executionMeta.resolvedModel,
+          effectiveModel: executionPlan.effectiveModel,
+          endpointMode: executionPlan.endpointMode,
+          executionMode: executionPlan.executionMode,
+          toolMode: executionMeta.toolMode,
+          traceId: executionMeta.traceId,
+          runId: executionMeta.runId,
+          toolsRequested: executionMeta.toolsRequested,
+          toolsAttached: executionMeta.toolsAttached,
+          compatBlockedTools: executionMeta.compatBlockedTools,
+          fallbackReason: executionMeta.fallbackReason,
+        },
+      });
 
       const inferencePayload = {
         model: executionPlan.requestBody.model || executionPlan.effectiveModel,
@@ -2642,12 +2704,15 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         workloadType: safePayload.workloadType || (safePayload.tools?.length ? 'agent' : 'chat'),
         modelInfo: executionPlan.metadata || null,
         executionPlan: executionMeta,
+        traceId: executionMeta.traceId,
+        runId: executionMeta.runId,
         ...(executionPlan.requestBody.messages ? { messages: executionPlan.requestBody.messages } : {}),
         ...(executionPlan.requestBody.prompt ? { prompt: executionPlan.requestBody.prompt } : {}),
         ...(executionPlan.requestBody.system ? { system: executionPlan.requestBody.system } : {}),
         ...(executionPlan.requestBody.images ? { images: executionPlan.requestBody.images } : {}),
         ...(executionPlan.requestBody.raw ? { raw: true } : {}),
         ...(Array.isArray(safePayload.tools) ? { tools: safePayload.tools } : {}),
+        ...(safePayload.think !== undefined ? { think: safePayload.think } : {}),
         ...(safePayload.forceBackend ? { forceBackend: safePayload.forceBackend } : {}),
         ...(safePayload.softBackendPreference ? { softBackendPreference: safePayload.softBackendPreference } : {}),
         ...(safePayload.experiencePlan ? { experiencePlan: safePayload.experiencePlan } : {}),
@@ -2657,10 +2722,19 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         if (orchestrator) {
           return await orchestrator.generate(inferencePayload);
         }
+        const directBody = {
+          ...executionPlan.requestBody,
+          ...(Array.isArray(safePayload.tools) &&
+          safePayload.tools.length > 0 &&
+          executionPlan.endpointMode === '/api/chat'
+            ? { tools: safePayload.tools }
+            : {}),
+          ...(safePayload.think !== undefined ? { think: safePayload.think } : {}),
+        };
         const response = await makeRequest(`${endpoint}${executionPlan.endpointMode}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: executionPlan.requestBody,
+          body: directBody,
           timeout: requestTimeout,
         });
         return response.data;
@@ -2668,6 +2742,14 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
 
       let data = null;
       try {
+        emitAgentInferenceProgress({
+          status: 'inference',
+          phase: 'sending_request',
+          progressPct: 20,
+          inference: { effectiveModel: executionPlan.effectiveModel, endpointMode: executionPlan.endpointMode },
+          traceId: executionMeta.traceId,
+          runId: executionMeta.runId,
+        });
         data = await invokeBackend();
       } catch (backendError) {
         // If the backend wasn't reachable, give it a short readiness window
@@ -2677,6 +2759,12 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         const isConnRefused = bCode === 'ECONNREFUSED' || /ECONNREFUSED/i.test(bMsg);
         if (isConnRefused) {
           console.log(`[LLM] Backend not reachable; waiting up to 8s for readiness (model=${executionPlan.requestedModel || 'n/a'})`);
+          emitAgentInferenceProgress({
+            status: 'inference',
+            phase: 'waiting_for_backend',
+            progressPct: 25,
+            inferenceDetail: 'Backend refused connection; retry window',
+          });
           const ready = await waitForBackendReady(endpoint, 8000);
           if (ready) {
             data = await invokeBackend();
@@ -2684,9 +2772,24 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
             throw backendError;
           }
         } else {
+          emitAgentInferenceProgress({
+            status: 'error',
+            phase: 'inference_failed',
+            progressPct: 0,
+            inferenceError: bMsg || String(backendError),
+          });
           throw backendError;
         }
       }
+
+      emitAgentInferenceProgress({
+        status: 'inference',
+        phase: 'response_received',
+        progressPct: 85,
+        inference: { effectiveModel: executionPlan.effectiveModel },
+        traceId: executionMeta.traceId,
+        runId: executionMeta.runId,
+      });
 
       // Normalize: /api/chat returns { message: { content } }, /api/generate returns { response }
       if (executionPlan.responseMode === 'chat' && data?.message?.content && !data.response) {
@@ -2805,22 +2908,58 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
         stream: true,
       });
       const executionMeta = {
+        ...(executionPlan.executionContract || {}),
+        traceId: executionPlan.traceId || safePayload.traceId,
+        runId: executionPlan.runId || safePayload.runId || null,
         requestedModel: executionPlan.requestedModel,
+        resolvedModel: executionPlan.resolvedModel || executionPlan.effectiveModel,
         effectiveModel: executionPlan.effectiveModel,
+        provider: executionPlan.provider || 'ollama',
+        family: executionPlan.family || executionPlan.metadata?.family || null,
         templateMode: executionPlan.templateMode,
         endpointMode: executionPlan.endpointMode,
         executionMode: executionPlan.executionMode,
+        toolMode: executionPlan.toolMode || (executionPlan.toolsAttached ? 'native' : 'disabled'),
+        thinkingPolicy: executionPlan.thinkingPolicy || 'none',
+        metadataSource: executionPlan.metadataSource || 'metadata',
+        capabilityConfidence: executionPlan.capabilityConfidence || 'heuristic',
         effectiveContextLength: executionPlan.effectiveContextLength,
         effectiveOptions: executionPlan.effectiveOptions,
         backendId: executionPlan.backendId || null,
         softBackendPreference: safePayload.softBackendPreference || null,
         experiencePlan: safePayload.experiencePlan || null,
         reasons: Array.isArray(executionPlan.reasons) ? executionPlan.reasons : [],
+        warnings: Array.isArray(executionPlan.warnings) ? executionPlan.warnings : [],
+        fallbackReason: executionPlan.fallbackReason || null,
+        toolsRequested: Boolean(executionPlan.toolsRequested),
+        toolsAttached: Boolean(executionPlan.toolsAttached),
+        compatBlockedTools: Boolean(executionPlan.compatBlockedTools),
       };
 
       safeSend(streamChannel, { meta: { executionPlan: executionMeta } });
 
+      emitAgentInferenceProgress({
+        status: 'inference',
+        phase: 'stream_plan_ready',
+        progressPct: 8,
+        inference: {
+          requestedModel: executionPlan.requestedModel,
+          resolvedModel: executionMeta.resolvedModel,
+          effectiveModel: executionPlan.effectiveModel,
+          endpointMode: executionPlan.endpointMode,
+          executionMode: executionPlan.executionMode,
+          toolMode: executionMeta.toolMode,
+          traceId: executionMeta.traceId,
+          runId: executionMeta.runId,
+          toolsRequested: executionMeta.toolsRequested,
+          toolsAttached: executionMeta.toolsAttached,
+          compatBlockedTools: executionMeta.compatBlockedTools,
+          fallbackReason: executionMeta.fallbackReason,
+        },
+      });
+
       try {
+        let streamFirstTokenEmitted = false;
         if (orchestrator) {
           const inferencePayload = {
             model: executionPlan.requestBody.model,
@@ -2832,12 +2971,15 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
             workloadType: safePayload.workloadType || (safePayload.tools?.length ? 'agent' : 'chat'),
             modelInfo: executionPlan.metadata || null,
             executionPlan: executionMeta,
+            traceId: executionMeta.traceId,
+            runId: executionMeta.runId,
             ...(executionPlan.requestBody.messages ? { messages: executionPlan.requestBody.messages } : {}),
             ...(executionPlan.requestBody.prompt ? { prompt: executionPlan.requestBody.prompt } : {}),
             ...(executionPlan.requestBody.system ? { system: executionPlan.requestBody.system } : {}),
             ...(executionPlan.requestBody.images ? { images: executionPlan.requestBody.images } : {}),
             ...(executionPlan.requestBody.raw ? { raw: true } : {}),
             ...(Array.isArray(safePayload.tools) ? { tools: safePayload.tools } : {}),
+            ...(safePayload.think !== undefined ? { think: safePayload.think } : {}),
             ...(safePayload.forceBackend ? { forceBackend: safePayload.forceBackend } : {}),
             ...(safePayload.softBackendPreference ? { softBackendPreference: safePayload.softBackendPreference } : {}),
             ...(safePayload.experiencePlan ? { experiencePlan: safePayload.experiencePlan } : {}),
@@ -2845,6 +2987,15 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
 
           const streamResult = await orchestrator.stream(inferencePayload, (chunk) => {
             if (!chunk) return;
+            if (!streamFirstTokenEmitted && (chunk.response || chunk.message?.content)) {
+              streamFirstTokenEmitted = true;
+              emitAgentInferenceProgress({
+                status: 'inference',
+                phase: 'first_token',
+                progressPct: 40,
+                inference: { effectiveModel: executionPlan.effectiveModel },
+              });
+            }
             if (chunk.meta && typeof chunk.meta === 'object') {
               safeSend(streamChannel, { meta: chunk.meta });
             }
@@ -2857,9 +3008,18 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
               safeSend(streamChannel, { error: chunk.error });
               return;
             }
-            if (chunk.message?.content) {
-              safeSend(streamChannel, { response: chunk.message.content });
-              return;
+            if (chunk.message && (chunk.message.tool_calls?.length || chunk.message.content)) {
+              safeSend(streamChannel, {
+                message: {
+                  content: chunk.message.content,
+                  ...(chunk.message.tool_calls?.length ? { tool_calls: chunk.message.tool_calls } : {}),
+                },
+              });
+              if (typeof chunk.message.content === 'string' && chunk.message.content.length > 0) {
+                safeSend(streamChannel, { response: chunk.message.content });
+                return;
+              }
+              if (chunk.message.tool_calls?.length) return;
             }
             if (chunk.response) {
               safeSend(streamChannel, { response: chunk.response });
@@ -2910,17 +3070,38 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
 
         await withRetry(
           async () => {
+            const directBody = {
+              ...executionPlan.requestBody,
+              ...(Array.isArray(safePayload.tools) &&
+              safePayload.tools.length > 0 &&
+              executionPlan.endpointMode === '/api/chat'
+                ? { tools: safePayload.tools }
+                : {}),
+              ...(safePayload.think !== undefined && executionPlan.endpointMode === '/api/chat'
+                ? { think: safePayload.think }
+                : {}),
+            };
             await streamRequest(
               `${endpoint}${executionPlan.endpointMode}`,
-              executionPlan.requestBody,
+              directBody,
               (chunk) => {
                 if (chunk.done) {
                   streamCompletedByOllama = true;
                   safeSend(streamChannel, { done: true });
                   return;
                 }
-                if (executionPlan.responseMode === 'chat' && chunk.message?.content) {
-                  safeSend(streamChannel, { response: chunk.message.content });
+                if (executionPlan.responseMode === 'chat' && chunk.message) {
+                  if (chunk.message.tool_calls?.length || chunk.message.content) {
+                    safeSend(streamChannel, {
+                      message: {
+                        content: chunk.message.content || '',
+                        ...(chunk.message.tool_calls?.length ? { tool_calls: chunk.message.tool_calls } : {}),
+                      },
+                    });
+                  }
+                  if (chunk.message.content) {
+                    safeSend(streamChannel, { response: chunk.message.content });
+                  }
                 } else if (chunk.response) {
                   safeSend(streamChannel, chunk);
                 }

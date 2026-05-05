@@ -8,7 +8,7 @@
  * 4. Repeat until AI returns final response
  */
 
-import { CODE_TOOLS, VERIFICATION_TOOLS, isCommandAllowed } from './codeTools';
+import { CODE_TOOLS, VERIFICATION_TOOLS } from './codeTools';
 import { safeCall } from '../utils/electronAPI';
 
 // ============================================================================
@@ -21,6 +21,19 @@ const DEFAULT_OLLAMA_TIMEOUT = 300000;
 const NETWORK_POLICY_OFFLINE = 'offline';
 const NETWORK_POLICY_RESEARCH_WEB_ONLY = 'research_web_only';
 const WEB_TOOL_NAMES = new Set(['web_search', 'web_fetch_page']);
+const TOOL_EXECUTION_STATES = Object.freeze({
+  RESOLVING_MODEL: 'resolving_model',
+  PLANNING_EXECUTION: 'planning_execution',
+  SENDING_MODEL_REQUEST: 'sending_model_request',
+  AWAITING_MODEL_RESPONSE: 'awaiting_model_response',
+  TOOL_CALL_DETECTED: 'tool_call_detected',
+  EXECUTING_TOOL: 'executing_tool',
+  TOOL_RESULT_APPENDED: 'tool_result_appended',
+  CONTINUING_MODEL_RESPONSE: 'continuing_model_response',
+  COMPLETED: 'completed',
+  FAILED: 'failed',
+  FALLBACK_TO_TEXT_TOOLS: 'fallback_to_text_tools',
+});
 
 function normalizeNetworkPolicy(value) {
   const normalized = String(value || '').trim().toLowerCase();
@@ -170,6 +183,36 @@ function inferReasonCodeFromError(errorOrText, fallback = 'tool_execution_failed
   if (text.includes('tool not available') || text.includes('not available')) return 'tool_unavailable';
   if (text.includes('checkpoint') && text.includes('rollback')) return 'rollback_failure';
   return fallback;
+}
+
+function createClientTraceId(prefix = 'agent') {
+  const cryptoObj = typeof globalThis !== 'undefined' ? globalThis.crypto : null;
+  if (cryptoObj && typeof cryptoObj.randomUUID === 'function') {
+    return `${prefix}_${cryptoObj.randomUUID()}`;
+  }
+  return `${prefix}_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function normalizeToolCallSignature(toolCall = {}) {
+  const name = toolCall?.function?.name || 'unknown';
+  let args = toolCall?.function?.arguments;
+  if (args && typeof args === 'object') {
+    try {
+      args = JSON.stringify(args, Object.keys(args).sort());
+    } catch {
+      args = String(args);
+    }
+  }
+  return `${name}:${String(args || '').slice(0, 1000)}`;
+}
+
+function textClaimsToolInspection(text = '') {
+  const value = String(text || '').toLowerCase();
+  if (!value.trim()) return false;
+  return (
+    /\b(i\s+)?(checked|inspected|read|opened|looked at|reviewed)\b/.test(value) &&
+    /\b(file|directory|folder|code|repo|repository|project|workspace)\b/.test(value)
+  );
 }
 
 // ============================================================================
@@ -429,6 +472,7 @@ export class ToolEnabledLLM {
     this.onToolResult = options.onToolResult || (() => {});
     this.onChunk = options.onChunk || (() => {});
     this.onThinking = options.onThinking || (() => {});
+    this.onStateChange = options.onStateChange || (() => {});
     
     // Abort control
     this._aborted = false;
@@ -439,6 +483,18 @@ export class ToolEnabledLLM {
     this.toolCalls = [];
     this.proposedChanges = [];
     this.iteration = 0;
+    this.traceId = options.traceId || createClientTraceId('agent_trace');
+    this.runId = options.runId || null;
+    this.currentState = null;
+    this.lastExecutionPlan = null;
+    this.toolRunStatus = {
+      modelRespondedWithText: false,
+      modelRequestedTool: false,
+      toolExecuted: false,
+      toolResultReturned: false,
+      modelIncorporatedToolResult: false,
+      completedSuccessfully: false,
+    };
     this.defaultTextToolMode = Boolean(options.defaultTextToolMode);
     this.reliabilityMetrics = {
       toolFailures: 0,
@@ -461,6 +517,39 @@ export class ToolEnabledLLM {
   resetAbort() {
     this._aborted = false;
     this._activeController = null;
+  }
+
+  emitState(state, details = {}) {
+    this.currentState = state;
+    const event = {
+      state,
+      traceId: this.traceId,
+      runId: this.runId,
+      requestedModel: this.model,
+      resolvedModel: this.lastExecutionPlan?.resolvedModel || this.lastExecutionPlan?.effectiveModel || this.model,
+      endpointMode: this.lastExecutionPlan?.endpointMode || null,
+      toolMode: this.lastExecutionPlan?.toolMode || (this._textToolMode ? 'text-json' : 'native'),
+      fallbackReason: this.lastExecutionPlan?.fallbackReason || details.fallbackReason || null,
+      timestamp: Date.now(),
+      ...details,
+    };
+    try {
+      this.onStateChange(event);
+    } catch {
+      // non-blocking UI callback
+    }
+    return event;
+  }
+
+  resetToolRunStatus() {
+    this.toolRunStatus = {
+      modelRespondedWithText: false,
+      modelRequestedTool: false,
+      toolExecuted: false,
+      toolResultReturned: false,
+      modelIncorporatedToolResult: false,
+      completedSuccessfully: false,
+    };
   }
 
   /**
@@ -701,8 +790,6 @@ ${toolDescriptions}
    * falls back to text-based tool instructions in the system prompt.
    */
   async callOllama(messages, systemPrompt) {
-    const endpoint = await safeCall('getSettings', ['llmEndpoint'], 'http://127.0.0.1:11434') || 'http://127.0.0.1:11434';
-
     // Determine whether to use native tools or text-based fallback
     const useNativeTools = !this._textToolMode;
     
@@ -722,6 +809,9 @@ ${toolDescriptions}
       workloadType: 'agent',
       allowFallback: true,
       priority: 8,
+      preferNativeChat: true,
+      traceId: this.traceId,
+      runId: this.runId,
     };
 
     // Only include tools array if using native mode
@@ -730,11 +820,38 @@ ${toolDescriptions}
     }
 
     try {
-      // Prefer Electron IPC so all inference goes through the orchestrator.
+      this.emitState(TOOL_EXECUTION_STATES.SENDING_MODEL_REQUEST, {
+        nativeToolsRequested: useNativeTools,
+      });
+      // Production agent inference must go through Electron IPC so resolver
+      // contract, backend routing, tracing, and tool gating all stay in one path.
       if (typeof window !== 'undefined' && window.electronAPI?.sendToLLM) {
+        this.emitState(TOOL_EXECUTION_STATES.AWAITING_MODEL_RESPONSE);
         const result = await window.electronAPI.sendToLLM(payload);
         if (!result) {
           throw new Error('Empty response from llm:send');
+        }
+        const executionPlan = result?.meta?.executionPlan;
+        if (executionPlan && typeof executionPlan === 'object') {
+          this.lastExecutionPlan = executionPlan;
+          if (executionPlan.traceId) this.traceId = executionPlan.traceId;
+          if (executionPlan.runId) this.runId = executionPlan.runId;
+        }
+        if (
+          useNativeTools
+          && executionPlan?.compatBlockedTools
+        ) {
+          console.warn(
+            '[ToolEnabledLLM] Native tools unavailable in compat execution mode (see executionPlan.reasons); switching to text-based mode',
+          );
+          if (this.reliabilityMetrics) {
+            this.reliabilityMetrics.nativeToolFallbacks = Number(this.reliabilityMetrics.nativeToolFallbacks || 0) + 1;
+          }
+          this.emitState(TOOL_EXECUTION_STATES.FALLBACK_TO_TEXT_TOOLS, {
+            fallbackReason: executionPlan?.fallbackReason || 'compat_blocked_native_tools',
+          });
+          this._textToolMode = true;
+          return this.callOllama(messages, systemPrompt);
         }
         if (result?.error) {
           const details = typeof result.error === 'string' ? result.error : JSON.stringify(result.error);
@@ -743,6 +860,10 @@ ${toolDescriptions}
             if (this.reliabilityMetrics) {
               this.reliabilityMetrics.nativeToolFallbacks = Number(this.reliabilityMetrics.nativeToolFallbacks || 0) + 1;
             }
+            this.emitState(TOOL_EXECUTION_STATES.FALLBACK_TO_TEXT_TOOLS, {
+              fallbackReason: 'native_tool_rejected',
+              error: details,
+            });
             this._textToolMode = true;
             return this.callOllama(messages, systemPrompt);
           }
@@ -754,6 +875,9 @@ ${toolDescriptions}
           if (this.reliabilityMetrics) {
             this.reliabilityMetrics.nativeToolFallbacks = Number(this.reliabilityMetrics.nativeToolFallbacks || 0) + 1;
           }
+          this.emitState(TOOL_EXECUTION_STATES.FALLBACK_TO_TEXT_TOOLS, {
+            fallbackReason: 'empty_native_tool_response',
+          });
           this._textToolMode = true;
           return this.callOllama(messages, systemPrompt);
         }
@@ -761,71 +885,7 @@ ${toolDescriptions}
         return result;
       }
 
-      const controller = new AbortController();
-      this._activeController = controller;
-      const timeout = setTimeout(() => controller.abort(), DEFAULT_OLLAMA_TIMEOUT);
-      if (this._aborted) { clearTimeout(timeout); throw new Error('Aborted'); }
-      try {
-        const response = await fetch(`${endpoint}/api/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload),
-          signal: controller.signal
-        });
-
-        if (!response.ok) {
-          let details = '';
-          try {
-            const parsed = await response.json();
-            if (parsed?.error) {
-              details = parsed.error;
-            } else {
-              details = JSON.stringify(parsed);
-            }
-          } catch (_parseErr) {
-            try {
-              details = await response.text();
-            } catch (_textErr) {
-              details = '';
-            }
-          }
-
-          // If native tools caused the error, retry in text mode
-          if (useNativeTools && (
-            details.includes('does not support tools') ||
-            details.includes('unsupported') ||
-            details.includes('tool')
-          )) {
-            console.warn('[ToolEnabledLLM] Native tools rejected, switching to text-based mode');
-            if (this.reliabilityMetrics) {
-              this.reliabilityMetrics.nativeToolFallbacks = Number(this.reliabilityMetrics.nativeToolFallbacks || 0) + 1;
-            }
-            this._textToolMode = true;
-            clearTimeout(timeout);
-            return this.callOllama(messages, systemPrompt);
-          }
-
-          const suffix = details ? ` - ${details}` : '';
-          throw new Error(`Ollama error: ${response.status} ${response.statusText}${suffix}`);
-        }
-
-        const result = await response.json();
-
-        // If native tools returned no tool_calls AND no content, try text mode
-        if (useNativeTools && !result.message?.tool_calls?.length && !result.message?.content?.trim()) {
-          console.warn('[ToolEnabledLLM] Native tools returned empty, switching to text-based mode');
-          if (this.reliabilityMetrics) {
-            this.reliabilityMetrics.nativeToolFallbacks = Number(this.reliabilityMetrics.nativeToolFallbacks || 0) + 1;
-          }
-          this._textToolMode = true;
-          clearTimeout(timeout);
-          return this.callOllama(messages, systemPrompt);
-        }
-
-        return result;
-      } finally {
-        clearTimeout(timeout);
-      }
+      throw new Error('Production agent inference requires electronAPI.sendToLLM');
     } catch (error) {
       if (error?.name === 'AbortError') {
         throw new Error(`Ollama request timed out after ${Math.round(DEFAULT_OLLAMA_TIMEOUT / 1000)}s`);
@@ -845,9 +905,12 @@ ${toolDescriptions}
     this.toolCalls = [];
     this.proposedChanges = [];
     this._textToolMode = this.defaultTextToolMode;
+    this.traceId = this.traceId || createClientTraceId('agent_trace');
+    this.resetToolRunStatus();
     let toolSteps = 0;
     let consecutiveToolFailures = 0;
     let lastFailureReasonCode = null;
+    const repeatedToolCallCounts = new Map();
     const reliabilityMetrics = {
       toolFailures: 0,
       failureByReason: {},
@@ -858,6 +921,7 @@ ${toolDescriptions}
       nativeToolFallbacks: 0,
     };
     this.reliabilityMetrics = reliabilityMetrics;
+    this.emitState(TOOL_EXECUTION_STATES.RESOLVING_MODEL);
 
     const messages = [
       ...conversationHistory,
@@ -865,6 +929,9 @@ ${toolDescriptions}
     ];
 
     const systemPrompt = this.buildSystemPrompt();
+    this.emitState(TOOL_EXECUTION_STATES.PLANNING_EXECUTION, {
+      textToolMode: this._textToolMode,
+    });
 
     while (this.iteration < this.maxIterations) {
       if (this._aborted) throw new Error('Generation stopped by user');
@@ -874,6 +941,15 @@ ${toolDescriptions}
       const response = await this.callOllama(messages, systemPrompt);
       const toolCalls = this.parseToolCalls(response);
       const assistantText = response.message?.content || '';
+      if (assistantText.trim()) {
+        this.toolRunStatus.modelRespondedWithText = true;
+      }
+      if (toolCalls.length > 0) {
+        this.toolRunStatus.modelRequestedTool = true;
+        this.emitState(TOOL_EXECUTION_STATES.TOOL_CALL_DETECTED, {
+          toolCallCount: toolCalls.length,
+        });
+      }
 
       if (this._textToolMode && assistantText.trim()) {
         messages.push({
@@ -884,6 +960,36 @@ ${toolDescriptions}
 
       // If no tool calls, we have the final response
       if (toolCalls.length === 0) {
+        const fakeSuccess = !this.toolRunStatus.toolExecuted && textClaimsToolInspection(assistantText);
+        if (fakeSuccess) {
+          const failureReasonCode = 'fake_tool_success';
+          this.toolRunStatus.completedSuccessfully = false;
+          this.emitState(TOOL_EXECUTION_STATES.FAILED, {
+            failureReasonCode,
+            fallbackReason: 'text_claim_without_tool_call',
+          });
+          return {
+            content: assistantText || 'Model claimed tool-backed work without making a tool call.',
+            filesRead: Array.from(this.filesRead),
+            toolCalls: this.toolCalls,
+            proposedChanges: this.proposedChanges,
+            iterations: this.iteration,
+            textToolMode: this._textToolMode,
+            toolSteps,
+            failureReasonCode,
+            fallbackRequired: true,
+            toolRunStatus: { ...this.toolRunStatus },
+            reliabilityMetrics,
+          };
+        }
+        this.toolRunStatus.modelIncorporatedToolResult = this.toolRunStatus.toolResultReturned
+          ? Boolean(assistantText.trim())
+          : false;
+        this.toolRunStatus.completedSuccessfully = !this.toolRunStatus.modelRequestedTool
+          || (this.toolRunStatus.toolExecuted && this.toolRunStatus.toolResultReturned);
+        this.emitState(TOOL_EXECUTION_STATES.COMPLETED, {
+          toolRunStatus: { ...this.toolRunStatus },
+        });
         return {
           content: assistantText,
           filesRead: Array.from(this.filesRead),
@@ -893,6 +999,7 @@ ${toolDescriptions}
           textToolMode: this._textToolMode,
           toolSteps,
           failureReasonCode: null,
+          toolRunStatus: { ...this.toolRunStatus },
           reliabilityMetrics,
         };
       }
@@ -900,6 +1007,10 @@ ${toolDescriptions}
       // Execute each tool call
       for (const toolCall of toolCalls) {
         if (toolSteps >= this.maxToolSteps) {
+          this.emitState(TOOL_EXECUTION_STATES.FAILED, {
+            failureReasonCode: 'max_tool_steps_reached',
+            maxToolSteps: this.maxToolSteps,
+          });
           return {
             content: `Tool step limit reached (${this.maxToolSteps}). Returning partial progress.`,
             filesRead: Array.from(this.filesRead),
@@ -909,17 +1020,48 @@ ${toolDescriptions}
             textToolMode: this._textToolMode,
             maxToolStepsReached: true,
             failureReasonCode: 'max_tool_steps_reached',
+            toolRunStatus: { ...this.toolRunStatus },
+            reliabilityMetrics,
+          };
+        }
+
+        const signature = normalizeToolCallSignature(toolCall);
+        const repeatedCount = Number(repeatedToolCallCounts.get(signature) || 0) + 1;
+        repeatedToolCallCounts.set(signature, repeatedCount);
+        if (repeatedCount >= 4) {
+          const failureReasonCode = 'repeated_invalid_tool_call';
+          this.emitState(TOOL_EXECUTION_STATES.FAILED, {
+            failureReasonCode,
+            toolName: toolCall?.function?.name || 'unknown',
+            fallbackReason: failureReasonCode,
+          });
+          return {
+            content: 'Stopping due to repeated identical tool calls. The model is looping on an invalid action.',
+            filesRead: Array.from(this.filesRead),
+            toolCalls: this.toolCalls,
+            proposedChanges: this.proposedChanges,
+            iterations: this.iteration,
+            textToolMode: this._textToolMode,
+            toolSteps,
+            failureReasonCode,
+            fallbackReason: failureReasonCode,
+            toolRunStatus: { ...this.toolRunStatus },
             reliabilityMetrics,
           };
         }
 
         this.onToolCall(toolCall);
+        this.emitState(TOOL_EXECUTION_STATES.EXECUTING_TOOL, {
+          toolName: toolCall?.function?.name || 'tool',
+          toolStep: toolSteps + 1,
+        });
         
         const result = await executeTool(toolCall, this.projectRoot, {
           networkPolicy: this.networkPolicy,
           autoRollbackOnFailure: this.autoRollbackOnFailure,
         });
         toolSteps += 1;
+        this.toolRunStatus.toolExecuted = true;
         const reasonCode = result.reasonCode || (result.success ? null : inferReasonCodeFromError(result.error, 'tool_execution_failed'));
         if (!result.success) {
           consecutiveToolFailures += 1;
@@ -935,6 +1077,7 @@ ${toolDescriptions}
           }
         } else {
           consecutiveToolFailures = 0;
+          this.toolRunStatus.toolResultReturned = true;
         }
         if (result.rollback) {
           reliabilityMetrics.rollbackAttempts += 1;
@@ -965,8 +1108,18 @@ ${toolDescriptions}
         }
 
         this.onToolResult(toolCall, result);
+        this.emitState(TOOL_EXECUTION_STATES.TOOL_RESULT_APPENDED, {
+          toolName: toolCall?.function?.name || 'tool',
+          success: Boolean(result.success),
+          reasonCode,
+          toolRunStatus: { ...this.toolRunStatus },
+        });
 
         if (consecutiveToolFailures >= 3) {
+          this.emitState(TOOL_EXECUTION_STATES.FAILED, {
+            failureReasonCode: 'consecutive_tool_failures',
+            lastFailureReasonCode,
+          });
           return {
             content: 'Stopping due to repeated tool failures. Review the failure reason and retry with tighter constraints.',
             filesRead: Array.from(this.filesRead),
@@ -977,6 +1130,7 @@ ${toolDescriptions}
             toolSteps,
             failureReasonCode: 'consecutive_tool_failures',
             lastFailureReasonCode,
+            toolRunStatus: { ...this.toolRunStatus },
             reliabilityMetrics,
           };
         }
@@ -1013,9 +1167,17 @@ ${toolDescriptions}
           content: response.message.content
         });
       }
+      this.emitState(TOOL_EXECUTION_STATES.CONTINUING_MODEL_RESPONSE, {
+        iteration: this.iteration,
+        toolSteps,
+      });
     }
 
     // Return partial results instead of throwing
+    this.emitState(TOOL_EXECUTION_STATES.FAILED, {
+      failureReasonCode: 'max_iterations_reached',
+      iterations: this.iteration,
+    });
     return {
       content: `Agent completed ${this.iteration} iterations. ${this.proposedChanges.length} changes proposed, ${this.filesRead.size} files read.`,
       filesRead: Array.from(this.filesRead),
@@ -1027,6 +1189,7 @@ ${toolDescriptions}
       toolSteps,
       failureReasonCode: 'max_iterations_reached',
       lastFailureReasonCode,
+      toolRunStatus: { ...this.toolRunStatus },
       reliabilityMetrics,
     };
   }
@@ -1132,6 +1295,13 @@ export function getToolEnabledLLM(options) {
   }
   return defaultInstance;
 }
+
+export const TOOL_ENABLED_LLM_STATES = TOOL_EXECUTION_STATES;
+export const __toolEnabledLLMTestHooks = {
+  createClientTraceId,
+  normalizeToolCallSignature,
+  textClaimsToolInspection,
+};
 
 export default {
   ToolEnabledLLM,

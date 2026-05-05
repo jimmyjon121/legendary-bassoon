@@ -22,6 +22,7 @@ const { setupImageHandlers } = require('./image-handlers');
 const { setupCodeToolsHandlers } = require('./code-tools-handlers');
 const { setupWebSearchHandlers } = require('./web-search-handlers');
 const { setupSparkModelHubHandlers } = require('./spark-model-hub-handlers');
+const { setupAgentHarnessHandlers } = require('./agent-harness-handlers');
 
 /**
  * Setup all modular IPC handlers
@@ -56,7 +57,10 @@ function setupModularHandlers(ipcMain, mainWindow, store, db) {
 
   // Spark Model Hub handlers (local AI runtime command center)
   setupSparkModelHubHandlers(ipcMain, mainWindow, store);
-  
+
+  // Agent harness handlers (model profile persistence)
+  setupAgentHarnessHandlers(ipcMain, mainWindow, store, db);
+
   console.log('[IPC] Modular handlers setup complete');
 }
 
