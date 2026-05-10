@@ -1,13 +1,9 @@
 import React, { useState, useEffect, useCallback, memo } from 'react';
 import {
-  AlertTriangle,
-  CheckCircle2,
-  Globe,
   Minus,
   RotateCcw,
   Square,
   Unplug,
-  WifiOff,
   X,
 } from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
@@ -92,13 +88,11 @@ function getModelStatusLabel(modelStatus, isLoaded) {
 }
 
 // Memoized title bar to prevent re-renders
-const TitleBar = memo(function TitleBar({ 
-  alphaReadiness,
-  accentColor, 
-  currentModel, 
-  modelStatus, 
+const TitleBar = memo(function TitleBar({
+  accentColor,
+  currentModel,
+  modelStatus,
   isActiveModelLoaded,
-  sovereigntyStatus,
   showDevRefresh,
   showWindowControls,
   isWindowMaximized,
@@ -123,31 +117,6 @@ const TitleBar = memo(function TitleBar({
     : statusTone === 'loaded'
       ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200'
       : 'border-zinc-500/35 bg-zinc-500/10 text-zinc-300';
-  const alphaStatus = alphaReadiness?.status || 'needs_setup';
-  const alphaTone = alphaStatus === 'ready'
-    ? {
-        icon: CheckCircle2,
-        label: 'Alpha Ready',
-        className: 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200',
-      }
-    : alphaStatus === 'degraded'
-      ? {
-          icon: AlertTriangle,
-          label: 'Alpha Degraded',
-          className: 'border-amber-400/20 bg-amber-500/10 text-amber-200',
-        }
-      : {
-          icon: AlertTriangle,
-          label: 'Needs Setup',
-          className: 'border-rose-400/20 bg-rose-500/10 text-rose-200',
-        };
-  const AlphaIcon = alphaTone.icon;
-  const alphaTitle = (alphaReadiness?.checks || [])
-    .filter((check) => check.status !== 'ready')
-    .map((check) => `${check.label}: ${check.message}`)
-    .slice(0, 3)
-    .join('\n') || 'Anvil paid-alpha readiness';
-
   return (
     <header 
       className="titlebar relative z-20 h-10 flex items-center justify-between px-3 border-b bg-[#0a0b10]/95 border-white/[0.06]"
@@ -163,34 +132,6 @@ const TitleBar = memo(function TitleBar({
         </div>
         
         <span className="text-[13px] font-semibold text-text-primary">Anvil</span>
-
-        <span
-          className={`hidden md:inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${alphaTone.className}`}
-          title={alphaTitle}
-        >
-          <AlphaIcon size={10} />
-          {alphaTone.label}
-        </span>
-
-        {sovereigntyStatus && (
-          <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${
-            sovereigntyStatus.localOnly 
-              ? 'text-emerald-400/80' 
-              : 'text-text-muted/60'
-          }`}>
-            {sovereigntyStatus.localOnly ? (
-              <>
-                <WifiOff size={10} />
-                Local
-              </>
-            ) : (
-              <>
-                <Globe size={10} />
-                Network
-              </>
-            )}
-          </span>
-        )}
       </div>
 
       {/* Center: Model status */}
@@ -313,7 +254,6 @@ export function Layout({ children }) {
   const error = useAppStore(state => state.error);
   const clearError = useAppStore(state => state.clearError);
   
-  const [sovereigntyStatus, setSovereigntyStatus] = useState(null);
   const [showDevRefresh, setShowDevRefresh] = useState(
     typeof window !== 'undefined' && Boolean(window.electronAPI)
   );
@@ -324,7 +264,6 @@ export function Layout({ children }) {
   const [isRestartingApp, setIsRestartingApp] = useState(false);
   const [isEjectingModel, setIsEjectingModel] = useState(false);
   const [isActiveModelLoaded, setIsActiveModelLoaded] = useState(false);
-  const [alphaReadiness, setAlphaReadiness] = useState(null);
   
   const accentColor = WORKSPACE_COLORS[currentWorkspace] || WORKSPACE_COLORS.casual;
 
@@ -487,28 +426,6 @@ export function Layout({ children }) {
   };
 
   useEffect(() => {
-    const refreshSovereignty = async () => {
-      if (window.electronAPI?.getSovereigntyStatus) {
-        try {
-          const status = await window.electronAPI.getSovereigntyStatus();
-          setSovereigntyStatus(status);
-        } catch (e) {
-          // Silently fail
-        }
-      }
-    };
-
-    refreshSovereignty();
-    const unsubscribePolling = pollingCoordinator.subscribe('layout:sovereignty-status', {
-      run: refreshSovereignty,
-      intervalMs: 30000,
-      hiddenIntervalMs: 120000,
-    });
-
-    return () => unsubscribePolling?.();
-  }, []);
-
-  useEffect(() => {
     void refreshLoadedStatus();
     const unsubscribePolling = pollingCoordinator.subscribe('layout:model-loaded-status', {
       run: refreshLoadedStatus,
@@ -518,32 +435,13 @@ export function Layout({ children }) {
     return () => unsubscribePolling?.();
   }, [refreshLoadedStatus]);
 
-  const refreshAlphaReadiness = useCallback(async () => {
-    const result = await api.getAlphaReadiness({
-      currentWorkspace,
-    });
-    setAlphaReadiness(result);
-  }, [currentWorkspace]);
-
-  useEffect(() => {
-    void refreshAlphaReadiness();
-    const unsubscribePolling = pollingCoordinator.subscribe('layout:alpha-readiness', {
-      run: refreshAlphaReadiness,
-      intervalMs: 30000,
-      hiddenIntervalMs: 120000,
-    });
-    return () => unsubscribePolling?.();
-  }, [refreshAlphaReadiness]);
-
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-surface-base">
-      <TitleBar 
-        alphaReadiness={alphaReadiness}
+      <TitleBar
         accentColor={accentColor}
         currentModel={currentModel}
         modelStatus={modelStatus}
         isActiveModelLoaded={isActiveModelLoaded}
-        sovereigntyStatus={sovereigntyStatus}
         showDevRefresh={showDevRefresh}
         showWindowControls={showWindowControls}
         isWindowMaximized={isWindowMaximized}

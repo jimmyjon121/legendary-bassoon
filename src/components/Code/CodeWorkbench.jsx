@@ -11,7 +11,7 @@ import { LivePreview } from './LivePreview';
 import {
   Layers, Eye, EyeOff, Files, Terminal, Bot, MessageSquare,
   PanelLeftClose, ChevronDown, ChevronUp, ExternalLink, Loader2,
-  CheckCircle2, AlertTriangle, ShieldCheck,
+  ShieldCheck,
 } from 'lucide-react';
 
 export function CodeWorkbench() {
@@ -92,10 +92,7 @@ export function CodeWorkbench() {
       <div className="flex-shrink-0 h-[42px] border-b border-[#121218] bg-[#050507] flex items-center justify-between gap-3 px-3">
         <div className="min-w-0 flex items-center gap-2">
           <span className="text-[11px] uppercase tracking-wider font-semibold text-[#d6d6d6]">
-            Quick Code
-          </span>
-          <span className="hidden lg:inline-flex rounded-full border border-amber-400/15 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-200/90">
-            Hub view
+            Code
           </span>
           {rootPath && (
             <span className="text-[11px] text-[#808080] truncate" title={rootPath}>
@@ -104,21 +101,6 @@ export function CodeWorkbench() {
           )}
         </div>
         <div className="min-w-0 flex items-center gap-2">
-          {handoffResult && (
-            <span
-              className={`hidden md:inline-flex max-w-[360px] items-center gap-1.5 truncate rounded-full border px-2 py-1 text-[11px] ${
-                handoffResult.success
-                  ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200'
-                  : 'border-amber-400/20 bg-amber-500/10 text-amber-200'
-              }`}
-              title={handoffResult.error || handoffResult.warning || handoffResult.launchedVia || ''}
-            >
-              {handoffResult.success ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}
-              {handoffResult.success
-                ? `DevForge opened${handoffResult.pid ? ` · pid ${handoffResult.pid}` : ''}`
-                : handoffResult.error || 'DevForge handoff needs setup'}
-            </span>
-          )}
           <button
             type="button"
             onClick={handleOpenInDevForge}
