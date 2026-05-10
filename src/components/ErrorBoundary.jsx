@@ -132,7 +132,7 @@ class ErrorBoundary extends React.Component {
               Something went wrong
             </h1>
             <p className="text-text-muted text-center mb-6">
-              DevForge encountered an unexpected error. Your data is safe.
+              Anvil encountered an unexpected error. Your data is safe.
             </p>
 
             {/* Error Details (collapsible) */}
@@ -193,7 +193,7 @@ class ErrorBoundary extends React.Component {
 
             {/* Version Info */}
             <p className="text-center text-xs text-text-muted mt-6">
-              DevForge v0.1.0 • Report issues at github.com/devforge/issues
+              Anvil • Report issues at github.com/anvilapp/issues
             </p>
           </div>
         </div>

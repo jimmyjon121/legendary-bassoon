@@ -413,7 +413,7 @@ export function ModelManager({ onClose }) {
           <p className="text-xs text-forge-text-muted text-center">
             {activeTab === 'ollama' 
               ? 'Ollama models are ready to use. Select one to make it active.'
-              : 'Import LM Studio models to Ollama to use them in DevForge.'
+              : 'Import LM Studio models to Ollama to use them in Anvil.'
             }
           </p>
         </div>

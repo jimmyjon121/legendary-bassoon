@@ -60,8 +60,8 @@ export function BackupSettings() {
     setMessage(null);
     try {
       const file = await window.electronAPI.selectFile({
-        title: 'Select DevForge backup file',
-        filters: [{ name: 'DevForge Backup', extensions: ['devforge-backup'] }],
+        title: 'Select Anvil backup file',
+        filters: [{ name: 'Anvil Backup', extensions: ['devforge-backup'] }],
       });
       if (!file) {
         setIsWorking(false);
@@ -71,7 +71,7 @@ export function BackupSettings() {
       if (!res?.success) {
         throw new Error(res?.error || 'Restore failed');
       }
-      setMessage('Backup restored. Please restart DevForge to apply changes.');
+      setMessage('Backup restored. Please restart Anvil to apply changes.');
     } catch (err) {
       console.error('Failed to restore backup:', err);
       setError(err.message || String(err));

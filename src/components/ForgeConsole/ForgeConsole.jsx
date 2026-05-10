@@ -270,7 +270,7 @@ function ReplayTab() {
             <div className="flex flex-col items-center justify-center h-64 text-center">
               <Clock size={32} className="text-text-muted mb-3" />
               <p className="text-text-secondary">No events recorded yet</p>
-              <p className="text-xs text-text-muted mt-1">Events will appear here as you use DevForge</p>
+              <p className="text-xs text-text-muted mt-1">Events will appear here as you use Anvil</p>
             </div>
           ) : (
             <div className="p-4 space-y-4">
@@ -1172,7 +1172,7 @@ PARAMETER top_p 0.9
                 )}
                 {frictionStats.total < 5 && (
                   <p className="text-xs text-text-muted">
-                    Keep using DevForge to reveal patterns...
+                    Keep using Anvil to reveal patterns...
                   </p>
                 )}
               </div>

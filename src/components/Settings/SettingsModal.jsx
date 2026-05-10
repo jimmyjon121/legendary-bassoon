@@ -374,7 +374,7 @@ function GeneralSettings({ settings, setSettings }) {
               }
               if (!res.updateAvailable) {
                 // eslint-disable-next-line no-alert
-                alert('You are on the latest version of DevForge.');
+                alert('You are on the latest version of Anvil.');
                 return;
               }
               // eslint-disable-next-line no-alert
@@ -753,7 +753,7 @@ function LLMSettings({ settings, setSettings, onSelectFolder, onOpenModelsDirect
           </div>
         </div>
         <p className="text-[11px] text-text-muted mt-2">
-          One-click controls for the local Ollama daemon. DevForge will use {settings.llmEndpoint}{' '}
+          One-click controls for the local Ollama daemon. Anvil will use {settings.llmEndpoint}{' '}
           to send requests once it&apos;s running.
         </p>
       </div>
@@ -924,7 +924,7 @@ function LMStudioScanner() {
               className="btn btn-secondary text-xs"
               disabled={importing || batchImporting}
             >
-              {batchImporting ? 'Importing...' : 'Import All to DevForge'}
+              {batchImporting ? 'Importing...' : 'Import All to Anvil'}
             </button>
           </div>
 
@@ -1052,7 +1052,7 @@ function ConversionToolsPanel({ settings, setSettings }) {
         <div>
           <h4 className="text-sm font-medium text-text-primary">Conversion Environment</h4>
           <p className="text-xs text-text-muted mt-0.5">
-            DevForge automatically finds the bundled OpenVINO Python environment. No manual setup needed.
+            Anvil automatically finds the bundled OpenVINO Python environment. No manual setup needed.
           </p>
         </div>
         <button
@@ -1227,7 +1227,7 @@ function ImageSettings({ settings, setSettings }) {
               </button>
             </div>
             <p className="text-xs text-text-muted mt-1">
-              DevForge auto-detects ComfyUI (8188), A1111 (7860), and Fooocus (7865)
+              Anvil auto-detects ComfyUI (8188), A1111 (7860), and Fooocus (7865)
             </p>
           </div>
           
@@ -1335,7 +1335,7 @@ function ImageSettings({ settings, setSettings }) {
           </div>
         </div>
         <p className="text-[10px] text-text-muted mt-2">
-          DevForge auto-detects model type from filename and applies optimal settings.
+          Anvil auto-detects model type from filename and applies optimal settings.
         </p>
       </div>
     </div>
@@ -1503,7 +1503,7 @@ function PrivacySettings({ settings, setSettings }) {
               <div>
                 <p className="text-sm text-text-primary">Local-only mode</p>
                 <p className="text-xs text-text-muted mt-1">
-                  When enabled, DevForge will block all non-localhost network requests.
+                  When enabled, Anvil will block all non-localhost network requests.
                 </p>
               </div>
               <button
@@ -2441,7 +2441,7 @@ function HardwareSettings() {
     const runOpenVinoSetup = async () => {
       // eslint-disable-next-line no-alert
       const ok = window.confirm(
-        'DevForge will now set up Intel NPU acceleration. This includes:\n\n' +
+        'Anvil will now set up Intel NPU acceleration. This includes:\n\n' +
           '- Installing OpenVINO runtime\n' +
           '- Configuring the NPU inference server\n' +
           '- Auto-selecting an optimized model\n\n' +
@@ -2487,7 +2487,7 @@ function HardwareSettings() {
 
       if (!status?.openvinoInstalled) {
         // eslint-disable-next-line no-alert
-        alert('OpenVINO is still not detected after setup. Please restart DevForge and try again.');
+        alert('OpenVINO is still not detected after setup. Please restart Anvil and try again.');
         return;
       }
 
@@ -3129,7 +3129,7 @@ function HardwareSettings() {
           ) : null}
         </select>
         <p className="text-xs text-text-muted mt-2">
-          Profiles influence how DevForge schedules work across all backends and how the job queue
+          Profiles influence how Anvil schedules work across all backends and how the job queue
           prioritizes requests.
         </p>
         {intelAcceleratorRelevant ? (
@@ -3158,7 +3158,7 @@ function HardwareSettings() {
           <div className="min-w-0">
             <h3 className="text-sm font-medium text-text-primary">Auto-warm last model on launch</h3>
             <p className="mt-1 text-xs text-text-muted">
-              When enabled, DevForge will preload the last-used model into your runtime when the
+              When enabled, Anvil will preload the last-used model into your runtime when the
               app starts. Default is OFF — most setups feel snappier when the model loads on the
               first chat instead of at launch. Use the top-bar Eject anytime to free the model.
             </p>
@@ -3191,7 +3191,7 @@ function HardwareSettings() {
             <p className="text-xs text-text-muted mt-1">
               {backend === 'openvino-npu' && npuStatus?.serverRunning
                 ? 'NPU is handling AI inference. Use the Backend dropdown above to switch back to Ollama+GPU.'
-                : 'Click "Start NPU" to launch the NPU server and switch inference to the NPU chip. DevForge handles everything automatically.'}
+                : 'Click "Start NPU" to launch the NPU server and switch inference to the NPU chip. Anvil handles everything automatically.'}
             </p>
             {npuStatus && (
               <div className="mt-2 space-y-1">
@@ -3683,7 +3683,7 @@ function MemoryTab() {
       <div>
         <h2 className="text-lg font-semibold text-text-primary mb-1">AI Memory</h2>
         <p className="text-sm text-text-secondary">
-          DevForge remembers things about you to maintain coherent long conversations.
+          Anvil remembers things about you to maintain coherent long conversations.
           Pin important messages so the AI never forgets them.
         </p>
       </div>

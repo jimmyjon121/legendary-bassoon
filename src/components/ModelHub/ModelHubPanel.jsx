@@ -5307,7 +5307,7 @@ export function ModelHubPanel({ isOpen, onClose }) {
                         <Bot size={14} /> Agentic Research Stack
                       </p>
                       <p className="text-[10px] text-text-muted mt-0.5">
-                        Curated models for long research sessions, tool-calling workflows, and synthesis. Pair with DevForge web/research tools for live source grounding.
+                        Curated models for long research sessions, tool-calling workflows, and synthesis. Pair with Anvil web/research tools for live source grounding.
                       </p>
                     </div>
 

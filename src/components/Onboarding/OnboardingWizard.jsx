@@ -465,7 +465,7 @@ export function OnboardingWizard({ onComplete }) {
           <div className="w-14 h-14 rounded-xl bg-workspace-casual/20 border border-workspace-casual/30 flex items-center justify-center mx-auto mb-4">
             <Sparkles size={32} className="text-workspace-casual" />
           </div>
-          <h1 className="text-2xl font-bold text-text-primary">Welcome to DevForge</h1>
+          <h1 className="text-2xl font-bold text-text-primary">Welcome to Anvil</h1>
           <p className="text-text-secondary mt-2">Your private AI assistant - 100% local</p>
         </div>
 
@@ -481,7 +481,7 @@ export function OnboardingWizard({ onComplete }) {
                 className="text-center py-8"
               >
                 <Loader size={48} className="animate-spin text-workspace-casual mx-auto mb-4" />
-                <p className="text-lg text-text-primary font-medium mb-2">Setting up DevForge...</p>
+                <p className="text-lg text-text-primary font-medium mb-2">Setting up Anvil...</p>
                 <p className="text-sm text-text-secondary mb-4">Configuring backends and checking system</p>
                 
                 {setupLog.length > 0 && (
@@ -586,7 +586,7 @@ export function OnboardingWizard({ onComplete }) {
                   Install Ollama First
                 </h2>
                 <p className="text-text-secondary mb-6">
-                  DevForge needs Ollama to run AI models locally. It's free and takes 2 minutes.
+                  Anvil needs Ollama to run AI models locally. It's free and takes 2 minutes.
                 </p>
 
                 <div className="space-y-4">
@@ -647,7 +647,7 @@ export function OnboardingWizard({ onComplete }) {
                   NPU Acceleration Is Available
                 </h2>
                 <p className="text-text-secondary mb-6">
-                  DevForge can start with your local OpenVINO/NPU runtime even if Ollama is not ready.
+                  Anvil can start with your local OpenVINO/NPU runtime even if Ollama is not ready.
                 </p>
 
                 <div className="p-4 mb-4 bg-forge-bg rounded-lg text-left text-sm text-text-muted">
@@ -789,7 +789,7 @@ export function OnboardingWizard({ onComplete }) {
                   You're All Set! 🚀
                 </h2>
                 <p className="text-text-secondary mb-6">
-                  DevForge is ready. Start chatting with your private AI.
+                  Anvil is ready. Start chatting with your private AI.
                 </p>
 
                 <div className="space-y-3 text-left p-4 bg-forge-bg rounded-lg mb-6">
@@ -817,7 +817,7 @@ export function OnboardingWizard({ onComplete }) {
                   onClick={handleComplete}
                   className="btn btn-primary w-full text-base py-2.5"
                 >
-                  Start Using DevForge
+                  Start Using Anvil
                   <ArrowRight size={20} />
                 </button>
               </motion.div>

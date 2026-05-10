@@ -280,9 +280,9 @@ export function ImageSetupWizard({ onComplete, onSkip }) {
       <div className="space-y-4 bg-neutral-900 rounded-lg p-4 border border-neutral-800">
         {[
           { num: 1, title: 'Download ComfyUI Portable', action: 'download' },
-          { num: 2, title: 'Extract to folder', desc: 'C:\\DevForge\\ComfyUI recommended' },
+          { num: 2, title: 'Extract to folder', desc: 'C:\\Anvil\\ComfyUI recommended' },
           { num: 3, title: 'Download a model', action: 'next' },
-          { num: 4, title: 'Run & Generate!', desc: 'DevForge auto-detects ComfyUI' },
+          { num: 4, title: 'Run & Generate!', desc: 'Anvil auto-detects ComfyUI' },
         ].map(({ num, title, desc, action }) => (
           <div key={num} className="flex items-start gap-3">
             <div className="w-7 h-7 rounded-full bg-pink-500/20 text-pink-400 flex items-center justify-center text-sm font-bold flex-shrink-0">
@@ -316,7 +316,7 @@ export function ImageSetupWizard({ onComplete, onSkip }) {
       <div className="p-3 bg-neutral-800/50 rounded-lg border border-neutral-700">
         <p className="text-xs text-text-muted">
           <strong className="text-text-secondary">Note:</strong> ComfyUI is a separate application. 
-          DevForge communicates with it to generate images while keeping everything local and private.
+          Anvil communicates with it to generate images while keeping everything local and private.
         </p>
       </div>
 
