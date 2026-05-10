@@ -1,8 +1,6 @@
 import React, { useRef, useCallback, useEffect, useState, useMemo } from 'react';
 import {
-  AlertTriangle,
   Check,
-  CheckCircle2,
   Circle,
   Copy,
   ExternalLink,
@@ -326,75 +324,33 @@ export function CodeEditor({
   const lineCount = content.split('\n').length;
 
   if (!activeFilePath) {
-    const handoffState = handoffResult?.success
-      ? {
-          icon: <CheckCircle2 size={13} />,
-          text: handoffResult.pid ? `DevForge opened as process ${handoffResult.pid}` : 'DevForge launch requested',
-          className: 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200',
-        }
-      : handoffResult
-        ? {
-            icon: <AlertTriangle size={13} />,
-            text: handoffResult.error || 'DevForge needs setup before it can open.',
-            className: 'border-amber-400/20 bg-amber-500/10 text-amber-200',
-          }
-        : null;
-
     return (
       <div className="h-full flex flex-col bg-[#000000] rounded-lg overflow-hidden">
         <div className="flex items-center min-h-[35px] bg-[#0b0b10] border-b border-[#121218]" />
         <div className="flex-1 flex items-center justify-center px-6">
-          <div className="w-full max-w-[560px] rounded-xl border border-[#1d1d2a] bg-[#06060a] p-6 shadow-2xl shadow-black/30">
-            <div className="flex items-start gap-4">
-              <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl bg-amber-500/15 text-amber-300 ring-1 ring-amber-400/20">
-                <FileCode2 size={24} />
-              </div>
-              <div className="min-w-0 flex-1">
-                <p className="text-[11px] font-semibold uppercase tracking-[0.18em] text-amber-200/80">
-                  Quick Code Workspace
-                </p>
-                <h2 className="mt-2 text-[18px] font-semibold leading-tight text-[#f3f3f5]">
-                  Open the full DevForge IDE for this project.
-                </h2>
-                <p className="mt-2 text-[12px] leading-5 text-[#8f92a3]">
-                  This Anvil view is for fast inspection, project chat, and quick agent tasks.
-                  Use DevForge when you want the full coding shell with local models, Tab, Chat,
-                  indexing, and Apply.
-                </p>
-
-                <div className="mt-4 flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={onOpenInDevForge}
-                    disabled={!onOpenInDevForge || openingDevForge}
-                    className="inline-flex h-9 items-center gap-2 rounded-lg bg-amber-400 px-3.5 text-[12px] font-semibold text-[#17120a] transition-colors hover:bg-amber-300 disabled:cursor-wait disabled:opacity-60"
-                  >
-                    {openingDevForge ? <Loader2 size={14} className="animate-spin" /> : <ExternalLink size={14} />}
-                    {openingDevForge ? 'Opening DevForge...' : 'Open Full DevForge IDE'}
-                  </button>
-                  <span className="text-[11px] text-[#686b7a]">
-                    {projectName ? `Project: ${projectName}` : 'Choose a project folder to start.'}
-                  </span>
-                </div>
-
-                {handoffState && (
-                  <div className={`mt-4 flex items-start gap-2 rounded-lg border px-3 py-2 text-[11px] ${handoffState.className}`}>
-                    <span className="mt-0.5 shrink-0">{handoffState.icon}</span>
-                    <span className="min-w-0 break-words">{handoffState.text}</span>
-                  </div>
-                )}
-
-                <div className="mt-5 border-t border-[#171722] pt-4">
-                  <p className="text-[11px] text-[#686b7a]">
-                    Prefer to stay here? Pick a file from the project tree, or press{' '}
-                    <kbd className="rounded border border-[#242436] bg-[#101018] px-1.5 py-0.5 text-[10px] text-[#a0a3b1]">
-                      Ctrl+P
-                    </kbd>{' '}
-                    to search.
-                  </p>
-                </div>
-              </div>
+          <div className="flex flex-col items-center gap-4 text-center">
+            <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-[#0d0d14] border border-[#1d1d2a] text-[#4a4a60]">
+              <FileCode2 size={26} />
             </div>
+            <div>
+              <p className="text-[15px] font-medium text-[#d6d6d6]">
+                {projectName ? `${projectName}` : 'No project open'}
+              </p>
+              <p className="mt-1.5 text-[12px] text-[#686b7a]">
+                Select a file from the explorer to start editing.
+              </p>
+            </div>
+            {onOpenInDevForge && (
+              <button
+                type="button"
+                onClick={onOpenInDevForge}
+                disabled={openingDevForge}
+                className="mt-1 inline-flex h-8 items-center gap-2 rounded-lg border border-[#242436] bg-[#101018] px-3 text-[12px] text-[#a0a3b1] transition-colors hover:border-[#363650] hover:text-[#d6d6d6] disabled:cursor-wait disabled:opacity-50"
+              >
+                {openingDevForge ? <Loader2 size={13} className="animate-spin" /> : <ExternalLink size={13} />}
+                {openingDevForge ? 'Opening...' : 'Open Full IDE'}
+              </button>
+            )}
           </div>
         </div>
       </div>

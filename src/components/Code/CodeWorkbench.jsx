@@ -11,7 +11,6 @@ import { LivePreview } from './LivePreview';
 import {
   Layers, Eye, EyeOff, Files, Terminal, Bot, MessageSquare,
   PanelLeftClose, ChevronDown, ChevronUp, ExternalLink, Loader2,
-  ShieldCheck,
 } from 'lucide-react';
 
 export function CodeWorkbench() {
@@ -237,27 +236,6 @@ export function CodeWorkbench() {
 
           {/* ── Right: AI Panel ── */}
           <div className="h-full flex flex-col overflow-hidden border-l border-[#121218] bg-[#050507]">
-            {/* Alpha guardrail */}
-            <div className="flex-shrink-0 border-b border-[#121218] bg-[#08080d] px-3 py-2">
-              <div className="flex items-start gap-2 rounded-lg border border-amber-400/15 bg-amber-500/5 px-2.5 py-2">
-                <ShieldCheck size={14} className="mt-0.5 shrink-0 text-amber-300" />
-                <div className="min-w-0 flex-1">
-                  <p className="text-[11px] font-semibold text-amber-100">Paid alpha scope</p>
-                  <p className="mt-0.5 text-[10px] leading-4 text-[#8f92a3]">
-                    This hub view is read/chat/quick-agent only. Use the full DevForge IDE for serious coding.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  onClick={handleOpenInDevForge}
-                  disabled={openingDevForge}
-                  className="shrink-0 rounded-md border border-amber-400/20 px-2 py-1 text-[10px] font-semibold text-amber-200 transition-colors hover:bg-amber-500/10 disabled:cursor-wait disabled:opacity-60"
-                >
-                  {openingDevForge ? 'Opening...' : 'Open IDE'}
-                </button>
-              </div>
-            </div>
-
             {/* Mode Tabs */}
             <div className="flex-shrink-0 flex items-center gap-0 border-b border-[#121218] bg-[#0b0b10]">
               <ModeTab
