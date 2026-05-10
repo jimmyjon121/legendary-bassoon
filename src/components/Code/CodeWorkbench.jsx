@@ -4,13 +4,14 @@ import { CodeEditor } from './CodeEditor';
 import { TerminalPane } from './TerminalPane';
 import { CodeChatPanel } from './CodeChatPanel';
 import { useEditorStore } from '../../stores/editorStore';
+import { api } from '../../utils/electronAPI';
 import { AgentPanel } from './AgentPanel';
 import { PlanBuilder } from './PlanBuilder';
 import { LivePreview } from './LivePreview';
-import { TeammateToolbar } from './TeammateFeatures';
 import {
   Layers, Eye, EyeOff, Files, Terminal, Bot, MessageSquare,
-  PanelLeftClose, ChevronDown, ChevronUp,
+  PanelLeftClose, ChevronDown, ChevronUp, ExternalLink, Loader2,
+  CheckCircle2, AlertTriangle, ShieldCheck,
 } from 'lucide-react';
 
 export function CodeWorkbench() {
@@ -28,6 +29,9 @@ export function CodeWorkbench() {
   const [terminalHeight, setTerminalHeight] = useState(180);
   const [selectedCode, setSelectedCode] = useState(null);
   const [selectionStartLine, setSelectionStartLine] = useState(null);
+  const [openingDevForge, setOpeningDevForge] = useState(false);
+  const [handoffResult, setHandoffResult] = useState(null);
+  const projectName = rootPath ? rootPath.split(/[/\\]/).filter(Boolean).pop() : '';
 
   const currentFileContent = activeFilePath && openFiles[activeFilePath]
     ? openFiles[activeFilePath].content
@@ -48,9 +52,32 @@ export function CodeWorkbench() {
     setPanelMode('plan');
   }, []);
 
-  const handleInvestigate = useCallback(async () => {
-    setPanelMode('chat');
-  }, []);
+  const handleOpenInDevForge = useCallback(async () => {
+    if (!rootPath) {
+      setHandoffResult({
+        success: false,
+        error: 'Choose a project folder before opening DevForge.',
+      });
+      return;
+    }
+
+    setOpeningDevForge(true);
+    setHandoffResult(null);
+    try {
+      const result = await api.openInDevForge(rootPath);
+      setHandoffResult(result || {
+        success: false,
+        error: 'DevForge handoff returned no result.',
+      });
+    } catch (error) {
+      setHandoffResult({
+        success: false,
+        error: error?.message || 'DevForge handoff failed.',
+      });
+    } finally {
+      setOpeningDevForge(false);
+    }
+  }, [rootPath]);
 
   // Build grid template dynamically
   const gridCols = [
@@ -62,6 +89,48 @@ export function CodeWorkbench() {
 
   return (
     <div className="h-full min-h-0 flex flex-col overflow-hidden bg-[#000000]">
+      <div className="flex-shrink-0 h-[42px] border-b border-[#121218] bg-[#050507] flex items-center justify-between gap-3 px-3">
+        <div className="min-w-0 flex items-center gap-2">
+          <span className="text-[11px] uppercase tracking-wider font-semibold text-[#d6d6d6]">
+            Quick Code
+          </span>
+          <span className="hidden lg:inline-flex rounded-full border border-amber-400/15 bg-amber-500/10 px-2 py-0.5 text-[10px] font-medium text-amber-200/90">
+            Hub view
+          </span>
+          {rootPath && (
+            <span className="text-[11px] text-[#808080] truncate" title={rootPath}>
+              {projectName}
+            </span>
+          )}
+        </div>
+        <div className="min-w-0 flex items-center gap-2">
+          {handoffResult && (
+            <span
+              className={`hidden md:inline-flex max-w-[360px] items-center gap-1.5 truncate rounded-full border px-2 py-1 text-[11px] ${
+                handoffResult.success
+                  ? 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200'
+                  : 'border-amber-400/20 bg-amber-500/10 text-amber-200'
+              }`}
+              title={handoffResult.error || handoffResult.warning || handoffResult.launchedVia || ''}
+            >
+              {handoffResult.success ? <CheckCircle2 size={12} /> : <AlertTriangle size={12} />}
+              {handoffResult.success
+                ? `DevForge opened${handoffResult.pid ? ` · pid ${handoffResult.pid}` : ''}`
+                : handoffResult.error || 'DevForge handoff needs setup'}
+            </span>
+          )}
+          <button
+            type="button"
+            onClick={handleOpenInDevForge}
+            disabled={openingDevForge}
+            className="h-7 px-2.5 flex items-center gap-1.5 rounded bg-[#101018] border border-[#242436] text-[11px] text-[#d6d6d6] hover:text-white hover:bg-[#171722] disabled:opacity-60 disabled:cursor-wait transition-colors"
+            title="Open this project in the DevForge IDE"
+          >
+            {openingDevForge ? <Loader2 size={13} className="animate-spin" /> : <ExternalLink size={13} />}
+            <span>{openingDevForge ? 'Opening...' : 'Open Full IDE'}</span>
+          </button>
+        </div>
+      </div>
       {/* ── Activity Bar + Main Content ── */}
       <div className="flex-1 min-h-0 flex overflow-hidden">
         {/* ─── Activity Bar (VS Code-style icon strip) ─── */}
@@ -131,7 +200,13 @@ export function CodeWorkbench() {
           <div className="flex flex-col h-full overflow-hidden">
             {/* Editor */}
             <div className="flex-1 min-h-0">
-              <CodeEditor onSelectionChange={handleSelectionChange} />
+              <CodeEditor
+                handoffResult={handoffResult}
+                onOpenInDevForge={handleOpenInDevForge}
+                openingDevForge={openingDevForge}
+                onSelectionChange={handleSelectionChange}
+                projectName={projectName}
+              />
             </div>
             
             {/* Terminal Panel */}
@@ -180,9 +255,25 @@ export function CodeWorkbench() {
 
           {/* ── Right: AI Panel ── */}
           <div className="h-full flex flex-col overflow-hidden border-l border-[#121218] bg-[#050507]">
-            {/* Teammate Toolbar */}
-            <div className="flex-shrink-0 px-2 py-2 border-b border-[#121218]">
-              <TeammateToolbar onInvestigate={handleInvestigate} />
+            {/* Alpha guardrail */}
+            <div className="flex-shrink-0 border-b border-[#121218] bg-[#08080d] px-3 py-2">
+              <div className="flex items-start gap-2 rounded-lg border border-amber-400/15 bg-amber-500/5 px-2.5 py-2">
+                <ShieldCheck size={14} className="mt-0.5 shrink-0 text-amber-300" />
+                <div className="min-w-0 flex-1">
+                  <p className="text-[11px] font-semibold text-amber-100">Paid alpha scope</p>
+                  <p className="mt-0.5 text-[10px] leading-4 text-[#8f92a3]">
+                    This hub view is read/chat/quick-agent only. Use the full DevForge IDE for serious coding.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={handleOpenInDevForge}
+                  disabled={openingDevForge}
+                  className="shrink-0 rounded-md border border-amber-400/20 px-2 py-1 text-[10px] font-semibold text-amber-200 transition-colors hover:bg-amber-500/10 disabled:cursor-wait disabled:opacity-60"
+                >
+                  {openingDevForge ? 'Opening...' : 'Open IDE'}
+                </button>
+              </div>
             </div>
 
             {/* Mode Tabs */}

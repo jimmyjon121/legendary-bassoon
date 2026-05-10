@@ -4,11 +4,13 @@ import {
   Plus, ChevronLeft, ChevronRight, ChevronDown, Cpu,
   Bot, Download,
   Calendar, CalendarDays, Star, Pin, Archive, Folder, FolderPlus,
-  Activity, Command, FolderKanban,
+  AlertTriangle, CheckCircle2, Command, FolderKanban, ExternalLink, Loader2,
 } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useAppStore, WORKSPACES } from '../../stores/appStore';
 import { isVaultWorkspace, WORKSPACE_IDS } from '../../core/types';
+import { useEditorStore } from '../../stores/editorStore';
+import { api } from '../../utils/electronAPI';
 import { HardwareMonitorCompact } from '../HardwareMonitor/HardwareMonitor';
 import { PowerModeToggle } from '../PowerMode/PowerModeToggle';
 
@@ -180,8 +182,53 @@ const RecentConversationRow = memo(function RecentConversationRow({
   );
 });
 
-const SystemFooter = memo(function SystemFooter() {
+const CHECK_LIMIT = 3;
+
+function getReadinessTone(status) {
+  if (status === 'ready') {
+    return {
+      icon: CheckCircle2,
+      title: 'Alpha Ready',
+      detail: 'Core local workflow ready',
+      badge: 'bg-emerald-500/10 text-emerald-300 ring-emerald-300/15',
+    };
+  }
+  if (status === 'degraded') {
+    return {
+      icon: AlertTriangle,
+      title: 'Alpha Degraded',
+      detail: 'Usable with setup notes',
+      badge: 'bg-amber-500/10 text-amber-300 ring-amber-300/15',
+    };
+  }
+  return {
+    icon: AlertTriangle,
+    title: 'Needs Setup',
+    detail: 'Finish local setup first',
+    badge: 'bg-rose-500/10 text-rose-300 ring-rose-300/15',
+  };
+}
+
+const SystemFooter = memo(function SystemFooter({ currentWorkspace, projectPath }) {
   const [expanded, setExpanded] = useState(false);
+  const [readiness, setReadiness] = useState(null);
+
+  const refreshReadiness = useCallback(async () => {
+    const result = await api.getAlphaReadiness({
+      currentWorkspace,
+      projectPath,
+    });
+    setReadiness(result);
+  }, [currentWorkspace, projectPath]);
+
+  useEffect(() => {
+    void refreshReadiness();
+  }, [refreshReadiness]);
+
+  const status = readiness?.status || 'needs_setup';
+  const tone = getReadinessTone(status);
+  const ToneIcon = tone.icon;
+  const visibleChecks = (readiness?.checks || []).slice(0, CHECK_LIMIT);
 
   return (
     <div className="border-t border-white/[0.08] p-2.5">
@@ -190,17 +237,57 @@ const SystemFooter = memo(function SystemFooter() {
         onClick={() => setExpanded((prev) => !prev)}
         className="flex h-10 w-full items-center gap-2 rounded-lg px-2 text-left text-[12px] text-text-secondary transition-colors hover:bg-white/[0.045] hover:text-text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
       >
-        <span className="flex h-6 w-6 items-center justify-center rounded-md bg-emerald-500/10 text-emerald-300 ring-1 ring-emerald-300/15">
-          <Activity size={12} />
+        <span className={`flex h-6 w-6 items-center justify-center rounded-md ring-1 ${tone.badge}`}>
+          <ToneIcon size={12} />
         </span>
         <span className="min-w-0 flex-1">
-          <span className="block text-[12px] font-medium">Local Ready</span>
-          <span className="block truncate text-[10px] text-text-muted">System healthy</span>
+          <span className="block text-[12px] font-medium">{tone.title}</span>
+          <span className="block truncate text-[10px] text-text-muted">{tone.detail}</span>
         </span>
         <ChevronDown size={13} className={`text-text-muted transition-transform ${expanded ? 'rotate-180' : ''}`} />
       </button>
       {expanded && (
-        <div className="mt-2 rounded-lg border border-white/[0.08] bg-black/20 py-1 shadow-inner">
+        <div className="mt-2 rounded-lg border border-white/[0.08] bg-black/20 p-2 shadow-inner">
+          <div className="mb-2 flex items-center justify-between gap-2">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-text-muted">
+              Paid alpha readiness
+            </span>
+            <button
+              type="button"
+              onClick={refreshReadiness}
+              className="rounded-md px-1.5 py-0.5 text-[10px] text-text-muted hover:bg-white/[0.06] hover:text-text-primary"
+            >
+              Refresh
+            </button>
+          </div>
+          <div className="space-y-1.5">
+            {visibleChecks.map((check) => (
+              <div key={check.id} className="rounded-md border border-white/[0.06] bg-white/[0.025] px-2 py-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="truncate text-[11px] font-medium text-text-secondary">{check.label}</span>
+                  <span className={`rounded px-1.5 py-0.5 text-[9px] uppercase tracking-wide ${
+                    check.status === 'ready'
+                      ? 'bg-emerald-500/10 text-emerald-300'
+                      : check.status === 'degraded'
+                        ? 'bg-amber-500/10 text-amber-300'
+                        : 'bg-rose-500/10 text-rose-300'
+                  }`}>
+                    {check.status.replace('_', ' ')}
+                  </span>
+                </div>
+                <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-text-muted">{check.message}</p>
+                {check.action && (
+                  <p className="mt-1 line-clamp-2 text-[10px] leading-4 text-amber-200/80">{check.action}</p>
+                )}
+              </div>
+            ))}
+          </div>
+          {visibleChecks.length === 0 && (
+            <p className="rounded-md border border-white/[0.06] bg-white/[0.025] px-2 py-2 text-[10px] text-text-muted">
+              Readiness checks are loading.
+            </p>
+          )}
+          <div className="my-2 h-px bg-white/[0.06]" />
           <HardwareMonitorCompact />
         </div>
       )}
@@ -234,6 +321,10 @@ export function Sidebar() {
   const loadProjects = useAppStore(s => s.loadProjects);
   const createProject = useAppStore(s => s.createProject);
   const setActiveProject = useAppStore(s => s.setActiveProject);
+  const codeRootPath = useEditorStore(s => s.rootPath);
+  const scanCodeProject = useEditorStore(s => s.scanProject);
+  const [isOpeningDevForge, setIsOpeningDevForge] = useState(false);
+  const [devForgeHandoffResult, setDevForgeHandoffResult] = useState(null);
 
   // Organization state
   const folders = useAppStore(s => s.folders);
@@ -300,6 +391,42 @@ export function Sidebar() {
     await createFolder?.(name.trim());
     await loadFolders?.();
   }, [createFolder, loadFolders]);
+
+  const handleOpenDevForge = useCallback(async () => {
+    if (isOpeningDevForge) return;
+
+    setIsOpeningDevForge(true);
+    setDevForgeHandoffResult(null);
+    try {
+      let projectPath = codeRootPath;
+
+      if (!projectPath) {
+        projectPath = await api.selectFolder({ title: 'Choose a project for DevForge' });
+        if (!projectPath) {
+          setDevForgeHandoffResult({
+            success: false,
+            cancelled: true,
+            error: 'DevForge launch cancelled.',
+          });
+          return;
+        }
+        await scanCodeProject?.(projectPath);
+      }
+
+      const result = await api.openInDevForge(projectPath);
+      setDevForgeHandoffResult(result || {
+        success: false,
+        error: 'DevForge handoff returned no result.',
+      });
+    } catch (error) {
+      setDevForgeHandoffResult({
+        success: false,
+        error: error?.message || 'DevForge handoff failed.',
+      });
+    } finally {
+      setIsOpeningDevForge(false);
+    }
+  }, [codeRootPath, isOpeningDevForge, scanCodeProject]);
 
   const handleSmartView = useCallback((filterId) => {
     setActiveFilter?.(filterId);
@@ -425,13 +552,13 @@ export function Sidebar() {
             <div
               className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-violet-500 text-[12px] font-bold text-white shadow-lg shadow-violet-950/30"
             >
-              DF
+              A
             </div>
             <div className="min-w-0 flex-1">
-              <div className="truncate text-[18px] font-semibold leading-5 tracking-tight text-text-primary">DevForge</div>
+              <div className="truncate text-[18px] font-semibold leading-5 tracking-tight text-text-primary">Anvil</div>
               <div className="mt-1 flex items-center gap-1.5 text-[10px] font-medium text-emerald-300">
                 <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                Local Ready
+                Local-first alpha
               </div>
             </div>
           </div>
@@ -442,7 +569,7 @@ export function Sidebar() {
         <>
           <div className="flex flex-col items-center gap-2 border-b border-white/[0.08] p-2.5">
             <div className="mb-1 flex h-11 w-11 items-center justify-center rounded-xl bg-gradient-to-br from-blue-500 to-violet-500 text-[12px] font-bold text-white shadow-lg shadow-violet-950/30">
-              DF
+              A
             </div>
             {workspaceTabs.map((ws) => (
               <WorkspaceTab
@@ -466,6 +593,15 @@ export function Sidebar() {
             </button>
 
             <div className="flex flex-col items-center gap-1">
+              <button
+                type="button"
+                onClick={handleOpenDevForge}
+                disabled={isOpeningDevForge}
+                className="flex h-9 w-9 items-center justify-center rounded-lg text-amber-300 transition-colors hover:bg-amber-500/10 hover:text-amber-200 disabled:cursor-wait disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
+                title="Open project in DevForge IDE"
+              >
+                {isOpeningDevForge ? <Loader2 size={15} className="animate-spin" /> : <ExternalLink size={15} />}
+              </button>
               {smartViews.slice(0, 4).map((view) => (
                 <button
                   key={view.id}
@@ -544,6 +680,32 @@ export function Sidebar() {
                 <Plus size={14} />
                 New Chat
               </button>
+              <button
+                type="button"
+                onClick={handleOpenDevForge}
+                disabled={isOpeningDevForge}
+                className="mb-2 flex h-10 w-full items-center justify-center gap-2 rounded-lg border border-amber-400/20 bg-amber-500/10 text-[12px] font-semibold text-amber-200 transition-colors hover:bg-amber-500/15 hover:text-amber-100 disabled:cursor-wait disabled:opacity-60 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/20"
+                title="Open the current project in the DevForge IDE"
+              >
+                {isOpeningDevForge ? <Loader2 size={14} className="animate-spin" /> : <ExternalLink size={14} />}
+                {isOpeningDevForge ? 'Opening DevForge...' : 'Open Full DevForge IDE'}
+              </button>
+              {devForgeHandoffResult && (
+                <div
+                  className={`mb-2 rounded-lg border px-2.5 py-1.5 text-[10px] ${
+                    devForgeHandoffResult.success
+                      ? 'border-emerald-400/15 bg-emerald-500/5 text-emerald-200'
+                      : 'border-amber-400/15 bg-amber-500/5 text-amber-200'
+                  }`}
+                  title={devForgeHandoffResult.error || devForgeHandoffResult.warning || ''}
+                >
+                  <span className="block truncate">
+                    {devForgeHandoffResult.success
+                      ? `DevForge opened${devForgeHandoffResult.pid ? ` · pid ${devForgeHandoffResult.pid}` : ''}`
+                      : devForgeHandoffResult.error || 'DevForge handoff needs setup'}
+                  </span>
+                </div>
+              )}
               <label className="flex h-10 w-full items-center gap-2 rounded-lg bg-white/[0.035] px-3 text-[12px] text-text-muted ring-1 ring-white/[0.08] transition-colors focus-within:bg-white/[0.05] focus-within:ring-white/20">
                 <Command size={13} className="shrink-0" />
                 <input
@@ -673,7 +835,7 @@ export function Sidebar() {
             </div>
           </div>
 
-          <SystemFooter />
+          <SystemFooter currentWorkspace={currentWorkspace} projectPath={codeRootPath} />
         </div>
       )}
 

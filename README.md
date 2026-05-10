@@ -1,9 +1,11 @@
 # DevForge
 
+**Also known as Anvil** — successor product name for the same local AI workstation (this repo and scripts still use the `devforge` package name in places).
+
 <div align="center">
 
 ![DevForge](https://img.shields.io/badge/DevForge-Local%20AI%20Workstation-8b5cf6?style=for-the-badge&logo=electron&logoColor=white)
-![Electron](https://img.shields.io/badge/Electron-28.x-47848F?style=flat-square&logo=electron&logoColor=white)
+![Electron](https://img.shields.io/badge/Electron-32.x-47848F?style=flat-square&logo=electron&logoColor=white)
 ![React](https://img.shields.io/badge/React-18.x-61DAFB?style=flat-square&logo=react&logoColor=black)
 ![License](https://img.shields.io/badge/License-MIT-green?style=flat-square)
 ![Status](https://img.shields.io/badge/Status-Active%20Development-orange?style=flat-square)
@@ -15,7 +17,7 @@ The cloud AI providers keep raising prices. APIs get deprecated. Terms change ov
 
 [Why Local?](#why-local-ai) • [Features](#features) • [Quick Start](#quick-start) • [For Agents](#-for-agents--developers) • [Documentation](#documentation)
 
-*Last Updated: April 25, 2026*
+*Last Updated: May 5, 2026*
 
 </div>
 
@@ -39,6 +41,14 @@ It is designed to be the "Forever Brain" that you own, independent of any compan
   - `modelResolver.js`: Model family/default resolver façade.
   - `modelCatalogService.js`: Shared model catalog source loading and dedupe.
   - `sparkAdapter.js`: Renderer-side Spark Model Hub IPC and MoE helpers.
+- **Agent harness (experimental foundation):** `src/agent-harness/`
+  - TypeScript: model profiles, master loop, tool registry, detection, harness runner.
+  - Approved sequence and acceptance criteria: `docs/agent-harness-approved-plan.md`.
+- **Electron IPC:** `electron/ipc/`
+  - `ipc-handlers.js`: Main process handler registrations (large; high churn).
+  - `agent-harness-handlers.js`: Harness-specific IPC surface.
+  - `code-tools-handlers.js`: Code agent / tool bridge handlers.
+- **Inference hygiene:** `electron/utils/sanitize-inference-messages.js` — normalizes LLM message payloads before inference.
 - **Electron Services:** `electron/services/`
   - `inference-orchestrator.js`: The "Cortex". Routes prompts to the best backend (Ollama/CUDA, OpenVINO/NPU) based on load and capability.
   - `spark-adapter.js`: Spark profile/backend/MoE routing adapter for the main process.
@@ -53,6 +63,9 @@ It is designed to be the "Forever Brain" that you own, independent of any compan
   - `casual-eval.js`: Quick sanity check for chat capabilities.
   - `coding-eval.js`: Benchmarks coding performance.
   - `research-eval.js`: Tests web search and synthesis.
+  - `agent-harness-smoke.js`: Harness behavior smoke (wired as `npm run agent-harness-smoke`).
+  - `inference-toolchain-smoke.js`: Production inference path smoke (`npm run inference-toolchain-smoke`).
+  - `inference-live-model-matrix.js`: Optional live Ollama matrix probe (`OLLAMA_LIVE=1`).
 
 ### ⚡ Key Commands
 ```bash
@@ -60,6 +73,9 @@ npm run dev          # Start the full stack (Electron + Vite)
 npm run app:spark    # Start the NVIDIA Spark Linux profile
 npm run eval:casual  # Run basic chat evaluation
 npm run eval:coding  # Run coding capability tests
+npm run agent-harness-smoke      # Agent harness foundation smoke
+npm run inference-toolchain-smoke # IPC → resolver → backend inference smoke
+npm run eval:release-gate        # Consolidated release gate script
 npm run build:win    # Build Windows installer
 ```
 
@@ -204,19 +220,30 @@ devforge/
 ├── electron/                 # Desktop app backend
 │   ├── main.js              # Electron main process
 │   ├── preload.js           # Secure IPC bridge
+│   ├── ipc/                 # IPC handler modules (split from monolith over time)
 │   └── services/            # Backend services (Inference, Research, etc.)
 ├── src/                     # React frontend
+│   ├── agent-harness/       # TS harness foundation (profiles, loop, tools)
 │   ├── components/          # UI components
 │   ├── stores/              # State management
 │   ├── services/            # Frontend services
 │   └── hooks/               # Custom hooks
 ├── scripts/                 # Evaluation and build scripts
-└── docs/                    # Documentation
+├── docs/                    # Documentation
+└── REFACTOR-BASELINE/       # Frozen refactor audit captures (optional reading)
 ```
 
 ---
 
 ## Documentation
+
+- [CHANGELOG](CHANGELOG.md) — version history
+- [Refactor slice log](REFACTOR-LOG.md) — `refactor/healthy-weight-*` branch progress
+- [Repository footprint](docs/repository-footprint.md) — doc map, heavy artifacts, large files
+- [Improvement ledger](docs/IMPROVEMENT-LEDGER.md)
+- [Agent harness canonical plan](docs/agent-harness-approved-plan.md)
+
+### Product & runtime
 
 - [Wireless Brain Plan](docs/wireless-brain-plan.md) (New!)
 - [Wireless Brain API Spec](docs/wireless-brain-api-spec.md)

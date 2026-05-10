@@ -1,5 +1,15 @@
 import React, { useState, useEffect, useCallback, memo } from 'react';
-import { WifiOff, Globe, RotateCcw, X, Minus, Square, Unplug } from 'lucide-react';
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Globe,
+  Minus,
+  RotateCcw,
+  Square,
+  Unplug,
+  WifiOff,
+  X,
+} from 'lucide-react';
 import { useAppStore } from '../../stores/appStore';
 import { pollingCoordinator } from '../../services/pollingCoordinator';
 import { api } from '../../utils/electronAPI';
@@ -15,25 +25,75 @@ const WORKSPACE_COLORS = {
 };
 
 function formatCurrentModelLabel(currentModel) {
-  const raw = String(currentModel || '').trim();
-  if (!raw) return 'No model';
-  if (/^npu:/i.test(raw)) {
-    const target = raw.slice(4).trim();
-    const parts = target.split(/[\\/]/).filter(Boolean);
-    return parts[parts.length - 1] || 'NPU model';
+  const label = getModelDisplayName(currentModel);
+  if (!label) return 'No model';
+  return shortenModelLabel(label, 42);
+}
+
+function stripModelSourcePrefix(value = '') {
+  const raw = String(value || '').trim();
+  if (/^gguf:/i.test(raw)) return raw.slice(5).trim();
+  if (/^npu:/i.test(raw)) return raw.slice(4).trim();
+  if (/^file:\/\//i.test(raw)) {
+    try {
+      return decodeURIComponent(new URL(raw).pathname || raw);
+    } catch {
+      return raw.replace(/^file:\/\//i, '').trim();
+    }
   }
-  return raw.split(':')[0] || raw;
+  return raw;
+}
+
+function getModelDisplayName(value = '') {
+  const target = stripModelSourcePrefix(value);
+  if (!target) return '';
+  const parts = target.split(/[\\/]/).filter(Boolean);
+  const basename = parts[parts.length - 1] || target;
+  return basename
+    .replace(/:latest$/i, '')
+    .replace(/\.gguf$/i, '')
+    .trim();
+}
+
+function shortenModelLabel(value = '', maxLength = 42) {
+  const raw = String(value || '').trim();
+  if (!raw || raw.length <= maxLength) return raw;
+  const tailLength = 12;
+  const headLength = Math.max(12, maxLength - tailLength - 1);
+  return `${raw.slice(0, headLength)}…${raw.slice(-tailLength)}`;
 }
 
 function normalizeModelKey(value = '') {
-  return String(value || '')
+  const displayName = getModelDisplayName(value);
+  return String(displayName || stripModelSourcePrefix(value) || value || '')
     .trim()
     .toLowerCase()
-    .replace(/:latest$/i, '');
+    .replace(/:latest$/i, '')
+    .replace(/\.gguf$/i, '')
+    .replace(/^local-/, '')
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function modelIdentityMatches(left = '', right = '') {
+  const leftKey = normalizeModelKey(left);
+  const rightKey = normalizeModelKey(right);
+  return Boolean(leftKey && rightKey && leftKey === rightKey);
+}
+
+function isPathBackedModel(value = '') {
+  const raw = String(value || '').trim();
+  return /^gguf:/i.test(raw) || /^npu:/i.test(raw) || /\.gguf(?:$|[?#])/i.test(raw);
+}
+
+function getModelStatusLabel(modelStatus, isLoaded) {
+  if (modelStatus === 'loading') return 'Loading';
+  if (modelStatus === 'warming') return 'Warming';
+  return isLoaded ? 'Loaded' : 'Unloaded';
 }
 
 // Memoized title bar to prevent re-renders
 const TitleBar = memo(function TitleBar({ 
+  alphaReadiness,
   accentColor, 
   currentModel, 
   modelStatus, 
@@ -55,6 +115,38 @@ const TitleBar = memo(function TitleBar({
   const statusTone = hasActiveModel
     ? (isActiveModelLoaded ? 'loaded' : 'unloaded')
     : 'none';
+  const modelLabel = formatCurrentModelLabel(currentModel);
+  const modelTitle = stripModelSourcePrefix(currentModel) || currentModel || 'No model selected';
+  const modelStatusLabel = getModelStatusLabel(modelStatus, statusTone === 'loaded');
+  const modelStatusClassName = modelStatus === 'loading' || modelStatus === 'warming'
+    ? 'border-amber-400/30 bg-amber-500/10 text-amber-200'
+    : statusTone === 'loaded'
+      ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200'
+      : 'border-zinc-500/35 bg-zinc-500/10 text-zinc-300';
+  const alphaStatus = alphaReadiness?.status || 'needs_setup';
+  const alphaTone = alphaStatus === 'ready'
+    ? {
+        icon: CheckCircle2,
+        label: 'Alpha Ready',
+        className: 'border-emerald-400/20 bg-emerald-500/10 text-emerald-200',
+      }
+    : alphaStatus === 'degraded'
+      ? {
+          icon: AlertTriangle,
+          label: 'Alpha Degraded',
+          className: 'border-amber-400/20 bg-amber-500/10 text-amber-200',
+        }
+      : {
+          icon: AlertTriangle,
+          label: 'Needs Setup',
+          className: 'border-rose-400/20 bg-rose-500/10 text-rose-200',
+        };
+  const AlphaIcon = alphaTone.icon;
+  const alphaTitle = (alphaReadiness?.checks || [])
+    .filter((check) => check.status !== 'ready')
+    .map((check) => `${check.label}: ${check.message}`)
+    .slice(0, 3)
+    .join('\n') || 'Anvil paid-alpha readiness';
 
   return (
     <header 
@@ -67,10 +159,18 @@ const TitleBar = memo(function TitleBar({
           className="w-6 h-6 rounded-md flex items-center justify-center"
           style={{ background: accentColor }}
         >
-          <span className="text-white text-[10px] font-bold">DF</span>
+          <span className="text-white text-[10px] font-bold">A</span>
         </div>
         
-        <span className="text-[13px] font-semibold text-text-primary">DevForge</span>
+        <span className="text-[13px] font-semibold text-text-primary">Anvil</span>
+
+        <span
+          className={`hidden md:inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] font-medium ${alphaTone.className}`}
+          title={alphaTitle}
+        >
+          <AlphaIcon size={10} />
+          {alphaTone.label}
+        </span>
 
         {sovereigntyStatus && (
           <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium ${
@@ -94,7 +194,7 @@ const TitleBar = memo(function TitleBar({
       </div>
 
       {/* Center: Model status */}
-      <div className="absolute left-1/2 -translate-x-1/2 flex items-center gap-2 px-2.5 py-1 rounded-md bg-white/[0.03] border border-white/[0.06]" style={{ WebkitAppRegion: 'no-drag' }}>
+      <div className="absolute left-1/2 -translate-x-1/2 flex max-w-[48vw] items-center gap-2 rounded-md border border-white/[0.06] bg-white/[0.03] px-2.5 py-1" style={{ WebkitAppRegion: 'no-drag' }}>
         <div className={`w-1.5 h-1.5 rounded-full ${
           modelStatus === 'loading' || modelStatus === 'warming'
             ? 'bg-amber-400'
@@ -102,16 +202,12 @@ const TitleBar = memo(function TitleBar({
               ? 'bg-emerald-400'
               : 'bg-zinc-600'
         }`} />
-        <span className="text-[11px] text-zinc-400 font-medium">
-          {formatCurrentModelLabel(currentModel)}
+        <span className="max-w-[28vw] truncate text-[11px] font-medium text-zinc-300" title={modelTitle}>
+          {modelLabel}
         </span>
         {hasActiveModel && (
-          <span className={`rounded-full border px-1.5 py-0.5 text-[10px] ${
-            statusTone === 'loaded'
-              ? 'border-emerald-400/30 bg-emerald-500/10 text-emerald-200'
-              : 'border-zinc-500/35 bg-zinc-500/10 text-zinc-300'
-          }`}>
-            {statusTone === 'loaded' ? 'Loaded' : 'Unloaded'}
+          <span className={`rounded-full border px-1.5 py-0.5 text-[10px] ${modelStatusClassName}`}>
+            {modelStatusLabel}
           </span>
         )}
         {hasActiveModel && (
@@ -228,6 +324,7 @@ export function Layout({ children }) {
   const [isRestartingApp, setIsRestartingApp] = useState(false);
   const [isEjectingModel, setIsEjectingModel] = useState(false);
   const [isActiveModelLoaded, setIsActiveModelLoaded] = useState(false);
+  const [alphaReadiness, setAlphaReadiness] = useState(null);
   
   const accentColor = WORKSPACE_COLORS[currentWorkspace] || WORKSPACE_COLORS.casual;
 
@@ -288,26 +385,45 @@ export function Layout({ children }) {
       return;
     }
 
-    const currentKey = normalizeModelKey(modelName);
+    let loadedByRuntimeList = false;
     try {
       if (window?.electronAPI?.sparkModelHubLoadedModels) {
         const loaded = await window.electronAPI.sparkModelHubLoadedModels();
         const loadedModels = Array.isArray(loaded?.models) ? loaded.models : [];
-        const isLoaded = loadedModels.some((entry) => {
-          const candidate = String(entry?.name || entry?.model || '').trim();
-          return normalizeModelKey(candidate) === currentKey;
+        loadedByRuntimeList = loadedModels.some((entry) => {
+          const candidates = [
+            entry?.id,
+            entry?.name,
+            entry?.model,
+            entry?.path,
+          ];
+          return candidates.some((candidate) => modelIdentityMatches(candidate, modelName));
         });
-        setIsActiveModelLoaded(Boolean(isLoaded));
-        return;
       }
     } catch (_) {
       // Fall through to runtime-state heuristic.
     }
 
-    const effective = normalizeModelKey(
-      llmRuntimeState?.effectiveModel || llmRuntimeState?.requestedModel || ''
-    );
-    setIsActiveModelLoaded(Boolean(effective && effective === currentKey && modelStatus === 'online'));
+    const runtimeModelMatches = [
+      llmRuntimeState?.effectiveModel,
+      llmRuntimeState?.requestedModel,
+      llmRuntimeState?.resolvedModel,
+    ].some((candidate) => modelIdentityMatches(candidate, modelName));
+    const backendId = String(
+      llmRuntimeState?.currentBackend?.id
+      || llmRuntimeState?.currentBackend?.name
+      || llmRuntimeState?.currentBackend
+      || ''
+    ).toLowerCase();
+    const pathBackedRuntimeReady = isPathBackedModel(modelName)
+      && modelStatus === 'online'
+      && (!backendId || backendId.includes('llama') || backendId.includes('openvino') || backendId.includes('npu'));
+
+    setIsActiveModelLoaded(Boolean(
+      loadedByRuntimeList
+      || (modelStatus === 'online' && runtimeModelMatches)
+      || pathBackedRuntimeReady
+    ));
   }, [currentModel, llmRuntimeState, modelStatus]);
 
   const handleEjectModel = async () => {
@@ -402,9 +518,27 @@ export function Layout({ children }) {
     return () => unsubscribePolling?.();
   }, [refreshLoadedStatus]);
 
+  const refreshAlphaReadiness = useCallback(async () => {
+    const result = await api.getAlphaReadiness({
+      currentWorkspace,
+    });
+    setAlphaReadiness(result);
+  }, [currentWorkspace]);
+
+  useEffect(() => {
+    void refreshAlphaReadiness();
+    const unsubscribePolling = pollingCoordinator.subscribe('layout:alpha-readiness', {
+      run: refreshAlphaReadiness,
+      intervalMs: 30000,
+      hiddenIntervalMs: 120000,
+    });
+    return () => unsubscribePolling?.();
+  }, [refreshAlphaReadiness]);
+
   return (
     <div className="h-screen flex flex-col overflow-hidden bg-surface-base">
       <TitleBar 
+        alphaReadiness={alphaReadiness}
         accentColor={accentColor}
         currentModel={currentModel}
         modelStatus={modelStatus}

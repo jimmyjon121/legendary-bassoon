@@ -308,6 +308,16 @@ export const api = {
   openExternal: (url) => safeCall('openExternal', [url], { success: false }),
   openPath: (targetPath) => safeCall('openPath', [targetPath], { success: false }),
   openInExplorer: (targetPath) => safeCall('openInExplorer', [targetPath], { success: false }),
+  getDevForgeHandoffStatus: (projectPath) =>
+    safeCall('getDevForgeHandoffStatus', [projectPath], { success: false }),
+  openInDevForge: (projectPath, options = {}) =>
+    safeCall('openInDevForge', [projectPath, options], { success: false }),
+  getAlphaReadiness: (payload = {}) =>
+    safeCall('getAlphaReadiness', [payload], {
+      success: false,
+      status: 'needs_setup',
+      checks: [],
+    }),
 
   // Backup
   createBackup: (payload) => safeCall('createBackup', [payload], { success: false }),

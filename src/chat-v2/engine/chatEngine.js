@@ -291,7 +291,40 @@ function parseApproxModelSizeGb(modelName, modelInfo = null) {
   return `${approxGb.toFixed(1)} GB`;
 }
 
-function buildColdLoadStatusLine(modelName, runtimeState = null, modelInfo = null) {
+function stripRuntimeModelPrefix(value = '') {
+  const raw = String(value || '').trim();
+  if (/^gguf:/i.test(raw)) return raw.slice(5).trim();
+  if (/^npu:/i.test(raw)) return raw.slice(4).trim();
+  if (/^file:\/\//i.test(raw)) {
+    try {
+      return decodeURIComponent(new URL(raw).pathname || raw);
+    } catch {
+      return raw.replace(/^file:\/\//i, '').trim();
+    }
+  }
+  return raw;
+}
+
+function formatRuntimeModelLabel(value = '') {
+  const target = stripRuntimeModelPrefix(value);
+  if (!target) return 'the local model';
+  const parts = target.split(/[\\/]/).filter(Boolean);
+  const basename = (parts[parts.length - 1] || target)
+    .replace(/:latest$/i, '')
+    .replace(/\.gguf$/i, '')
+    .trim();
+  if (!basename) return 'the local model';
+  if (basename.length <= 48) return basename;
+  return `${basename.slice(0, 35)}...${basename.slice(-10)}`;
+}
+
+function normalizeRuntimeModelKey(value = '') {
+  return formatRuntimeModelLabel(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '');
+}
+
+function buildColdLoadStatusLine(modelName, runtimeState = null, modelInfo = null, options = {}) {
   const normalizedModel = String(modelName || '').trim() || 'the model';
   const targetBackend = runtimeState?.currentBackend || {};
   const targetDevice = String(
@@ -301,11 +334,22 @@ function buildColdLoadStatusLine(modelName, runtimeState = null, modelInfo = nul
     || ''
   ).trim();
   const sizeLabel = parseApproxModelSizeGb(normalizedModel, modelInfo);
-  const normalizedModelLabel = normalizedModel.replace(/:latest$/i, '');
-  let line = `Preparing ${normalizedModelLabel}`;
-  if (sizeLabel) line += ` (${sizeLabel})`;
-  if (targetDevice) line += ` on ${targetDevice}`;
-  return `${line} — first token usually takes 30-60s on cold-start.`;
+  const modelLabel = formatRuntimeModelLabel(normalizedModel);
+  const targetLabel = targetDevice ? `${modelLabel} on ${targetDevice}` : modelLabel;
+
+  if (options.firstNotice) {
+    const sizeHint = sizeLabel ? ` (${sizeLabel})` : '';
+    return `Starting local reply with ${targetLabel}${sizeHint}.`;
+  }
+
+  const variants = [
+    `Working locally with ${targetLabel}.`,
+    `Composing with ${modelLabel}.`,
+    targetDevice ? `Using ${targetDevice} for this turn.` : 'Using the local runtime for this turn.',
+    'Checking the conversation context.',
+  ];
+  const index = Math.abs(Number(options.turnIndex || 0)) % variants.length;
+  return variants[index];
 }
 
 function stripPromptLeak(text) {
@@ -709,6 +753,8 @@ export class ChatV2Engine {
     this.timeoutRetryCountsByMessageId = new Map();
     this.branchMessagesById = new Map([[this.state.currentBranchId, []]]);
     this.warmedModels = new Set();
+    this.modelStatusNoticeKeys = new Set();
+    this.statusTurnCounter = 0;
     this.runtimeRefreshPromise = null;
     this.lastRuntimeRefreshAt = 0;
     this.streamWatchdogTimer = null;
@@ -755,6 +801,7 @@ export class ChatV2Engine {
     this.branchMessagesById.clear();
     this.timeoutRetryCountsByMessageId.clear();
     this.warmedModels.clear();
+    this.modelStatusNoticeKeys.clear();
     this.runtimeRefreshPromise = null;
   }
 
@@ -1143,7 +1190,14 @@ export class ChatV2Engine {
       || this.state.model
       || 'the model'
     ).trim();
-    return buildColdLoadStatusLine(preferred, this.state.runtimeState, modelInfo);
+    const noticeKey = normalizeRuntimeModelKey(preferred);
+    const firstNotice = Boolean(noticeKey && !this.modelStatusNoticeKeys.has(noticeKey));
+    if (noticeKey) this.modelStatusNoticeKeys.add(noticeKey);
+    this.statusTurnCounter += 1;
+    return buildColdLoadStatusLine(preferred, this.state.runtimeState, modelInfo, {
+      firstNotice,
+      turnIndex: this.statusTurnCounter,
+    });
   }
 
   async sendUserMessage(text, metadata = {}) {

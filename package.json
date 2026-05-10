@@ -1,7 +1,7 @@
 {
   "name": "devforge",
   "version": "0.4.8",
-  "description": "Sovereign AI Development Environment - Local, Private, Unrestricted",
+  "description": "Anvil Hub - local-first AI workspace and DevForge IDE handoff",
   "main": "electron/main.js",
   "author": "Christopher",
   "license": "UNLICENSED",
@@ -37,6 +37,8 @@
     "eval:perf-ui-polling": "node scripts/perf-ui-polling.js",
     "eval:perf-gate": "node scripts/release-perf-gate.js",
     "eval:model-hub": "node scripts/model-hub-eval.js",
+    "eval:devforge-handoff": "node scripts/devforge-handoff-smoke.mjs",
+    "eval:alpha-ship": "node scripts/alpha-ship-smoke.mjs",
     "eval:model-selector": "node scripts/model-selector-catalogue-smoke.js",
     "eval:ipc-security": "node scripts/ipc-security-eval.js",
     "eval:long-context": "node scripts/long-context-eval.js",
@@ -118,7 +120,7 @@
   },
   "build": {
     "appId": "com.devforge.app",
-    "productName": "DevForge",
+    "productName": "Anvil",
     "directories": {
       "output": "release"
     },
@@ -171,7 +173,7 @@
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
-      "shortcutName": "DevForge",
+      "shortcutName": "Anvil",
       "deleteAppDataOnUninstall": false,
       "installerIcon": "assets/icon.ico",
       "uninstallerIcon": "assets/icon.ico",

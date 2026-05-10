@@ -9,7 +9,6 @@ import {
   Loader2,
   Copy,
   Check,
-  RefreshCw,
   Eye,
   ChevronDown,
   ChevronRight,
@@ -325,7 +324,7 @@ export function CodeChatPanel({
   rootPath,
   projectFiles,
   openFilesList,
-  onExtractPlan,
+  onExtractPlan: _onExtractPlan,
 }) {
   const [input, setInput] = useState('');
   const [applyingPatch, setApplyingPatch] = useState(null);
@@ -556,11 +555,11 @@ export function CodeChatPanel({
           : 'What bugs should I look out for in this project?',
       },
       {
-        icon: Zap, label: 'Optimize', color: 'text-amber-400',
+        icon: Zap, label: 'Improve Ideas', color: 'text-amber-400',
         prompt: hasSelection
-          ? 'Optimize the selected code for better performance and readability.'
-          : hasFile ? `Optimize ${fileName} for better performance.`
-          : 'What are the main optimization opportunities?',
+          ? 'Suggest safe improvements for the selected code without editing it.'
+          : hasFile ? `Suggest safe improvements for ${fileName} without editing it.`
+          : 'What are the main improvement opportunities in this project?',
       },
       {
         icon: Lightbulb, label: 'Explain', color: 'text-blue-400',
@@ -570,25 +569,11 @@ export function CodeChatPanel({
           : 'Give me an overview of this project.',
       },
       {
-        icon: RefreshCw, label: 'Refactor', color: 'text-purple-400',
+        icon: FileSearch, label: 'Project Map', color: 'text-cyan-400',
         prompt: hasSelection
-          ? 'Refactor the selected code following best practices.'
-          : hasFile ? `Refactor ${fileName} following best practices.`
-          : 'Suggest refactoring opportunities.',
-      },
-      {
-        icon: Terminal, label: 'Write Tests', color: 'text-emerald-400',
-        prompt: hasSelection
-          ? 'Write unit tests for the selected code.'
-          : hasFile ? `Write unit tests for ${fileName}.`
-          : 'Help me set up a testing framework.',
-      },
-      {
-        icon: FileSearch, label: 'Document', color: 'text-cyan-400',
-        prompt: hasSelection
-          ? 'Add JSDoc comments to the selected code.'
-          : hasFile ? `Add documentation to ${fileName}.`
-          : 'Help me create documentation for this project.',
+          ? 'Explain where this selected code fits in the project.'
+          : hasFile ? `Explain where ${fileName} fits in the project.`
+          : 'Map the important files and folders in this project.',
       },
     ];
   }, [currentFile, selectedCode]);

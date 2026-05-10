@@ -43,6 +43,8 @@ const { createModelExperienceWorkbench } = require('./services/model-experience-
 const { createModelLoadConfidence } = require('./services/model-load-confidence');
 const { detectSparkProfile } = require('./services/spark-profile');
 const { inspectMoE } = require('./services/moe-detector');
+const { createDevForgeHandoff } = require('./services/devforge-handoff');
+const { createAlphaReadiness } = require('./services/alpha-readiness');
 
 // =============================================================================
 // LAZY SERVICE LOADING - Services are loaded on-demand for faster startup
@@ -5378,6 +5380,61 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
   ipcMain.handle('perf:updateRenderer', (_, payload = {}) => {
     updateRendererPerfSnapshot(payload);
     return { success: true };
+  });
+
+  const devforgeHandoff = createDevForgeHandoff({ shell });
+  const alphaReadiness = createAlphaReadiness({
+    db,
+    devforgeHandoff,
+    getAppVersion: () => app.getVersion(),
+    homeDir: app.getPath('home'),
+    isPackaged: app.isPackaged,
+    packageJsonPath: path.resolve(__dirname, '..', 'package.json'),
+    store,
+  });
+
+  ipcMain.handle('alpha:getReadiness', async (_, payload = {}) => {
+    try {
+      return await alphaReadiness.getReadiness(payload || {});
+    } catch (error) {
+      return {
+        schemaVersion: 'anvil.alphaReadiness.v1',
+        success: false,
+        status: 'needs_setup',
+        checks: [{
+          id: 'alpha_readiness',
+          label: 'Alpha Readiness',
+          status: 'needs_setup',
+          message: error.message,
+          action: 'Restart Anvil and run the alpha smoke gate.',
+        }],
+        generatedAt: new Date().toISOString(),
+      };
+    }
+  });
+
+  ipcMain.handle('devforge:getHandoffStatus', async (_, payload = {}) => {
+    try {
+      return devforgeHandoff.getStatus(payload?.projectPath || '');
+    } catch (error) {
+      return {
+        success: false,
+        code: 'DEVFORGE_HANDOFF_STATUS_FAILED',
+        error: error.message,
+      };
+    }
+  });
+
+  ipcMain.handle('devforge:openProject', async (_, payload = {}) => {
+    try {
+      return await devforgeHandoff.openProject(payload || {});
+    } catch (error) {
+      return {
+        success: false,
+        code: 'DEVFORGE_HANDOFF_FAILED',
+        error: error.message,
+      };
+    }
   });
 
   // Shell

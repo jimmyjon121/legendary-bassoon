@@ -9,6 +9,7 @@ const checks = [
   { id: 'coding', command: 'node scripts/coding-eval.js' },
   { id: 'chat-v2', command: 'node scripts/chat-v2-eval.js' },
   { id: 'perf', command: 'node scripts/release-perf-gate.js' },
+  { id: 'alpha-ship', command: 'node scripts/alpha-ship-smoke.mjs' },
   { id: 'model-hub', command: 'node scripts/model-hub-eval.js' },
   { id: 'ipc-security', command: 'node scripts/ipc-security-eval.js' },
   { id: 'normal-mode', command: 'node scripts/normal-mode-eval.js' },

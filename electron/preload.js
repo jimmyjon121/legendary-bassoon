@@ -334,6 +334,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getAppPath: () => ipcRenderer.invoke('app:getPath'),
   getVersion: () => ipcRenderer.invoke('app:getVersion'),
   isPackaged: () => ipcRenderer.invoke('app:isPackaged'),
+  getAlphaReadiness: (payload = {}) => ipcRenderer.invoke('alpha:getReadiness', payload || {}),
   getIpcDeprecationStats: () => ipcRenderer.invoke('ipc:getDeprecationStats'),
   perfGetSnapshot: () => ipcRenderer.invoke('perf:getSnapshot'),
   perfSubscribe: () => ipcRenderer.invoke('perf:subscribe'),
@@ -352,6 +353,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   // Shell
   openExternal: (url) => ipcRenderer.invoke('shell:openExternal', url),
   openPath: (path) => ipcRenderer.invoke('shell:openPath', path),
+  getDevForgeHandoffStatus: (projectPath) =>
+    ipcRenderer.invoke('devforge:getHandoffStatus', { projectPath }),
+  openInDevForge: (projectPath, options = {}) =>
+    ipcRenderer.invoke('devforge:openProject', { projectPath, ...(options || {}) }),
 
   // ============================================
   // Hardware Detection & Monitoring

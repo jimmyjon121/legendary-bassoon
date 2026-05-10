@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Agent harness + inference hardening:** Added Electron IPC plumbing for the agent harness (`electron/ipc/agent-harness-handlers.js`, `electron/ipc/index.js`), extended preload/main wiring, sanitized inference-bound message shapes (`electron/utils/sanitize-inference-messages.js`), and documented the codebase/doc layout and large-file inventory in [`docs/repository-footprint.md`](docs/repository-footprint.md). New checks: `npm run inference-toolchain-smoke`; optional live matrix `OLLAMA_LIVE=1 node scripts/inference-live-model-matrix.js`.
+
 ## v0.4.8 — Mosaic Gate 1 Correction + Phase 2 Acceptance Recovery
 
 - **Mosaic Gate 1: PASS** (corrected). The v0.4.6 "FAIL" used a ratio that was structurally capped near `1.0x` for any model that already fits on RTX-only. The corrected device-pool ratio is `6.225x` (threshold `1.3x`) at `100%` RTX-only baseline speed. Phase 3 status moves from `cancelled` to `gate1-passed`.
