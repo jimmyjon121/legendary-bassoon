@@ -2056,6 +2056,14 @@ async function setupIpcHandlers(ipcMain, mainWindow, store) {
     console.error('Failed to initialize database:', error);
   }
 
+  // Register agent harness IPC channels (require db to be available)
+  try {
+    const { setupModularHandlers } = require('./ipc/index');
+    setupModularHandlers(ipcMain, mainWindow, store, db);
+  } catch (error) {
+    console.error('Failed to register modular IPC handlers:', error);
+  }
+
   const dataService = new DataService({
     getDb: () => db,
     saveDatabase,
