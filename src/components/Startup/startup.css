@@ -1,5 +1,5 @@
 /*
- * DevForge Startup Screen
+ * Anvil Startup Screen
  *
  * Design: One coordinated entrance. No layered flashing.
  * Everything starts invisible, then the .su--entered class triggers
@@ -592,7 +592,7 @@
 .su-logo {
   font-size: 1.35rem;
   font-weight: 600;
-  letter-spacing: 0.26em;
+  letter-spacing: 0.52em;
   text-transform: uppercase;
   color: rgba(255, 255, 255, 0.9);
   margin: 0;
@@ -1288,7 +1288,7 @@
 
   .su-logo {
     font-size: 1.1rem;
-    letter-spacing: 0.2em;
+    letter-spacing: 0.42em;
   }
 
   .su-tagline {
