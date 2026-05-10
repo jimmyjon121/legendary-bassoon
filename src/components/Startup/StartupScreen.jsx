@@ -157,11 +157,11 @@ function ProgressRing({ progress, size = 120, strokeWidth = 2.5, celebrate = fal
           strokeDasharray={`${circumference * 0.12} ${circumference * 0.14}`}
           strokeDashoffset={-offset * 0.35}
         />
-        {/* DF reactor seal: intentionally geometric and quiet until completion. */}
+        {/* Anvil seal: geometric A mark, quiet until completion. */}
         <g className={`su-ring-seal ${celebrate ? 'is-locked' : ''}`} transform={`translate(${size / 2} ${size / 2})`}>
           <circle className="su-ring-seal__halo" r={22} />
-          <path className="su-ring-seal__stroke" d="M -13 -16 L -13 16 L -2 16 C 8 16 14 9 14 0 C 14 -9 8 -16 -2 -16 Z" />
-          <path className="su-ring-seal__stroke" d="M -2 -16 L 15 -16 M -2 0 L 10 0 M -2 16 L -2 -16" />
+          <path className="su-ring-seal__stroke" d="M -13 16 L 0 -16 L 13 16" />
+          <path className="su-ring-seal__stroke" d="M -7 3 L 7 3" />
           <path className="su-ring-seal__spark" d="M 0 -27 L 0 -21 M 0 21 L 0 27 M -27 0 L -21 0 M 21 0 L 27 0" />
         </g>
         {/* Track */}
@@ -868,7 +868,7 @@ export function StartupScreen({ onComplete }) {
 
         {/* Logo */}
         <h1 className="su-logo">
-          {'DEVFORGE'.split('').map((char, i) => (
+          {'ANVIL'.split('').map((char, i) => (
             <span key={i} className="su-logo-char" style={{ animationDelay: `${0.48 + i * 0.045}s` }}>
               {char}
             </span>
@@ -970,7 +970,7 @@ export function StartupScreen({ onComplete }) {
           Replaces the old floating brand-meta above the ring so the ring
           can own the upper centerline. */}
       <div className="su-version-stamp" aria-hidden="true">
-        <span className="su-version-mark">DEVFORGE</span>
+        <span className="su-version-mark">ANVIL</span>
         <span className="su-version-tag">{appVersion}</span>
       </div>
 
