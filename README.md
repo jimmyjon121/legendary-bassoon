@@ -17,7 +17,7 @@ The cloud AI providers keep raising prices. APIs get deprecated. Terms change ov
 
 [Why Local?](#why-local-ai) • [Features](#features) • [Quick Start](#quick-start) • [For Agents](#-for-agents--developers) • [Documentation](#documentation)
 
-*Last Updated: May 5, 2026*
+*Last Updated: May 10, 2026*
 
 </div>
 
@@ -25,7 +25,9 @@ The cloud AI providers keep raising prices. APIs get deprecated. Terms change ov
 
 ## What is this?
 
-DevForge is a **sovereign AI workstation**. It's a desktop application that turns your computer into a private AI server and workspace. It orchestrates local LLMs (via Ollama, Llama.cpp, OpenVINO), manages your personal data (SQLite + Vector DB), and provides a suite of tools for coding, research, and writing—all without sending a single byte to the cloud.
+**Anvil Hub** (package: `devforge`) is a **local-first AI workspace**: chat, model hub, Vault/private workspace affordances, research flows, and a **Code** surface for inspection and light agent tasks. **DevForge IDE** is an optional deep-coding companion launched via handoff when you configure a binary or checkout path—see [`ALPHA_README.md`](ALPHA_README.md).
+
+Historically branded **DevForge**, the app is still a **sovereign AI workstation**: it orchestrates local LLMs (Ollama, Llama.cpp, OpenVINO), keeps data local (SQLite + vector stores where enabled), and supports coding, research, and writing without sending traffic to the cloud by default.
 
 It is designed to be the "Forever Brain" that you own, independent of any company's API or policy changes.
 
@@ -44,14 +46,16 @@ It is designed to be the "Forever Brain" that you own, independent of any compan
 - **Agent harness (experimental foundation):** `src/agent-harness/`
   - TypeScript: model profiles, master loop, tool registry, detection, harness runner.
   - Approved sequence and acceptance criteria: `docs/agent-harness-approved-plan.md`.
-- **Electron IPC:** `electron/ipc/`
-  - `ipc-handlers.js`: Main process handler registrations (large; high churn).
-  - `agent-harness-handlers.js`: Harness-specific IPC surface.
-  - `code-tools-handlers.js`: Code agent / tool bridge handlers.
+- **Electron IPC:** `electron/ipc/` (wired via `setupModularHandlers` from `electron/ipc/index.js`)
+  - `ipc-handlers.js`: Legacy + aggregate registrations (large; high churn).
+  - `agent-harness-handlers.js`: Harness-specific IPC (`agent:harness:*`).
+  - `code-tools-handlers.js`: Code agent / tool bridge.
+  - Other split modules include `ai-handlers.js`, `research-handlers.js`, `model-handlers.js`, `storage-handlers.js`, `system-handlers.js`, `web-search-handlers.js`, `image-handlers.js`, `spark-model-hub-handlers.js`.
 - **Inference hygiene:** `electron/utils/sanitize-inference-messages.js` — normalizes LLM message payloads before inference.
 - **Electron Services:** `electron/services/`
   - `inference-orchestrator.js`: The "Cortex". Routes prompts to the best backend (Ollama/CUDA, OpenVINO/NPU) based on load and capability.
   - `spark-adapter.js`: Spark profile/backend/MoE routing adapter for the main process.
+  - `alpha-readiness.js` / `devforge-handoff.js`: Paid-alpha readiness checks and optional **Open Full DevForge IDE** handoff.
   - `research/`: Autonomous web research agents (browser automation, content extraction).
   - `intent-compiler/`: Natural language to system action translation.
 - **Frontend:** `src/`
@@ -66,6 +70,7 @@ It is designed to be the "Forever Brain" that you own, independent of any compan
   - `agent-harness-smoke.js`: Harness behavior smoke (wired as `npm run agent-harness-smoke`).
   - `inference-toolchain-smoke.js`: Production inference path smoke (`npm run inference-toolchain-smoke`).
   - `inference-live-model-matrix.js`: Optional live Ollama matrix probe (`OLLAMA_LIVE=1`).
+  - `alpha-ship-smoke.mjs` / `devforge-handoff-smoke.mjs`: Paid-alpha readiness + IDE handoff contract checks (`npm run eval:alpha-ship`, `npm run eval:devforge-handoff`).
 
 ### ⚡ Key Commands
 ```bash
@@ -75,6 +80,8 @@ npm run eval:casual  # Run basic chat evaluation
 npm run eval:coding  # Run coding capability tests
 npm run agent-harness-smoke      # Agent harness foundation smoke
 npm run inference-toolchain-smoke # IPC → resolver → backend inference smoke
+npm run eval:alpha-ship          # Paid-alpha readiness + handoff smoke chain
+npm run eval:devforge-handoff    # DevForge IDE handoff IPC/schema smoke
 npm run eval:release-gate        # Consolidated release gate script
 npm run build:win    # Build Windows installer
 ```
@@ -203,8 +210,8 @@ DevForge's **auto-optimization** detects your model and adjusts settings for bes
 
 | Layer | Technology |
 |-------|------------|
-| Desktop | Electron 28 |
-| Frontend | React 18 + Vite |
+| Desktop | Electron 32 |
+| Frontend | React 18 + Vite 5 |
 | Styling | Tailwind CSS |
 | State | Zustand |
 | Database | SQLite |
@@ -242,6 +249,8 @@ devforge/
 - [Repository footprint](docs/repository-footprint.md) — doc map, heavy artifacts, large files
 - [Improvement ledger](docs/IMPROVEMENT-LEDGER.md)
 - [Agent harness canonical plan](docs/agent-harness-approved-plan.md)
+- [Anvil paid alpha](ALPHA_README.md) — scope, boundaries, setup checklist
+- [Alpha ship plan](ALPHA_SHIP_PLAN.md) / [Alpha ship baseline](ALPHA_SHIP_BASELINE.md)
 
 ### Product & runtime
 

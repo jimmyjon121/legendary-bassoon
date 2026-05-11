@@ -12,6 +12,8 @@ Snapshot of **documentation layout**, **large or generated artifacts**, and **no
 | [docs/architecture.md](architecture.md) | High-level system shape |
 | [docs/ipc-api.md](ipc-api.md) | Renderer ↔ main IPC contract |
 | [docs/agent-harness-approved-plan.md](agent-harness-approved-plan.md) | Canonical coding-agent harness plan |
+| [ALPHA_README.md](../ALPHA_README.md) | Paid-alpha product scope, boundaries, DevForge IDE handoff |
+| [ALPHA_SHIP_PLAN.md](../ALPHA_SHIP_PLAN.md) / [ALPHA_SHIP_BASELINE.md](../ALPHA_SHIP_BASELINE.md) | Alpha ship checklist and baseline notes |
 | [docs/IMPROVEMENT-LEDGER.md](IMPROVEMENT-LEDGER.md) | Consolidated improvement / planning ledger |
 | [docs/release-notes.md](release-notes.md) | Long-form release material (moved from root) |
 | [docs/handoffs/](handoffs/) | Human handoff notes (e.g. `2026-02-12.md`) |

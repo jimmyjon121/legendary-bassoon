@@ -3,6 +3,7 @@
 ## Unreleased
 
 - **Agent harness + inference hardening:** Added Electron IPC plumbing for the agent harness (`electron/ipc/agent-harness-handlers.js`, `electron/ipc/index.js`), extended preload/main wiring, sanitized inference-bound message shapes (`electron/utils/sanitize-inference-messages.js`), and documented the codebase/doc layout and large-file inventory in [`docs/repository-footprint.md`](docs/repository-footprint.md). New checks: `npm run inference-toolchain-smoke`; optional live matrix `OLLAMA_LIVE=1 node scripts/inference-live-model-matrix.js`.
+- **Paid alpha / Anvil UX (slices 9–14):** Readiness and sidebar affordances, alpha noise cleanup in layout/code surfaces, user-facing **DevForge → Anvil** copy, startup rebrand and animation polish, and a fix so **`agent:harness:*`** channels register when `setupModularHandlers` runs (`electron/ipc-handlers.js`). Main-process helpers: `electron/services/alpha-readiness.js`, `electron/services/devforge-handoff.js`. Smokes: `npm run eval:alpha-ship`, `npm run eval:devforge-handoff`. Operator docs: [`ALPHA_README.md`](ALPHA_README.md), [`ALPHA_SHIP_PLAN.md`](ALPHA_SHIP_PLAN.md), [`ALPHA_SHIP_BASELINE.md`](ALPHA_SHIP_BASELINE.md).
 
 ## v0.4.8 — Mosaic Gate 1 Correction + Phase 2 Acceptance Recovery
 
